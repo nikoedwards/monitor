@@ -1,23 +1,114 @@
 # Monitor Intelligence Hub
 
-一个用于汇总 Marketing、PR、社媒、红人、电商和用户反馈数据的本地 MVP。
+精简版「Meltwater」——以**品牌为根**的品牌 / 竞品数据情报平台。围绕真实数据采集，把销售、营销、用户之声、网页动态聚合到一个工作区，并支持跨品牌竞品对比。
+
+- 后端：FastAPI + Uvicorn + Pydantic + SQLite（WAL），连接器（Connector）框架驱动真实采集。
+- 前端：React + Vite + TypeScript + React Router + TanStack Query + Recharts，Tailwind v4 + Geist，Vercel 风格亮/暗双主题（设计参考根目录 `DESIGN.md`）。
+- 截图引擎：优先 Playwright（整页），否则回退本机 Edge/Chrome，再回退 SVG 文本快照。
+
+## 信息架构
+
+```
+品牌（自家 / 竞品）
+├── 经营总览        跨维度 KPI 与高优先级信号
+├── 销售监控        Amazon / 独立站 / 其他电商 / 线下（时序 + 人工录入）
+├── 营销监控        媒体公关 / 广告 / 红人 / 社群 / 社交
+├── 用户之声(VoC)   情感·主题分析、预警、责任分派、闭环
+├── 网页快照        每日截图 + 文本变更分析 + 历史回溯
+└── 数据源采集      连接器控制台（分档采集）
+
+全局：竞品对比 · 品牌管理（品牌 / 产品 / 链接）
+```
+
+## 数据源分档
+
+| 档位 | 含义 | 连接器 |
+| --- | --- | --- |
+| 第 1 档 | 免费、无需凭证、可直接采真实数据 | Google News、Reddit 搜索、App Store 评论、品牌站点分析、网页快照 |
+| 第 2 档 | 需配置凭证后启用 | Meta 广告库、YouTube、Discord、Facebook 群组 |
+| 第 3 档 | 付费 / 难获取，预留接缝 + 手动录入 | Amazon 竞品销量、Instagram / TikTok 监听、线下销售 |
+
+第 2 档凭证通过环境变量提供（可选）：
+
+```
+YOUTUBE_API_KEY=...
+REDDIT_BEARER_TOKEN=...
+DISCORD_BOT_TOKEN=...
+FACEBOOK_ACCESS_TOKEN=...   # 同时用于 Meta 广告库
+KEEPA_API_KEY=...           # 第 3 档 Amazon 销量接缝
+SELLERSPRITE_SECRET_KEY=... # 卖家精灵 OpenAPI（可选，也可在「设置」中填写）
+```
+
+## 销售监控
+
+「销售监控」围绕**链接 → Listing → 每日快照**展开，配置即自动开启监控：
+
+1. 在「品牌管理」的销售渠道里填入链接并保存，系统立即开始首次采集：
+   - Amazon：填**店铺/品牌页**（如 `https://www.amazon.com/s?me=<卖家ID>&marketplaceID=...`）会展开该店铺的全部在售 Listing；填单品 `/dp/<ASIN>` 则监控单个 Listing。
+   - 独立站 DTC：填**店铺/系列页**会发现其商品页；填单品页则监控该页。
+2. 每个 Listing 进入 Listing List（`sales_listings`），每天采集一条快照（价格、排名/BSR、评分、评论数、SKU、库存、销量估算）写入 `sales_metrics`，并对标题/图片/SKU/库存做**变更识别**。
+3. 在销售监控页可：按**全局维度**（产品聚合总销量）/**渠道维度**查看，按**产品筛选**，给每个 Listing**映射产品**、单独**开关监控**、查看**历史趋势与变更记录**，或**立即同步**。
+
+数据获取采用**可插拔的 Provider 适配器**：
+
+| 渠道 | 默认 Provider | 升级路径 |
+| --- | --- | --- |
+| Amazon | 尽力爬取（受反爬限制，字段可能不全） | 配置卖家精灵 `secret-key` 后优先用其 OpenAPI（销量/排名更可靠） |
+| 独立站 / 其他电商 | 通用爬取（解析 schema.org `Product`/`Offer` JSON-LD） | — |
+| 线下 / 其他 | 人工录入 / CSV | — |
+
+> 卖家精灵 OpenAPI 为**独立付费**产品（按接口计费，`secret-key` 请求头），需联系其商务开通；常规网页/插件账号不含 API。未配置时销售监控自动走爬取，配置后无需改动即切换。在「设置」弹窗填写 `secret-key`（也支持 `SELLERSPRITE_SECRET_KEY` 环境变量）。
 
 ## 本地运行
 
+前置：Python 3.10+、Node 18+。
+
 ```bash
+# 1) 后端依赖
+pip install -r requirements.txt
+
+# 可选：整页截图（不装则用本机浏览器/SVG 回退）
+pip install playwright && python -m playwright install chromium
+
+# 2) 前端依赖与构建
 npm install
 npm run build
+
+# 3) 启动（serve 构建产物 + API + /snapshots）
 npm run server
+# 打开 http://127.0.0.1:8790
 ```
 
-打开 `http://127.0.0.1:8790`。
+开发模式（前端热更新，自动代理 /api 与 /snapshots 到 8790）：
 
-## 当前能力
+```bash
+npm run server      # 终端 A
+npm run dev         # 终端 B → http://localhost:5173
+```
 
-- SQLite 本地数据库
-- 用户之声记录、搜索、筛选、渠道/时间/产品维度分析
-- VoC 预警、责任团队分派、处理状态推进和闭环统计
-- 手动录入和 CSV 批量导入
-- 基础情绪、意图和主题标签
-- 网页快照监控、站点子页面发现、生成进度、每日自动截图、变更分析和时间维度回溯
-- 数据源与 connector 规划面板
+## 快速上手
+
+1. 进入「品牌管理」，输入官网 URL 一键抓取信息创建品牌（可标记竞品），填写监控关键词。
+2. 在「数据源采集」对该品牌运行第 1 档连接器（如 Google News）拉取真实数据。
+3. 在「网页快照」添加竞品官网 / 定价页，自动截图并跟踪变更。
+4. 在「用户之声」录入或导入 CSV 反馈，查看情感 / 主题分析与闭环任务。
+5. 用「竞品对比」横向比较多品牌表现。
+
+## 目录结构
+
+```
+server/
+  app.py            FastAPI 入口（python -m server.app）
+  config.py db.py   配置 / 数据层（schema + 迁移 + WAL）
+  fetchers.py       带 SSRF 防护的抓取 + RSS/页面解析
+  nlp.py records.py 情感/主题分析 + 统一记录读写
+  snapshot.py       截图引擎 + 变更分析
+  scheduler.py      后台定时采集
+  connectors/       连接器框架 + 注册表 + 采集器实现
+  domains/          分域 router（brands/content/sales/web/sources/insights）
+src/
+  lib/              api 客户端、query hooks、格式化
+  components/       ui 基础组件、charts、布局壳
+  features/         各板块视图
+DESIGN.md           Vercel 设计语言参考（来自 awesome-design-md）
+```
