@@ -15,11 +15,14 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     HOST=0.0.0.0 \
     PORT=8790
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir "playwright>=1.50,<2" \
+    && python -m playwright install --with-deps chromium
 
 COPY server ./server
 COPY --from=frontend /app/dist ./dist

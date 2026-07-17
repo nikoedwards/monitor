@@ -8,6 +8,7 @@ Capture strategy (first that works wins):
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ from .config import ROOT, SNAPSHOT_DIR
 from .util import clean_text
 
 _PLAYWRIGHT_AVAILABLE: bool | None = None
+logger = logging.getLogger(__name__)
 
 
 def text_hash(text: str) -> str:
@@ -30,20 +32,37 @@ def _playwright_capture(url: str, png_path: Path) -> dict | None:
     if _PLAYWRIGHT_AVAILABLE is False:
         return None
     try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except Exception:
         _PLAYWRIGHT_AVAILABLE = False
         return None
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage", "--no-sandbox"],
+            )
             page = browser.new_page(viewport={"width": 1440, "height": 1200})
-            page.goto(url, wait_until="networkidle", timeout=45000)
+            navigation_error = ""
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            except PlaywrightTimeoutError as exc:
+                # Dynamic sites may never finish loading, but their rendered DOM
+                # is still usable. Keep the page and capture what is visible.
+                navigation_error = str(exc)[:300]
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except PlaywrightTimeoutError:
+                page.wait_for_timeout(1500)
             page.screenshot(path=str(png_path), full_page=True)
             browser.close()
         _PLAYWRIGHT_AVAILABLE = True
         if png_path.exists() and png_path.stat().st_size > 0:
-            return {"method": "playwright"}
+            result = {"method": "playwright"}
+            if navigation_error:
+                result["navigation_warning"] = navigation_error
+            return result
     except Exception as exc:
         return {"error": str(exc)[:300]}
     return None
@@ -84,6 +103,7 @@ def _subprocess_capture(url: str, png_path: Path) -> dict | None:
         for flag in ("--headless=new", "--headless"):
             command = [
                 browser, flag, "--disable-gpu", "--hide-scrollbars",
+                "--disable-dev-shm-usage", "--no-sandbox",
                 "--no-first-run", "--no-default-browser-check",
                 "--window-size=1440,1200", f"--screenshot={png_path}", url,
             ]
@@ -148,6 +168,7 @@ def capture_image(url: str, title: str, text: str, base_name: str) -> tuple[str,
         return png_filename, sub_result
 
     error = (pw_result or {}).get("error", "") or (sub_result or {}).get("error", "") or "No headless browser available"
+    logger.warning("Falling back to SVG snapshot for %s: %s", url, error)
     svg_filename = f"{base_name}.svg"
     _write_svg(svg_filename, url, title, text, error)
     return svg_filename, {"method": "svg_fallback", "error": error}

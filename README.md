@@ -89,6 +89,7 @@ npm run dev         # 终端 B → http://localhost:5173
 ## Railway 部署与维护
 
 - 生产环境部署在 Railway，并连接 GitHub 的 `main` 分支；本地修改不会自动上线，提交并推送到 GitHub 后才会触发 Railway 重新构建和部署。
+- 生产 Docker 镜像会安装 Playwright Chromium，用于生成真实网页 PNG；如果时间线出现 `Generated visual snapshot fallback`，说明浏览器启动或页面导航失败，应先检查 Railway 构建/运行日志。
 - SQLite 数据库与网页快照都存放在 `/app/data`，Railway Volume 需要挂载到该目录，避免重新部署后丢失历史数据和截图。
 - 每次功能修改或 Bug 修复完成后，应先运行相关测试与 `npm run build`，必要时同步更新 README，然后提交并推送到 GitHub。
 - 推送后检查 Railway 部署状态、`/api/health`，并在生产页面复核本次修改涉及的功能。
