@@ -86,6 +86,13 @@ npm run server      # 终端 A
 npm run dev         # 终端 B → http://localhost:5173
 ```
 
+## Railway 部署与维护
+
+- 生产环境部署在 Railway，并连接 GitHub 的 `main` 分支；本地修改不会自动上线，提交并推送到 GitHub 后才会触发 Railway 重新构建和部署。
+- SQLite 数据库与网页快照都存放在 `/app/data`，Railway Volume 需要挂载到该目录，避免重新部署后丢失历史数据和截图。
+- 每次功能修改或 Bug 修复完成后，应先运行相关测试与 `npm run build`，必要时同步更新 README，然后提交并推送到 GitHub。
+- 推送后检查 Railway 部署状态、`/api/health`，并在生产页面复核本次修改涉及的功能。
+
 ## 快速上手
 
 1. 进入「品牌管理」，输入官网 URL 一键抓取信息创建品牌（可标记竞品），填写监控关键词。

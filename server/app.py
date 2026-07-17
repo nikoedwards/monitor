@@ -51,8 +51,13 @@ def health():
 
 
 # Static assets (built SPA) + snapshot files.
-if SNAPSHOT_DIR.exists():
-    app.mount("/snapshots", StaticFiles(directory=str(SNAPSHOT_DIR)), name="snapshots")
+#
+# The route must be registered before FastAPI starts its lifespan.  On a fresh
+# install (or a newly mounted volume) the snapshots directory does not exist at
+# import time; creating it only inside ``lifespan`` meant this mount was skipped
+# for the entire process, even though captures were written there afterwards.
+SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/snapshots", StaticFiles(directory=str(SNAPSHOT_DIR)), name="snapshots")
 
 _ASSETS = DIST / "assets"
 if _ASSETS.exists():
