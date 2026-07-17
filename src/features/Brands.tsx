@@ -94,8 +94,23 @@ function BrandDetail({ brand }: { brand: Brand }) {
   const { data: products = [] } = useProducts(brand.id);
   const { data: links = [] } = useLinks(brand.id);
   const { addProduct, delProduct } = useCatalogMutations();
+  const [name, setName] = useState(brand.name);
+  const [editingName, setEditingName] = useState(false);
   const [keywords, setKeywords] = useState(brand.monitoring_keywords.join(", "));
   const [productName, setProductName] = useState("");
+
+  const saveName = () => {
+    const nextName = name.trim();
+    if (!nextName || nextName === brand.name) {
+      setName(brand.name);
+      setEditingName(false);
+      return;
+    }
+    update.mutate(
+      { ...brand, name: nextName },
+      { onSuccess: () => setEditingName(false) },
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -103,7 +118,31 @@ function BrandDetail({ brand }: { brand: Brand }) {
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-2">
-              <h3 className="text-[18px] font-semibold tracking-tight" style={{ color: "var(--ink)" }}>{brand.name}</h3>
+              {editingName ? (
+                <div className="flex items-center gap-2">
+                  <Input
+                    autoFocus
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveName();
+                      if (e.key === "Escape") {
+                        setName(brand.name);
+                        setEditingName(false);
+                      }
+                    }}
+                    className="w-[240px] font-semibold"
+                    aria-label="品牌名称"
+                  />
+                  <Button size="sm" variant="primary" onClick={saveName} disabled={!name.trim() || update.isPending}>保存</Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setName(brand.name); setEditingName(false); }}>取消</Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <h3 className="text-[18px] font-semibold tracking-tight" style={{ color: "var(--ink)" }}>{brand.name}</h3>
+                  <Button size="sm" variant="ghost" onClick={() => setEditingName(true)}>修改名称</Button>
+                </div>
+              )}
               {brand.is_primary ? <Badge tone="positive">自家</Badge> : brand.is_competitor ? <Badge tone="warning">竞品</Badge> : null}
             </div>
             {brand.official_website && <a href={brand.official_website} target="_blank" rel="noreferrer" className="text-[13px] hover:underline" style={{ color: "var(--accent)" }}>{brand.official_website}</a>}
