@@ -119,15 +119,20 @@ class WebMonitorIn(BaseModel):
     scope: str = "single_page"
     crawl_limit: int = 20
     cadence: str = "daily"
+    check_interval_minutes: int = Field(default=1440, ge=60, le=43200)
+    snapshot_interval_minutes: int = Field(default=1440, ge=60, le=43200)
     capture_now: bool = True
 
 
 class WebMonitorUpdate(BaseModel):
     name: Optional[str] = None
+    url: Optional[str] = None
     status: Optional[str] = None
     scope: Optional[str] = None
     crawl_limit: Optional[int] = None
     cadence: Optional[str] = None
+    check_interval_minutes: Optional[int] = Field(default=None, ge=60, le=43200)
+    snapshot_interval_minutes: Optional[int] = Field(default=None, ge=60, le=43200)
 
 
 class LinkUpdate(BaseModel):

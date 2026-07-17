@@ -192,8 +192,18 @@ export interface WebMonitor {
   scope: string;
   crawl_limit: number;
   status: string;
+  check_interval_minutes: number;
+  snapshot_interval_minutes: number;
+  last_check_at?: string;
   last_snapshot_at?: string;
+  next_check_at?: string;
+  next_snapshot_at?: string;
+  seconds_until_check?: number;
+  seconds_until_snapshot?: number;
+  last_change_score?: number;
+  last_change_summary?: string;
   last_status?: string;
+  last_error?: string;
   snapshot_count: number;
   latest_snapshot_date?: string;
 }
