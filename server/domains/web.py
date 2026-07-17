@@ -14,6 +14,7 @@ from ..schemas import WebMonitorIn, WebMonitorUpdate
 from ..snapshot import analyze_change, capture_image, text_hash
 from ..util import (
     canonical_url,
+    clean_text,
     clean_external_link,
     host_key,
     is_html_like_url,
