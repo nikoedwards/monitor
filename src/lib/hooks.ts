@@ -334,6 +334,7 @@ export function useWebMonitors(brandId?: string) {
     queryKey: ["web-monitors", brandId],
     queryFn: () => api.get<{ monitors: WebMonitor[] }>(`/api/web/monitors${qs({ brand_id: brandId })}`).then((d) => d.monitors),
     enabled: !!brandId,
+    refetchInterval: 60_000,
   });
 }
 

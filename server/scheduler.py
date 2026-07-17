@@ -59,21 +59,25 @@ def _run_due_sales() -> None:
 
 
 def _run_due_web_snapshots() -> None:
-    from .domains.web import capture_monitor
+    from datetime import datetime, timezone
+
+    from .domains.web import capture_monitor, check_monitor, monitor_is_due
 
     with db() as conn:
         monitors = [
             dict(r)
             for r in conn.execute(
-                "SELECT * FROM web_monitors WHERE status = 'active' "
-                "AND (last_snapshot_at IS NULL OR substr(last_snapshot_at,1,10) < ?)",
-                (today(),),
+                "SELECT * FROM web_monitors WHERE status = 'active'",
             ).fetchall()
         ]
+    now = datetime.now(timezone.utc)
     for monitor in monitors:
         try:
             with db() as conn:
-                capture_monitor(conn, monitor)
+                if monitor_is_due(monitor, "snapshot", now):
+                    capture_monitor(conn, monitor)
+                elif monitor_is_due(monitor, "check", now):
+                    check_monitor(conn, monitor)
         except Exception:
             continue
 
