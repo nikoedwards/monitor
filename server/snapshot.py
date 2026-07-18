@@ -32,6 +32,202 @@ ARCHIVE_TOTAL_LIMIT = 30_000_000
 ARCHIVE_RESOURCE_LIMIT = 6_000_000
 ARCHIVE_RESOURCE_COUNT_LIMIT = 160
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
+_ARCHIVE_GUARD_MARKER = 'data-monitor-archive-guard="3"'
+_ARCHIVE_REPLAY_GUARD = r"""
+(() => {
+  if (window.__monitorArchiveReplayGuardV3) return;
+  window.__monitorArchiveReplayGuardV3 = true;
+
+  const blocked = () => Promise.reject(new Error('Archived page: network access disabled'));
+  try { window.fetch = blocked; } catch (_) {}
+  try { XMLHttpRequest.prototype.open = function () { throw new Error('Archived page: network access disabled'); }; } catch (_) {}
+
+  const dialogSelector = [
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    'dialog',
+    '[data-testid="POPUP"]',
+    '[data-testid*="popup"]',
+    '[data-testid*="modal"]',
+    '[class*="popup"]',
+    '[class*="modal"]',
+    '[id*="popup"]',
+    '[id*="modal"]'
+  ].join(',');
+  const semanticDialogSelector = '[role="dialog"],[aria-modal="true"],dialog';
+  const controlSelector = 'button,[role="button"],a,input[type="button"],input[type="reset"]';
+  const dismissedDialogKeys = new Set();
+  const dismissedDialogSelectors = new Set();
+  const dismissalStyle = document.createElement('style');
+  dismissalStyle.setAttribute('data-monitor-archive-dismissals', '');
+  (document.head || document.documentElement).appendChild(dismissalStyle);
+
+  const isCloseControl = (control) => {
+    const label = [
+      control.getAttribute('aria-label'),
+      control.getAttribute('title'),
+      control.getAttribute('data-testid'),
+      control.id,
+      typeof control.className === 'string' ? control.className : '',
+      control.textContent
+    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    return /(?:^|[\s_-])(close|dismiss)(?:$|[\s_-])|关闭|關閉|取消|klaviyo-close|modal-close|popup-close/i.test(label)
+      || /^[x×✕✖]$/i.test(label);
+  };
+
+  const overlayFor = (dialog) => {
+    let node = dialog;
+    for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
+      try {
+        if (getComputedStyle(node).position === 'fixed') return node;
+      } catch (_) {}
+    }
+    return dialog;
+  };
+
+  const dialogKey = (dialog) => {
+    for (const attribute of ['aria-label', 'data-testid', 'id']) {
+      const value = String(dialog.getAttribute(attribute) || '').trim();
+      if (value) return `${attribute}:${value}`;
+    }
+    const text = String(dialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    return text ? `text:${text}` : '';
+  };
+
+  const escapedAttribute = (value) => String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const dialogCssSelector = (dialog) => {
+    const ariaLabel = String(dialog.getAttribute('aria-label') || '').trim();
+    if (ariaLabel) {
+      const value = escapedAttribute(ariaLabel);
+      return `[role="dialog"][aria-label="${value}"],[aria-modal="true"][aria-label="${value}"],dialog[aria-label="${value}"]`;
+    }
+    const testId = String(dialog.getAttribute('data-testid') || '').trim();
+    if (testId) return `[data-testid="${escapedAttribute(testId)}"]`;
+    const id = String(dialog.id || '').trim();
+    if (id) return `[id="${escapedAttribute(id)}"]`;
+    return '';
+  };
+
+  const refreshDismissalStyle = () => {
+    dismissalStyle.textContent = dismissedDialogSelectors.size
+      ? `${Array.from(dismissedDialogSelectors).join(',')}{display:none!important;visibility:hidden!important;pointer-events:none!important;}`
+      : '';
+  };
+
+  const hideOverlay = (overlay) => {
+    if (!overlay || !overlay.isConnected) return;
+    if (overlay.style.getPropertyValue('display') !== 'none' || overlay.style.getPropertyPriority('display') !== 'important') {
+      overlay.style.setProperty('display', 'none', 'important');
+    }
+    if (overlay.style.getPropertyValue('visibility') !== 'hidden' || overlay.style.getPropertyPriority('visibility') !== 'important') {
+      overlay.style.setProperty('visibility', 'hidden', 'important');
+    }
+    if (overlay.style.getPropertyValue('pointer-events') !== 'none' || overlay.style.getPropertyPriority('pointer-events') !== 'important') {
+      overlay.style.setProperty('pointer-events', 'none', 'important');
+    }
+    if (overlay.getAttribute('aria-hidden') !== 'true') overlay.setAttribute('aria-hidden', 'true');
+    if (overlay.getAttribute('data-monitor-archive-dismissed') !== 'true') overlay.setAttribute('data-monitor-archive-dismissed', 'true');
+  };
+
+  const restoreScroll = () => {
+    for (const element of [document.documentElement, document.body]) {
+      if (!element) continue;
+      for (const property of ['overflow', 'overflow-x', 'overflow-y', 'padding-right']) {
+        if (element.style.getPropertyValue(property)) element.style.removeProperty(property);
+      }
+      element.removeAttribute('data-scroll-locked');
+      element.removeAttribute('data-kl-scroll-locking-modal');
+    }
+  };
+
+  const enforceDismissedDialogs = () => {
+    if (!dismissedDialogKeys.size) return;
+    for (const dialog of document.querySelectorAll(dialogSelector)) {
+      if (dismissedDialogKeys.has(dialogKey(dialog))) hideOverlay(overlayFor(dialog));
+    }
+    restoreScroll();
+  };
+
+  const dismiss = (dialog, key = dialogKey(dialog)) => {
+    if (key) dismissedDialogKeys.add(key);
+    const cssSelector = dialog ? dialogCssSelector(dialog) : '';
+    if (cssSelector) {
+      dismissedDialogSelectors.add(cssSelector);
+      refreshDismissalStyle();
+    }
+    if (!dialog || !dialog.isConnected) {
+      enforceDismissedDialogs();
+      return;
+    }
+    const overlay = overlayFor(dialog);
+    try {
+      if (overlay.tagName === 'DIALOG' && typeof overlay.close === 'function') overlay.close();
+    } catch (_) {}
+    hideOverlay(overlay);
+    restoreScroll();
+  };
+
+  document.addEventListener('submit', (event) => event.preventDefault(), true);
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const link = target.closest('a[data-archive-href]');
+    if (link) event.preventDefault();
+
+    const control = target.closest(controlSelector);
+    if (!control || !isCloseControl(control)) return;
+    const dialog = control.closest(semanticDialogSelector) || control.closest(dialogSelector);
+    if (!dialog) return;
+    const key = dialogKey(dialog);
+    setTimeout(() => {
+      dismiss(dialog, key);
+    }, 0);
+  }, true);
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    const dialogs = Array.from(document.querySelectorAll(dialogSelector)).filter((dialog) => {
+      try { return getComputedStyle(dialog).display !== 'none'; } catch (_) { return true; }
+    });
+    const dialog = dialogs[dialogs.length - 1];
+    if (dialog) setTimeout(() => dismiss(dialog), 0);
+  }, true);
+  new MutationObserver(enforceDismissedDialogs).observe(document.documentElement, {
+    subtree: true,
+    childList: true
+  });
+})();
+""".strip()
+
+
+def _archive_guard_tag() -> str:
+    return f'<script {_ARCHIVE_GUARD_MARKER}>{_ARCHIVE_REPLAY_GUARD}</script>'
+
+
+def upgrade_snapshot_archives(root: Path = SNAPSHOT_DIR) -> int:
+    """Inject the current replay guard into existing HTML archives once."""
+    root.mkdir(parents=True, exist_ok=True)
+    marker = _ARCHIVE_GUARD_MARKER.encode("utf-8")
+    tag = _archive_guard_tag()
+    upgraded = 0
+    for path in root.glob("*.html"):
+        temporary = path.with_name(f".{path.name}.archive-upgrade.tmp")
+        try:
+            with path.open("rb") as handle:
+                if marker in handle.read(262_144):
+                    continue
+            content = path.read_text(encoding="utf-8")
+            head = re.search(r"<head(?:\s[^>]*)?>", content, re.I)
+            if head:
+                content = content[:head.end()] + tag + content[head.end():]
+            else:
+                content = tag + content
+            temporary.write_text(content, encoding="utf-8")
+            os.replace(temporary, path)
+            upgraded += 1
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            logger.exception("Failed to upgrade archived snapshot %s", path)
+    return upgraded
 
 
 def text_hash(text: str) -> str:
@@ -292,7 +488,7 @@ def _build_archive_resource_map(context, manifest: list[dict], loaded: dict[str,
 def _serialize_archive(page, resources: dict[str, str], original_url: str) -> str:
     return page.evaluate(
         r"""
-        ({ resources, originalUrl }) => {
+        ({ resources, originalUrl, guardScript }) => {
           const clone = document.documentElement.cloneNode(true);
           const head = clone.querySelector('head') || clone.insertBefore(document.createElement('head'), clone.firstChild);
           for (const base of clone.querySelectorAll('base')) base.remove();
@@ -372,25 +568,15 @@ def _serialize_archive(page, resources: dict[str, str], original_url: str) -> st
           for (const form of clone.querySelectorAll('form')) form.setAttribute('action', '');
 
           const guard = document.createElement('script');
-          guard.textContent = `
-            (() => {
-              const blocked = () => Promise.reject(new Error('Archived page: network access disabled'));
-              try { window.fetch = blocked; } catch (_) {}
-              try { XMLHttpRequest.prototype.open = function () { throw new Error('Archived page: network access disabled'); }; } catch (_) {}
-              document.addEventListener('submit', (event) => event.preventDefault(), true);
-              document.addEventListener('click', (event) => {
-                const link = event.target && event.target.closest ? event.target.closest('a[data-archive-href]') : null;
-                if (link) event.preventDefault();
-              }, true);
-            })();
-          `;
+          guard.setAttribute('data-monitor-archive-guard', '3');
+          guard.textContent = guardScript;
           head.insertBefore(guard, csp.nextSibling);
           clone.setAttribute('data-monitor-archive-url', originalUrl);
           clone.setAttribute('data-monitor-archive-created-at', new Date().toISOString());
           return '<!doctype html>\n' + clone.outerHTML;
         }
         """,
-        {"resources": resources, "originalUrl": original_url},
+        {"resources": resources, "originalUrl": original_url, "guardScript": _ARCHIVE_REPLAY_GUARD},
     )
 
 

@@ -19,6 +19,7 @@ from .connectors.registry import sync_to_db
 from .db import db, init_db
 from .domains import brands, content, creators, insights, sales, settings, sources, web
 from .scheduler import start_scheduler
+from .snapshot import upgrade_snapshot_archives
 
 
 @asynccontextmanager
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
         stored = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
         apply_credential_overrides(stored)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    upgrade_snapshot_archives()
     start_scheduler()
     yield
 

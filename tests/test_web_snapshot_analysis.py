@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
 from server.domains.web import _period_stats
-from server.snapshot import _playwright_capture, _write_fallback_archive, compare_visuals
+from server.snapshot import _playwright_capture, _write_fallback_archive, compare_visuals, upgrade_snapshot_archives
 
 
 class VisualDiffTests(unittest.TestCase):
@@ -73,8 +74,28 @@ class ArchiveFallbackTests(unittest.TestCase):
     def test_playwright_generates_png_and_self_contained_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            source = """
+                <html><body style="overflow:hidden">
+                  <div role="dialog" aria-modal="true" aria-label="Signup popup" style="position:fixed;inset:0">
+                    <button aria-label="Close dialog">×</button>
+                    <p>Saved popup</p>
+                  </div>
+                  <script>
+                    document.addEventListener('click', (event) => {
+                      if (!event.target.closest('[aria-label="Close dialog"]')) return;
+                      setTimeout(() => {
+                        const dialog = document.querySelector('[role="dialog"]');
+                        if (dialog) {
+                          dialog.style.display = 'flex';
+                          dialog.style.visibility = 'visible';
+                        }
+                      }, 20);
+                    });
+                  </script>
+                </body></html>
+            """
             result = _playwright_capture(
-                "data:text/html,<html><body><details><summary>Open</summary><p>Saved</p></details></body></html>",
+                "data:text/html;charset=utf-8," + quote(source),
                 root / "page.png",
                 root / "page.html",
             )
@@ -83,8 +104,32 @@ class ArchiveFallbackTests(unittest.TestCase):
             self.assertTrue((root / "page.png").stat().st_size > 0)
             content = (root / "page.html").read_text(encoding="utf-8")
             self.assertIn("data-monitor-archive-url", content)
+            self.assertIn('data-monitor-archive-guard="3"', content)
             self.assertIn("connect-src 'none'", content)
-            self.assertIn("<details>", content)
+            self.assertIn("Saved popup", content)
+
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto((root / "page.html").as_uri())
+                self.assertEqual(page.get_by_role("dialog", name="Signup popup").count(), 1)
+                page.get_by_role("button", name="Close dialog").click()
+                page.wait_for_timeout(100)
+                self.assertFalse(page.get_by_role("dialog", name="Signup popup").is_visible())
+                self.assertNotEqual(page.evaluate("document.body.style.overflow"), "hidden")
+                browser.close()
+
+    def test_existing_archive_is_upgraded_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "existing.html"
+            archive.write_text("<!doctype html><html><head><title>Old</title></head><body>Saved</body></html>", encoding="utf-8")
+            self.assertEqual(upgrade_snapshot_archives(root), 1)
+            content = archive.read_text(encoding="utf-8")
+            self.assertEqual(content.count('data-monitor-archive-guard="3"'), 1)
+            self.assertEqual(upgrade_snapshot_archives(root), 0)
 
 
 if __name__ == "__main__":
