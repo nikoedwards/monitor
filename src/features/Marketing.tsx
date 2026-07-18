@@ -165,6 +165,7 @@ export default function Marketing() {
               title="声量占比 SOV"
               subtitle="各媒体声量份额(Top 8)"
               hint="SOV（Share of Voice，声量占比）表示某个媒体的报道声量占全部媒体报道声量的比例。"
+              action={summary.by_publication?.length ? <Button size="sm" onClick={() => setPublicationDetailOpen(true)}>查看明细</Button> : undefined}
             />
             <ShareOfVoice items={summary.share_of_voice || []} />
           </Card>
@@ -195,13 +196,10 @@ export default function Marketing() {
         </Card>
         <Card>
           <SectionTitle
-            title={view === "channel" && channel === "media" ? "媒体来源明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
-            subtitle={view === "channel" && channel === "media" ? "当前时间范围内各媒体网站的发文量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
-            action={view === "channel" && channel === "media" && summary.by_publication?.length ? <Button size="sm" onClick={() => setPublicationDetailOpen(true)}>查看明细</Button> : undefined}
+            title={view === "channel" ? "来源渠道明细" : "平台分布"}
+            subtitle={view === "channel" ? "该渠道下各数据源的采集量" : undefined}
           />
-          {view === "channel" && channel === "media" ? (
-            <PublicationBreakdown publications={(summary.by_publication || []).slice(0, 8)} />
-          ) : view === "channel" ? (
+          {view === "channel" ? (
             <SourceBreakdown sources={summary.by_source || []} />
           ) : summary.by_platform?.length ? (
             <Bars data={summary.by_platform.slice(0, 8)} dataKey="total" nameKey="platform" name="声量" color="var(--violet)" />
@@ -267,31 +265,6 @@ type PublicationStat = {
   tier: string;
   country: string;
 };
-
-function PublicationBreakdown({ publications }: { publications: PublicationStat[] }) {
-  if (!publications.length) {
-    return <EmptyState title="暂无媒体来源" hint="当前时间范围内尚未采集到带有媒体网站信息的报道。" />;
-  }
-  const max = Math.max(...publications.map((item) => item.total), 1);
-  return (
-    <div className="space-y-2.5">
-      {publications.map((item) => (
-        <div key={item.domain || item.name}>
-          <div className="flex items-center justify-between gap-3 text-[13px] mb-1">
-            <div className="min-w-0 flex items-center gap-2">
-              {item.domain && <img src={`https://www.google.com/s2/favicons?domain=${item.domain}&sz=32`} alt="" className="w-4 h-4 rounded-sm shrink-0" />}
-              <span className="truncate" style={{ color: "var(--ink)" }}>{item.name}</span>
-            </div>
-            <span className="tabular-nums shrink-0" style={{ color: "var(--mute)" }}>{fmtNum(item.total)} 篇</span>
-          </div>
-          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-            <div className="h-full rounded-full" style={{ width: `${(item.total / max) * 100}%`, background: "var(--accent)" }} />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function PublicationDetailModal({ open, onClose, publications }: { open: boolean; onClose: () => void; publications: PublicationStat[] }) {
   const [ranking, setRanking] = useState<"frequency" | "reach">("frequency");
