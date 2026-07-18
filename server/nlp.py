@@ -6,6 +6,7 @@ extensible (add terms to the dictionaries below).
 from __future__ import annotations
 
 from collections import Counter
+import re
 
 POSITIVE_TERMS = {
     "amazing", "love", "loved", "great", "excellent", "easy", "fast", "helpful",
@@ -80,15 +81,33 @@ def _has_negation(lowered: str) -> bool:
     return any(term in lowered for term in NEGATION_TERMS)
 
 
+def _matched_terms(text: str, lowered: str, terms: set[str]) -> list[str]:
+    return sorted(term for term in terms if term in lowered or term in text)
+
+
+def _evidence_snippets(text: str, terms: list[str], limit: int = 2) -> list[str]:
+    if not terms:
+        return []
+    parts = [part.strip() for part in re.split(r"(?<=[.!?。！？])\s+|[\r\n]+", text) if part.strip()]
+    lowered_terms = [term.lower() for term in terms]
+    matches = [part for part in parts if any(term in part.lower() for term in lowered_terms)]
+    return [part[:240] for part in matches[:limit]]
+
+
 def analyze_text(text: str) -> dict:
     text = text or ""
     lowered = text.lower()
-    positive = _count_terms(text, lowered, POSITIVE_TERMS)
-    negative = _count_terms(text, lowered, NEGATIVE_TERMS)
+    positive_terms = _matched_terms(text, lowered, POSITIVE_TERMS)
+    negative_terms = _matched_terms(text, lowered, NEGATIVE_TERMS)
+    negation_terms = _matched_terms(text, lowered, NEGATION_TERMS)
+    positive = len(positive_terms)
+    negative = len(negative_terms)
+    negation_flipped = False
 
     # Simple negation flip: "not great" reads less positive.
     if _has_negation(lowered) and positive > negative:
         positive, negative = negative, positive
+        negation_flipped = True
 
     score = max(-1.0, min(1.0, (positive - negative) / 3))
     if score > 0.2:
@@ -115,11 +134,29 @@ def analyze_text(text: str) -> dict:
         if any(t in lowered or t in text for t in terms)
     ][:4]
 
+    matched_terms = positive_terms + negative_terms + negation_terms
+    if negation_flipped:
+        reason = "检测到正向词，同时检测到否定词；当前规则将正向计数反转为负向。"
+    elif sentiment == "negative":
+        reason = "负向词命中数高于正向词命中数，因此判定为负向。"
+    elif sentiment == "positive":
+        reason = "正向词命中数高于负向词命中数，因此判定为正向。"
+    else:
+        reason = "正负向词数量接近或未达到阈值，因此判定为中性。"
+
     return {
         "sentiment": sentiment,
         "sentiment_score": round(score, 4),
         "intent": intent,
         "topics": topics,
+        "sentiment_explanation": {
+            "method": "关键词规则",
+            "reason": reason,
+            "positive_terms": positive_terms,
+            "negative_terms": negative_terms,
+            "negation_terms": negation_terms,
+            "evidence": _evidence_snippets(text, matched_terms),
+        },
     }
 
 
