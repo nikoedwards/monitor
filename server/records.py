@@ -89,4 +89,16 @@ def record_to_dict(row: sqlite3.Row) -> dict:
     item["topics"] = json.loads(item.pop("topics_json") or "[]")
     item["metrics"] = json.loads(item.pop("metrics_json") or "{}")
     item["raw"] = json.loads(item.pop("raw_json") or "{}")
+    analysis = analyze_text(f"{item.get('title') or ''} {item.get('body') or ''}")
+    if item.get("sentiment") == analysis["sentiment"]:
+        item["sentiment_explanation"] = analysis["sentiment_explanation"]
+    else:
+        item["sentiment_explanation"] = {
+            "method": "采集源或导入数据",
+            "reason": "该情绪标签由采集源或导入数据直接提供，当前记录未包含更详细的判定依据。",
+            "positive_terms": [],
+            "negative_terms": [],
+            "negation_terms": [],
+            "evidence": [],
+        }
     return item
