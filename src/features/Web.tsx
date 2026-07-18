@@ -58,6 +58,13 @@ function countdownLabel(nextAt: string | undefined, status: string, now: number)
   return hours ? `${days} 天 ${hours} 小时后` : `${days} 天后`;
 }
 
+function schedulesMatch(monitor: WebMonitor) {
+  if (monitor.check_interval_minutes !== monitor.snapshot_interval_minutes) return false;
+  if (!monitor.next_check_at && !monitor.next_snapshot_at) return true;
+  if (!monitor.next_check_at || !monitor.next_snapshot_at) return false;
+  return Math.abs(new Date(monitor.next_check_at).getTime() - new Date(monitor.next_snapshot_at).getTime()) < 60_000;
+}
+
 export default function Web() {
   const { brandId } = useParams();
   const [open, setOpen] = useState(false);
@@ -116,11 +123,19 @@ export default function Web() {
                     <div className="text-[12px] truncate mt-0.5" style={{ color: "var(--mute)" }}>{m.url}</div>
                     <div className="text-[12px] mt-1" style={{ color: "var(--mute)" }}>{m.snapshot_count} 张快照 · {fmtDate(m.latest_snapshot_date)}</div>
                     <div className="text-[12px] mt-1" style={{ color: "var(--body)" }}>
-                      {intervalLabel(m.check_interval_minutes)}检查 · {intervalLabel(m.snapshot_interval_minutes)}截图
+                      {schedulesMatch(m)
+                        ? `${intervalLabel(m.check_interval_minutes)}检查并截图`
+                        : `${intervalLabel(m.check_interval_minutes)}检查 · ${intervalLabel(m.snapshot_interval_minutes)}截图`}
                     </div>
                     <div className="mt-2 space-y-0.5 text-[12px]" style={{ color: "var(--mute)" }}>
-                      <div>下次检查：{m.next_check_at ? fmtDateTime(m.next_check_at) : "—"} · {countdownLabel(m.next_check_at, m.status, now)}</div>
-                      <div>下次截图：{m.next_snapshot_at ? fmtDateTime(m.next_snapshot_at) : "—"} · {countdownLabel(m.next_snapshot_at, m.status, now)}</div>
+                      {schedulesMatch(m) ? (
+                        <div>下次检查并截图：{m.next_snapshot_at ? fmtDateTime(m.next_snapshot_at) : "—"} · {countdownLabel(m.next_snapshot_at, m.status, now)}</div>
+                      ) : (
+                        <>
+                          <div>下次检查：{m.next_check_at ? fmtDateTime(m.next_check_at) : "—"} · {countdownLabel(m.next_check_at, m.status, now)}</div>
+                          <div>下次截图：{m.next_snapshot_at ? fmtDateTime(m.next_snapshot_at) : "—"} · {countdownLabel(m.next_snapshot_at, m.status, now)}</div>
+                        </>
+                      )}
                     </div>
                   </button>
                   <div className="flex flex-wrap gap-2 mt-3">
