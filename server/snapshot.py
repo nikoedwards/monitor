@@ -27,6 +27,125 @@ def text_hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+def _prepare_page_for_full_capture(page) -> dict:
+    """Scroll through the document so lazy media is loaded before full-page capture."""
+    media = page.evaluate(
+        """
+        async () => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const copyAttr = (element, source, target) => {
+            const value = element.getAttribute(source);
+            const current = element.getAttribute(target);
+            if (value && (!current || current.startsWith('data:image/'))) element.setAttribute(target, value);
+          };
+          const isNearViewport = (element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && rect.bottom >= -window.innerHeight * 0.25 && rect.top <= window.innerHeight * 1.25;
+          };
+          const promoteVisibleMedia = () => {
+            for (const image of Array.from(document.querySelectorAll('img')).filter(isNearViewport)) {
+              image.loading = 'eager';
+              copyAttr(image, 'data-src', 'src');
+              copyAttr(image, 'data-lazy-src', 'src');
+              copyAttr(image, 'data-original', 'src');
+              copyAttr(image, 'data-srcset', 'srcset');
+              copyAttr(image, 'data-lazy-srcset', 'srcset');
+            }
+            for (const source of Array.from(document.querySelectorAll('picture source, video source')).filter((source) => isNearViewport(source.parentElement || source))) {
+              copyAttr(source, 'data-src', 'src');
+              copyAttr(source, 'data-srcset', 'srcset');
+            }
+            for (const frame of Array.from(document.querySelectorAll('iframe')).filter(isNearViewport)) {
+              frame.loading = 'eager';
+              copyAttr(frame, 'data-src', 'src');
+            }
+            for (const video of Array.from(document.querySelectorAll('video')).filter(isNearViewport)) {
+              video.preload = 'auto';
+              video.muted = true;
+              copyAttr(video, 'data-src', 'src');
+              copyAttr(video, 'data-poster', 'poster');
+              try { video.load(); } catch (_) {}
+              try {
+                const play = video.play();
+                if (play) play.catch(() => {});
+              } catch (_) {}
+            }
+            for (const element of Array.from(document.querySelectorAll('[data-bg], [data-background], [data-background-image]')).filter(isNearViewport)) {
+              const value = element.getAttribute('data-bg') || element.getAttribute('data-background') || element.getAttribute('data-background-image');
+              if (value && !element.style.backgroundImage) {
+                element.style.backgroundImage = value.startsWith('url(') ? value : `url("${value.replaceAll('"', '\\"')}")`;
+              }
+            }
+          };
+          const waitForVisibleImages = async () => {
+            const pending = Array.from(document.images).filter((image) => isNearViewport(image) && !image.complete);
+            if (!pending.length) {
+              await sleep(350);
+              return;
+            }
+            const settled = Promise.all(pending.map((image) => new Promise((resolve) => {
+              image.addEventListener('load', resolve, { once: true });
+              image.addEventListener('error', resolve, { once: true });
+            })));
+            await Promise.race([settled, sleep(1800)]);
+            await sleep(250);
+          };
+
+          promoteVisibleMedia();
+          await waitForVisibleImages();
+          let stableBottomPasses = 0;
+          let previousHeight = 0;
+          const deadline = Date.now() + 45000;
+          for (let step = 0; step < 120 && Date.now() < deadline; step += 1) {
+            const root = document.documentElement;
+            const height = Math.max(root.scrollHeight, document.body?.scrollHeight || 0);
+            const distance = Math.max(window.innerHeight * 0.7, 560);
+            const nextY = Math.min(window.scrollY + distance, Math.max(0, height - window.innerHeight));
+            window.scrollTo(0, nextY);
+            promoteVisibleMedia();
+            await waitForVisibleImages();
+
+            const newHeight = Math.max(root.scrollHeight, document.body?.scrollHeight || 0);
+            const atBottom = window.scrollY + window.innerHeight >= newHeight - 4;
+            if (atBottom) {
+              await sleep(1000);
+              promoteVisibleMedia();
+              await waitForVisibleImages();
+              const settledHeight = Math.max(root.scrollHeight, document.body?.scrollHeight || 0);
+              stableBottomPasses = settledHeight <= Math.max(previousHeight, newHeight) + 4 ? stableBottomPasses + 1 : 0;
+              previousHeight = settledHeight;
+              if (stableBottomPasses >= 2) break;
+            } else {
+              stableBottomPasses = 0;
+              previousHeight = newHeight;
+            }
+          }
+
+          for (const video of document.querySelectorAll('video')) {
+            try { video.pause(); } catch (_) {}
+          }
+
+          window.scrollTo(0, 0);
+          await sleep(700);
+          const renderedImages = Array.from(document.images).filter((image) => {
+            const rect = image.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          });
+          return {
+            images: document.images.length,
+            loaded_images: Array.from(document.images).filter((image) => image.complete && image.naturalWidth > 0).length,
+            rendered_images: renderedImages.length,
+            loaded_rendered_images: renderedImages.filter((image) => image.complete && image.naturalWidth > 0).length,
+            videos: document.querySelectorAll('video').length,
+            iframes: document.querySelectorAll('iframe').length,
+            height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0),
+          };
+        }
+        """
+    )
+    return media
+
+
 def _playwright_capture(url: str, png_path: Path) -> dict | None:
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is False:
@@ -52,14 +171,22 @@ def _playwright_capture(url: str, png_path: Path) -> dict | None:
                 # is still usable. Keep the page and capture what is visible.
                 navigation_error = str(exc)[:300]
             try:
+                page.wait_for_function(
+                    "() => document.body && document.body.innerText.length > 100 && document.documentElement.scrollHeight > window.innerHeight",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                page.wait_for_timeout(2000)
+            media = _prepare_page_for_full_capture(page)
+            try:
                 page.wait_for_load_state("networkidle", timeout=8000)
             except PlaywrightTimeoutError:
-                page.wait_for_timeout(1500)
-            page.screenshot(path=str(png_path), full_page=True)
+                page.wait_for_timeout(1000)
+            page.screenshot(path=str(png_path), full_page=True, animations="disabled", caret="hide")
             browser.close()
         _PLAYWRIGHT_AVAILABLE = True
         if png_path.exists() and png_path.stat().st_size > 0:
-            result = {"method": "playwright"}
+            result = {"method": "playwright", "media": media}
             if navigation_error:
                 result["navigation_warning"] = navigation_error
             return result
