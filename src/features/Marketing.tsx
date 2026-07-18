@@ -65,6 +65,7 @@ export default function Marketing() {
   const [view, setView] = useState<"overview" | "channel">("overview");
   const [channel, setChannel] = useState("community");
   const [publicationDetailOpen, setPublicationDetailOpen] = useState(false);
+  const [trendMetric, setTrendMetric] = useState<"volume" | "reach">("volume");
   const activeChannel = view === "channel" ? channel : undefined;
   const { data: summary, isLoading } = useMarketingSummary(brandId, activeChannel, range);
   const { data: records = [] } = useRecords({ brand_id: brandId, dimension: "marketing", channel: activeChannel, ...rangeParams(range), limit: 60 });
@@ -165,8 +166,25 @@ export default function Marketing() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
-          <SectionTitle title="声量趋势" />
-          <TrendChart data={summary.trend} keys={[{ key: "total", name: "声量", color: "var(--accent)" }, { key: "negative", name: "负向", color: "var(--danger)" }]} />
+          <SectionTitle
+            title={trendMetric === "volume" ? "声量趋势" : "预计曝光趋势"}
+            action={summary.total_reach > 0 ? (
+              <SegmentGroup
+                value={trendMetric}
+                options={[{ value: "volume", label: "篇数" }, { value: "reach", label: "预计曝光" }]}
+                onChange={setTrendMetric}
+              />
+            ) : undefined}
+          />
+          {trendMetric === "volume" ? (
+            <TrendChart data={summary.trend} keys={[{ key: "total", name: "声量", color: "var(--accent)" }, { key: "negative", name: "负向", color: "var(--danger)" }]} />
+          ) : (
+            <TrendChart
+              data={summary.trend}
+              keys={[{ key: "estimated_reach", name: "预计曝光", color: "var(--violet)" }]}
+              valueFormatter={fmtNum}
+            />
+          )}
         </Card>
         <Card>
           <SectionTitle
