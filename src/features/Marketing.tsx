@@ -92,6 +92,7 @@ export default function Marketing() {
 
   const channelName = CHANNEL_LABEL[channel] || channel;
   const isCommunity = view === "channel" && channel === "community";
+  const selectedSection = view === "overview" ? "overview" : channel;
   const subchannelCount = (summary.by_subchannel || []).reduce((acc: number, g: any) => acc + (g.subchannels?.length || 0), 0);
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
 
@@ -103,13 +104,19 @@ export default function Marketing() {
         action={<div className="flex flex-wrap items-center gap-2"><TimeRangePicker /><MonitorStatus brandId={brandId} dimension="marketing" /></div>}
       />
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <SegmentGroup
-          value={view}
-          options={[{ value: "overview", label: "总览" }, { value: "channel", label: "按渠道查看" }]}
-          onChange={setView}
+          value={selectedSection}
+          options={[{ value: "overview", label: "总览" }, ...CHANNELS]}
+          onChange={(value) => {
+            if (value === "overview") {
+              setView("overview");
+            } else {
+              setChannel(value);
+              setView("channel");
+            }
+          }}
         />
-        {view === "channel" && <SegmentGroup value={channel} options={CHANNELS} onChange={setChannel} />}
       </div>
 
       {isCommunity ? (
