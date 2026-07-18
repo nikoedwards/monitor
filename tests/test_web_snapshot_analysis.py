@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from server.domains.web import _period_stats
+from server.domains.web import _period_stats, delete_snapshot
 from server.snapshot import _playwright_capture, _write_fallback_archive, compare_visuals, upgrade_snapshot_archives
 
 
@@ -53,6 +54,50 @@ class PeriodStatsTests(unittest.TestCase):
         self.assertEqual(result["changed_days"], 2)
         self.assertEqual(result["average_interval_days"], 3.0)
         self.assertEqual(len(result["daily"]), 7)
+
+
+class SnapshotDeletionTests(unittest.TestCase):
+    def test_delete_snapshot_removes_files_record_and_cached_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            screenshot = root / "capture.png"
+            archive = root / "capture.html"
+            screenshot.write_bytes(b"png")
+            archive.write_text("<html></html>", encoding="utf-8")
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE web_snapshots (
+                  id TEXT PRIMARY KEY,
+                  monitor_id TEXT,
+                  brand_id TEXT,
+                  screenshot_path TEXT,
+                  html_path TEXT
+                );
+                CREATE TABLE web_snapshot_analyses (
+                  id TEXT PRIMARY KEY,
+                  monitor_id TEXT,
+                  brand_id TEXT
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?)",
+                ("snapshot-1", "monitor-1", "brand-1", screenshot.name, archive.name),
+            )
+            conn.execute(
+                "INSERT INTO web_snapshot_analyses VALUES (?, ?, ?)",
+                ("analysis-1", None, "brand-1"),
+            )
+            with patch("server.domains.web.SNAPSHOT_DIR", root):
+                result = delete_snapshot("snapshot-1", conn)
+            self.assertEqual(result["deleted"], "snapshot-1")
+            self.assertFalse(screenshot.exists())
+            self.assertFalse(archive.exists())
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM web_snapshots").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM web_snapshot_analyses").fetchone()[0], 0)
+            conn.close()
 
 
 class ArchiveFallbackTests(unittest.TestCase):

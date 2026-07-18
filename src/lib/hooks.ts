@@ -349,6 +349,14 @@ export function useWebSnapshots(brandId?: string, monitorId?: string, range?: Ti
   });
 }
 
+export function useWebSnapshotHistory(brandId?: string, monitorId?: string, enabled = false) {
+  return useQuery({
+    queryKey: ["web-snapshot-history", brandId, monitorId],
+    queryFn: () => api.get<{ snapshots: WebSnapshot[] }>(`/api/web/snapshots${qs({ brand_id: brandId, monitor_id: monitorId, days: 36500 })}`).then((d) => d.snapshots),
+    enabled: enabled && !!brandId,
+  });
+}
+
 export function useWebSummary(brandId?: string, monitorId?: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
@@ -362,6 +370,19 @@ export function useWebAnalysis() {
   return useMutation({
     mutationFn: ({ brandId, monitorId, range, refresh = false }: { brandId: string; monitorId?: string; range: TimeRange; refresh?: boolean }) =>
       api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rangeParams(range) })}`),
+  });
+}
+
+export function useDeleteWebSnapshot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<{ deleted: string; monitor_id?: string }>(`/api/web/snapshots/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["web-monitors"] });
+      qc.invalidateQueries({ queryKey: ["web-snapshots"] });
+      qc.invalidateQueries({ queryKey: ["web-snapshot-history"] });
+      qc.invalidateQueries({ queryKey: ["web-summary"] });
+    },
   });
 }
 

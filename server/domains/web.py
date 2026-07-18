@@ -475,20 +475,24 @@ def update_monitor(monitor_id: str, payload: WebMonitorUpdate, conn: sqlite3.Con
     return monitor_to_dict(conn, conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone())
 
 
-@router.delete("/monitors/{monitor_id}")
-def delete_monitor(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
-    files = conn.execute(
-        "SELECT screenshot_path, html_path FROM web_snapshots WHERE monitor_id = ?",
-        (monitor_id,),
-    ).fetchall()
+def _delete_snapshot_files(rows) -> None:
     root = SNAPSHOT_DIR.resolve()
-    for row in files:
+    for row in rows:
         for filename in (row["screenshot_path"], row["html_path"]):
             if not filename:
                 continue
             path = (SNAPSHOT_DIR / filename).resolve()
             if path.parent == root and path.is_file():
                 path.unlink(missing_ok=True)
+
+
+@router.delete("/monitors/{monitor_id}")
+def delete_monitor(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+    files = conn.execute(
+        "SELECT screenshot_path, html_path FROM web_snapshots WHERE monitor_id = ?",
+        (monitor_id,),
+    ).fetchall()
+    _delete_snapshot_files(files)
     conn.execute("DELETE FROM web_snapshot_analyses WHERE monitor_id = ?", (monitor_id,))
     conn.execute("DELETE FROM web_snapshots WHERE monitor_id = ?", (monitor_id,))
     conn.execute("DELETE FROM web_monitors WHERE id = ?", (monitor_id,))
@@ -502,6 +506,21 @@ def capture(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
         raise HTTPException(status_code=404, detail="Monitor not found")
     snapshots = capture_monitor(conn, dict(row))
     return {"snapshots": snapshots, "captured": len(snapshots)}
+
+
+@router.delete("/snapshots/{snapshot_id}")
+def delete_snapshot(snapshot_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+    row = conn.execute("SELECT * FROM web_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    item = dict(row)
+    _delete_snapshot_files([item])
+    conn.execute(
+        "DELETE FROM web_snapshot_analyses WHERE monitor_id = ? OR brand_id = ?",
+        (item.get("monitor_id"), item.get("brand_id")),
+    )
+    conn.execute("DELETE FROM web_snapshots WHERE id = ?", (snapshot_id,))
+    return {"deleted": snapshot_id, "monitor_id": item.get("monitor_id")}
 
 
 @router.get("/snapshots")

@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { TrendChart } from "../components/charts";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
-import { useWebAnalysis, useWebMonitors, useWebMutations, useWebSnapshots, useWebSummary } from "../lib/hooks";
+import { useDeleteWebSnapshot, useWebAnalysis, useWebMonitors, useWebMutations, useWebSnapshotHistory, useWebSnapshots, useWebSummary } from "../lib/hooks";
 import { fmtDate, fmtDateTime } from "../lib/format";
 import { rangeLabel, useTimeRange } from "../lib/timeRange";
 import type { WebAiAnalysis, WebMonitor, WebSnapshot, WebSummary } from "../lib/api";
@@ -189,8 +189,7 @@ export default function Web() {
         </Card>
 
         <Card className="lg:col-span-2">
-          <SectionTitle title="快照时间线" subtitle={`${rangeLabel(range)} · 点击查看截图或交互归档`} />
-          <SnapshotTimeline snapshots={snapshots} />
+          <SnapshotTimeline snapshots={snapshots} brandId={brandId || ""} monitorId={selected} rangeText={rangeLabel(range)} />
         </Card>
       </div>
 
@@ -212,82 +211,315 @@ export default function Web() {
   );
 }
 
-function SnapshotTimeline({ snapshots }: { snapshots: WebSnapshot[] }) {
-  const [active, setActive] = useState<WebSnapshot | null>(null);
-  const [mode, setMode] = useState<"screenshot" | "archive">("screenshot");
-  if (!snapshots.length) return <EmptyState title="所选范围内暂无快照" hint="调整日期范围，或对监控页面点击「立即截图」生成基线快照。" />;
+type SnapshotMode = "screenshot" | "archive";
+
+function snapshotMonth(snapshot: WebSnapshot) {
+  return snapshot.snapshot_date.slice(0, 7);
+}
+
+function snapshotTime(snapshot: WebSnapshot) {
+  const value = new Date(snapshot.created_at);
+  if (Number.isNaN(value.getTime())) return "—";
+  return value.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function SnapshotViewer({
+  snapshot,
+  mode,
+  onModeChange,
+  onDelete,
+}: {
+  snapshot: WebSnapshot;
+  mode: SnapshotMode;
+  onModeChange: (mode: SnapshotMode) => void;
+  onDelete?: () => void;
+}) {
   return (
-    <>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[720px] overflow-y-auto pr-1">
-        {snapshots.map((snapshot) => (
-          <button
-            key={snapshot.id}
-            onClick={() => { setActive(snapshot); setMode("screenshot"); }}
-            className="text-left panel overflow-hidden cursor-pointer"
-            style={{ padding: 0 }}
-          >
-            <div className="aspect-[4/3] overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-              {snapshot.screenshot_url && <img src={snapshot.screenshot_url} alt={snapshot.title} loading="lazy" className="w-full h-full object-cover object-top" />}
-            </div>
-            <div className="p-2.5">
-              <div className="flex items-center justify-between gap-1">
-                <span className="text-[12px]" style={{ color: "var(--mute)" }}>{fmtDate(snapshot.snapshot_date)}</span>
-                {snapshot.has_meaningful_change
-                  ? <Badge tone="negative">变化 {percent(snapshot.effective_change_score)}</Badge>
-                  : <Badge tone="neutral">无明显变化</Badge>}
-              </div>
-              <div className="text-[12px] truncate mt-1" style={{ color: "var(--body)" }}>{snapshot.page_path}</div>
-              <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>视觉 {percent(snapshot.visual_change_score)} · 文本 {percent(snapshot.change_score)}</div>
-            </div>
-          </button>
-        ))}
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex gap-2">
+          <Button size="sm" variant={mode === "screenshot" ? "primary" : "secondary"} onClick={() => onModeChange("screenshot")}>截图</Button>
+          <Button size="sm" variant={mode === "archive" ? "primary" : "secondary"} disabled={!snapshot.archive_url} onClick={() => onModeChange("archive")}>交互归档</Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge tone={snapshot.archive_self_contained ? "positive" : "warning"}>{snapshot.archive_self_contained ? "自包含归档" : "受限归档"}</Badge>
+          <Badge tone="neutral">{archiveSize(snapshot.archive_size)}</Badge>
+          {onDelete && <Button size="sm" variant="danger" onClick={onDelete}>删除此快照</Button>}
+        </div>
       </div>
-      <Modal open={!!active} onClose={() => setActive(null)} title={active?.title || "快照"} width={1120}>
-        {active && (
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex gap-2">
-                <Button size="sm" variant={mode === "screenshot" ? "primary" : "secondary"} onClick={() => setMode("screenshot")}>截图</Button>
-                <Button size="sm" variant={mode === "archive" ? "primary" : "secondary"} disabled={!active.archive_url} onClick={() => setMode("archive")}>交互归档</Button>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                <Badge tone={active.archive_self_contained ? "positive" : "warning"}>{active.archive_self_contained ? "自包含归档" : "受限归档"}</Badge>
-                <Badge tone="neutral">{archiveSize(active.archive_size)}</Badge>
-              </div>
+      <div className="text-[13px]" style={{ color: "var(--body)" }}>{snapshot.summary}</div>
+      {snapshot.changes?.length > 0 && (
+        <div className="space-y-1 max-h-32 overflow-y-auto">
+          {snapshot.changes.map((change, index) => (
+            <div key={index} className="text-[12px] flex gap-2" style={{ color: change.type === "removed" ? "var(--danger)" : "var(--body)" }}>
+              <Badge tone={change.type === "added" ? "positive" : change.type === "removed" ? "negative" : "neutral"}>{change.type}</Badge>
+              <span>{change.text || `${change.from} → ${change.to}`}</span>
             </div>
-            <div className="text-[13px]" style={{ color: "var(--body)" }}>{active.summary}</div>
-            {active.changes?.length > 0 && (
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {active.changes.map((change, index) => (
-                  <div key={index} className="text-[12px] flex gap-2" style={{ color: change.type === "removed" ? "var(--danger)" : "var(--body)" }}>
-                    <Badge tone={change.type === "added" ? "positive" : change.type === "removed" ? "negative" : "neutral"}>{change.type}</Badge>
-                    <span>{change.text || `${change.from} → ${change.to}`}</span>
-                  </div>
+          ))}
+        </div>
+      )}
+      {mode === "screenshot" ? (
+        <img src={snapshot.screenshot_url} alt={snapshot.title} className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
+      ) : (
+        <div>
+          <div className="text-[12px] mb-2 rounded-md px-3 py-2" style={{ color: "var(--mute)", background: "var(--bg-soft)" }}>
+            归档在独立沙箱中运行：允许离线脚本交互，但禁止联网、表单提交、下载和外部跳转。视频仅保存封面。
+          </div>
+          <iframe
+            src={snapshot.archive_url}
+            title={`${snapshot.title || "网页"}交互归档`}
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            className="w-full rounded-md bg-white"
+            style={{ height: "72vh", border: "1px solid var(--hairline)" }}
+          />
+        </div>
+      )}
+      <div className="text-[12px] flex flex-wrap gap-x-3 gap-y-1" style={{ color: "var(--mute)" }}>
+        <span>{fmtDateTime(snapshot.created_at)}</span>
+        <span>视觉变化 {percent(snapshot.visual_change_score)}</span>
+        <span>文本变化 {percent(snapshot.change_score)}</span>
+        <a href={snapshot.final_url || snapshot.url} target="_blank" rel="noreferrer" className="hover:underline">访问当前网页</a>
+      </div>
+    </div>
+  );
+}
+
+function SnapshotHistoryModal({
+  open,
+  onClose,
+  snapshots,
+  loading,
+  selectedId,
+  onSelect,
+  mode,
+  onModeChange,
+  onDelete,
+}: {
+  open: boolean;
+  onClose: () => void;
+  snapshots: WebSnapshot[];
+  loading: boolean;
+  selectedId?: string;
+  onSelect: (id: string) => void;
+  mode: SnapshotMode;
+  onModeChange: (mode: SnapshotMode) => void;
+  onDelete: (snapshot: WebSnapshot) => void;
+}) {
+  const selected = snapshots.find((snapshot) => snapshot.id === selectedId) || snapshots[0];
+  const years = Array.from(new Set(snapshots.map((snapshot) => snapshot.snapshot_date.slice(0, 4)))).sort((a, b) => b.localeCompare(a));
+  const selectedYear = selected?.snapshot_date.slice(0, 4) || years[0];
+  const selectedMonth = selected ? snapshotMonth(selected) : "";
+  const monthSnapshots = selectedMonth ? snapshots.filter((snapshot) => snapshotMonth(snapshot) === selectedMonth) : [];
+  const selectedIndex = selected ? snapshots.findIndex((snapshot) => snapshot.id === selected.id) : -1;
+  return (
+    <Modal open={open} onClose={onClose} title="快照历史" width={1280}>
+      {loading && !snapshots.length ? <Spinner /> : !selected ? (
+        <EmptyState title="暂无历史快照" hint="创建快照后，可以在这里按年份、月份和抓取时间浏览。" />
+      ) : (
+        <div className="space-y-4">
+          <div className="rounded-lg p-4 space-y-3" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-2">
+                {years.map((year) => (
+                  <button
+                    key={year}
+                    onClick={() => {
+                      const candidate = snapshots.find((snapshot) => snapshot.snapshot_date.startsWith(year));
+                      if (candidate) onSelect(candidate.id);
+                    }}
+                    className="h-8 px-3 rounded-md text-[13px] font-medium cursor-pointer"
+                    style={year === selectedYear
+                      ? { background: "var(--ink)", color: "var(--bg)" }
+                      : { background: "var(--panel)", color: "var(--body)", border: "1px solid var(--hairline-strong)" }}
+                  >
+                    {year}
+                  </button>
                 ))}
               </div>
-            )}
-            {mode === "screenshot" ? (
-              <img src={active.screenshot_url} alt={active.title} className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
-            ) : (
-              <div>
-                <div className="text-[12px] mb-2 rounded-md px-3 py-2" style={{ color: "var(--mute)", background: "var(--bg-soft)" }}>
-                  归档在独立沙箱中运行：允许离线脚本交互，但禁止联网、表单提交、下载和外部跳转。视频仅保存封面。
-                </div>
-                <iframe
-                  src={active.archive_url}
-                  title={`${active.title || "网页"}交互归档`}
-                  sandbox="allow-scripts"
-                  referrerPolicy="no-referrer"
-                  className="w-full rounded-md bg-white"
-                  style={{ height: "72vh", border: "1px solid var(--hairline)" }}
-                />
+              <div className="text-[12px]" style={{ color: "var(--mute)" }}>
+                共 {snapshots.length} 张 · {snapshots[snapshots.length - 1]?.snapshot_date} 至 {snapshots[0]?.snapshot_date}
               </div>
-            )}
-            <div className="text-[12px] flex flex-wrap gap-x-3 gap-y-1" style={{ color: "var(--mute)" }}>
-              <span>{fmtDateTime(active.created_at)}</span>
-              <span>视觉变化 {percent(active.visual_change_score)}</span>
-              <span>文本变化 {percent(active.change_score)}</span>
-              <a href={active.final_url || active.url} target="_blank" rel="noreferrer" className="hover:underline">访问当前网页</a>
+            </div>
+
+            <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-12 gap-1.5">
+              {Array.from({ length: 12 }, (_, index) => {
+                const month = `${selectedYear}-${String(index + 1).padStart(2, "0")}`;
+                const items = snapshots.filter((snapshot) => snapshotMonth(snapshot) === month);
+                const isSelected = month === selectedMonth;
+                return (
+                  <button
+                    key={month}
+                    disabled={!items.length}
+                    onClick={() => items[0] && onSelect(items[0].id)}
+                    className="rounded-md py-2 text-center cursor-pointer disabled:cursor-default"
+                    style={isSelected
+                      ? { background: "rgba(0,112,243,0.12)", color: "var(--accent)", border: "1px solid var(--accent)" }
+                      : { background: items.length ? "var(--panel)" : "transparent", color: items.length ? "var(--body)" : "var(--mute)", border: "1px solid var(--hairline)" }}
+                  >
+                    <div className="text-[12px] font-medium">{index + 1}月</div>
+                    <div className="text-[10px] mt-0.5 tabular-nums">{items.length || "—"}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {monthSnapshots.map((snapshot) => (
+                <button
+                  key={snapshot.id}
+                  onClick={() => onSelect(snapshot.id)}
+                  className="shrink-0 min-w-[92px] rounded-md px-3 py-2 text-left cursor-pointer"
+                  style={snapshot.id === selected.id
+                    ? { background: "var(--ink)", color: "var(--bg)" }
+                    : { background: "var(--panel)", color: "var(--body)", border: "1px solid var(--hairline-strong)" }}
+                >
+                  <div className="text-[12px] font-medium">{snapshot.snapshot_date.slice(5)}</div>
+                  <div className="text-[10px] mt-0.5 opacity-70">{snapshotTime(snapshot)} · {snapshot.page_path}</div>
+                  {snapshot.has_meaningful_change && <div className="text-[10px] mt-1" style={{ color: snapshot.id === selected.id ? "inherit" : "var(--danger)" }}>● 发生变化</div>}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[15px] font-medium" style={{ color: "var(--ink)" }}>{selected.title || selected.url}</div>
+              <div className="text-[12px] mt-0.5" style={{ color: "var(--mute)" }}>{fmtDateTime(selected.created_at)} · {selected.page_path}</div>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={selectedIndex < 0 || selectedIndex >= snapshots.length - 1} onClick={() => onSelect(snapshots[selectedIndex + 1].id)}>← 较早</Button>
+              <Button size="sm" disabled={selectedIndex <= 0} onClick={() => onSelect(snapshots[selectedIndex - 1].id)}>较新 →</Button>
+            </div>
+          </div>
+          <SnapshotViewer snapshot={selected} mode={mode} onModeChange={onModeChange} onDelete={() => onDelete(selected)} />
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function SnapshotTimeline({ snapshots, brandId, monitorId, rangeText }: { snapshots: WebSnapshot[]; brandId: string; monitorId?: string; rangeText: string }) {
+  const [active, setActive] = useState<WebSnapshot | null>(null);
+  const [mode, setMode] = useState<SnapshotMode>("screenshot");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySelectedId, setHistorySelectedId] = useState<string | undefined>();
+  const [historyMode, setHistoryMode] = useState<SnapshotMode>("screenshot");
+  const [deleting, setDeleting] = useState<WebSnapshot | null>(null);
+  const history = useWebSnapshotHistory(brandId, monitorId, historyOpen);
+  const deleteSnapshot = useDeleteWebSnapshot();
+  const detailSnapshots = history.data?.length ? history.data : snapshots;
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    if (!detailSnapshots.length) {
+      setHistorySelectedId(undefined);
+      return;
+    }
+    if (!detailSnapshots.some((snapshot) => snapshot.id === historySelectedId)) setHistorySelectedId(detailSnapshots[0].id);
+  }, [historyOpen, historySelectedId, detailSnapshots]);
+
+  const selectHistory = (id: string) => {
+    setHistorySelectedId(id);
+    setHistoryMode("screenshot");
+  };
+
+  const requestDelete = (snapshot: WebSnapshot) => {
+    deleteSnapshot.reset();
+    setDeleting(snapshot);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleting) return;
+    try {
+      await deleteSnapshot.mutateAsync(deleting.id);
+      const remaining = detailSnapshots.filter((snapshot) => snapshot.id !== deleting.id);
+      if (active?.id === deleting.id) setActive(null);
+      if (historySelectedId === deleting.id) setHistorySelectedId(remaining[0]?.id);
+      if (!remaining.length) setHistoryOpen(false);
+      setDeleting(null);
+    } catch {
+      /* error is rendered in the confirmation modal */
+    }
+  };
+
+  return (
+    <>
+      <SectionTitle
+        title="快照时间线"
+        subtitle={`${rangeText} · 点击查看截图或交互归档`}
+        action={<Button size="sm" onClick={() => { setHistoryOpen(true); setHistorySelectedId(snapshots[0]?.id); setHistoryMode("screenshot"); }}>查看更多</Button>}
+      />
+      {snapshots.length ? (
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[720px] overflow-y-auto pr-1">
+          {snapshots.map((snapshot) => (
+            <div key={snapshot.id} className="relative panel overflow-hidden" style={{ padding: 0 }}>
+              <button
+                onClick={() => { setActive(snapshot); setMode("screenshot"); }}
+                className="w-full text-left cursor-pointer"
+                aria-label={`查看 ${fmtDate(snapshot.snapshot_date)} 快照`}
+              >
+                <div className="aspect-[4/3] overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+                  {snapshot.screenshot_url && <img src={snapshot.screenshot_url} alt={snapshot.title} loading="lazy" className="w-full h-full object-cover object-top" />}
+                </div>
+                <div className="p-2.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[12px]" style={{ color: "var(--mute)" }}>{fmtDate(snapshot.snapshot_date)}</span>
+                    {snapshot.has_meaningful_change
+                      ? <Badge tone="negative">变化 {percent(snapshot.effective_change_score)}</Badge>
+                      : <Badge tone="neutral">无明显变化</Badge>}
+                  </div>
+                  <div className="text-[12px] truncate mt-1" style={{ color: "var(--body)" }}>{snapshot.page_path}</div>
+                  <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>视觉 {percent(snapshot.visual_change_score)} · 文本 {percent(snapshot.change_score)}</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                aria-label={`删除 ${fmtDate(snapshot.snapshot_date)} 快照`}
+                title="删除快照"
+                onClick={() => requestDelete(snapshot)}
+                className="absolute top-2 right-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-full text-[17px] leading-none cursor-pointer"
+                style={{ background: "rgba(255,255,255,0.92)", color: "#555", border: "1px solid rgba(0,0,0,0.14)", boxShadow: "0 1px 4px rgba(0,0,0,0.14)" }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title="所选范围内暂无快照" hint="调整日期范围，或对监控页面点击「立即截图」生成基线快照。" />
+      )}
+
+      <Modal open={!!active} onClose={() => setActive(null)} title={active?.title || "快照"} width={1120}>
+        {active && <SnapshotViewer snapshot={active} mode={mode} onModeChange={setMode} onDelete={() => requestDelete(active)} />}
+      </Modal>
+
+      <SnapshotHistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        snapshots={detailSnapshots}
+        loading={history.isLoading}
+        selectedId={historySelectedId}
+        onSelect={selectHistory}
+        mode={historyMode}
+        onModeChange={setHistoryMode}
+        onDelete={requestDelete}
+      />
+
+      <Modal open={!!deleting} onClose={() => { if (!deleteSnapshot.isPending) setDeleting(null); }} title="删除这张快照？" width={520}>
+        {deleting && (
+          <div className="space-y-4">
+            <div>
+              <div className="text-[14px] font-medium" style={{ color: "var(--ink)" }}>{deleting.title || deleting.url}</div>
+              <div className="text-[12px] mt-1" style={{ color: "var(--mute)" }}>{fmtDateTime(deleting.created_at)} · {deleting.page_path}</div>
+            </div>
+            <div className="rounded-md px-3 py-2 text-[13px]" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>
+              截图文件、HTML 交互归档和这条时间线记录都会永久删除，无法恢复。监控任务本身不会被删除。
+            </div>
+            {deleteSnapshot.error instanceof Error && <div className="text-[12px]" style={{ color: "var(--danger)" }}>{deleteSnapshot.error.message}</div>}
+            <div className="flex justify-end gap-2">
+              <Button disabled={deleteSnapshot.isPending} onClick={() => setDeleting(null)}>取消</Button>
+              <Button variant="danger" disabled={deleteSnapshot.isPending} onClick={confirmDelete}>{deleteSnapshot.isPending ? "删除中…" : "确认删除"}</Button>
             </div>
           </div>
         )}
