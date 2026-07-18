@@ -300,6 +300,7 @@ def marketing_summary(
     by_tier: Counter = Counter()
     by_country: Counter = Counter()
     sov: Counter = Counter()
+    publications: dict[str, dict] = {}
     total_reach = 0
     total_ave = 0
     for r in records:
@@ -316,6 +317,29 @@ def marketing_summary(
             total_ave += int(m.get("ave") or 0)
         except (TypeError, ValueError):
             pass
+        if r.get("channel") == "media":
+            domain = m.get("publication_domain") or ""
+            name = r.get("platform") or domain or "Unknown publication"
+            key = domain or name
+            publication = publications.setdefault(key, {
+                "name": name,
+                "domain": domain,
+                "total": 0,
+                "monthly_traffic": 0,
+                "authority": 0,
+                "tier": m.get("media_tier") or "unknown",
+                "country": m.get("country") or "",
+            })
+            publication["total"] += 1
+            for field in ("monthly_traffic", "estimated_reach"):
+                try:
+                    publication["monthly_traffic"] = max(publication["monthly_traffic"], int(m.get(field) or 0))
+                except (TypeError, ValueError):
+                    pass
+            try:
+                publication["authority"] = max(publication["authority"], int(m.get("authority") or 0))
+            except (TypeError, ValueError):
+                pass
         sov[r.get("platform") or "unknown"] += 1
     sov_total = sum(sov.values()) or 1
 
@@ -328,6 +352,7 @@ def marketing_summary(
         "by_channel": [{"channel": k, "total": v} for k, v in by_channel.most_common()],
         "by_platform": [{"platform": k, "total": v} for k, v in by_platform.most_common(12)],
         "by_source": [{"source_id": k, "total": v} for k, v in by_source.most_common()],
+        "by_publication": sorted(publications.values(), key=lambda item: (-item["total"], item["name"].lower())),
         "by_subchannel": _by_subchannel(records),
         "by_tier": [{"tier": k, "total": v} for k, v in by_tier.most_common()],
         "by_country": [{"country": k, "total": v} for k, v in by_country.most_common(12)],

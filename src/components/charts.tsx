@@ -16,7 +16,7 @@ import {
 const AXIS = { fontSize: 11, fill: "var(--mute)" };
 const GRID = "var(--hairline)";
 
-function TooltipBox({ active, payload, label }: any) {
+function TooltipBox({ active, payload, label, valueFormatter }: any) {
   if (!active || !payload?.length) return null;
   return (
     <div className="panel px-3 py-2 text-[12px]" style={{ boxShadow: "var(--shadow)" }}>
@@ -24,14 +24,14 @@ function TooltipBox({ active, payload, label }: any) {
       {payload.map((p: any) => (
         <div key={p.dataKey} className="flex items-center gap-2" style={{ color: "var(--body)" }}>
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: p.color }} />
-          {p.name}: <span className="tabular-nums font-medium">{p.value}</span>
+          {p.name}: <span className="tabular-nums font-medium">{valueFormatter ? valueFormatter(p.value) : p.value}</span>
         </div>
       ))}
     </div>
   );
 }
 
-export function TrendChart({ data, keys }: { data: any[]; keys: { key: string; name: string; color: string }[] }) {
+export function TrendChart({ data, keys, valueFormatter }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -45,8 +45,8 @@ export function TrendChart({ data, keys }: { data: any[]; keys: { key: string; n
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
-        <YAxis tick={AXIS} axisLine={false} tickLine={false} allowDecimals={false} width={36} />
-        <Tooltip content={<TooltipBox />} />
+        <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 52 : 36} />
+        <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
         {keys.map((k) => (
           <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} />
         ))}

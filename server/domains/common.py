@@ -141,7 +141,7 @@ def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days
     step = timedelta(days=7 if weekly else 1)
     while cursor <= end_d:
         key = cursor.isoformat()
-        buckets[key] = {"date": key, "total": 0, "negative": 0}
+        buckets[key] = {"date": key, "total": 0, "negative": 0, "estimated_reach": 0}
         cursor += step
 
     for record in records:
@@ -154,4 +154,9 @@ def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days
             bucket["total"] += 1
             if record.get("sentiment") == "negative":
                 bucket["negative"] += 1
+            metrics = record.get("metrics") or {}
+            try:
+                bucket["estimated_reach"] += int(metrics.get("monthly_traffic") or metrics.get("estimated_reach") or 0)
+            except (TypeError, ValueError):
+                pass
     return sorted(buckets.values(), key=lambda item: item["date"])

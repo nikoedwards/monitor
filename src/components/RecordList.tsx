@@ -65,6 +65,38 @@ function MediaMeta({ metrics }: { metrics: Record<string, unknown> }) {
   );
 }
 
+function SentimentBadge({ record }: { record: RecordItem }) {
+  const sentiment = record.sentiment;
+  if (!sentiment) return null;
+  const explanation = record.sentiment_explanation;
+  return (
+    <span className="relative inline-flex group">
+      <span tabIndex={0} className="inline-flex cursor-help outline-none">
+        <Badge tone={sentimentTone(sentiment)}>{SENTIMENT_LABEL[sentiment] || sentiment}</Badge>
+      </span>
+      {explanation && (
+        <span
+          role="tooltip"
+          className="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-50 w-[360px] max-w-[80vw] p-3 rounded-md text-[12px] font-normal leading-relaxed opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+          style={{ background: "var(--panel)", color: "var(--body)", border: "1px solid var(--hairline-strong)", boxShadow: "var(--shadow)" }}
+        >
+          <span className="block font-medium mb-1" style={{ color: "var(--ink)" }}>判定依据 · {explanation.method}</span>
+          <span className="block">{explanation.reason}</span>
+          {explanation.positive_terms.length > 0 && <span className="block mt-1.5">正向词：{explanation.positive_terms.join("、")}</span>}
+          {explanation.negative_terms.length > 0 && <span className="block mt-1.5">负向词：{explanation.negative_terms.join("、")}</span>}
+          {explanation.negation_terms.length > 0 && <span className="block mt-1.5">否定词：{explanation.negation_terms.join("、")}</span>}
+          {explanation.evidence.length > 0 && (
+            <span className="block mt-2 pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+              <span className="block mb-1" style={{ color: "var(--mute)" }}>相关原文</span>
+              {explanation.evidence.map((snippet, index) => <span key={index} className="block">“{snippet}”</span>)}
+            </span>
+          )}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function RecordList({ records, emptyHint }: { records: RecordItem[]; emptyHint?: string }) {
   if (!records.length) {
     return <EmptyState title="暂无数据" hint={emptyHint || "在数据源页发起一次采集，或手动录入后再查看。"} />;
@@ -80,7 +112,7 @@ export function RecordList({ records, emptyHint }: { records: RecordItem[]; empt
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap mb-1">
                 {isReply && <Badge tone="accent">回复</Badge>}
-                {r.sentiment && <Badge tone={sentimentTone(r.sentiment)}>{SENTIMENT_LABEL[r.sentiment] || r.sentiment}</Badge>}
+                <SentimentBadge record={r} />
                 {r.platform && <Badge tone="neutral">{r.platform}</Badge>}
                 {r.channel && <Badge tone="neutral">{CHANNEL_LABEL[r.channel] || r.channel}</Badge>}
                 {r.intent && <span className="text-[12px]" style={{ color: "var(--mute)" }}>{r.intent}</span>}

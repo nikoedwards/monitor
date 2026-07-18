@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
-import { Card, EmptyState, InfoHint, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
+import { Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
 import { MonitorStatus } from "../components/MonitorStatus";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { SmartSummary } from "../components/SmartSummary";
@@ -64,6 +64,8 @@ export default function Marketing() {
   const [range] = useTimeRange();
   const [view, setView] = useState<"overview" | "channel">("overview");
   const [channel, setChannel] = useState("community");
+  const [publicationDetailOpen, setPublicationDetailOpen] = useState(false);
+  const [trendMetric, setTrendMetric] = useState<"volume" | "reach">("volume");
   const activeChannel = view === "channel" ? channel : undefined;
   const { data: summary, isLoading } = useMarketingSummary(brandId, activeChannel, range);
   const { data: records = [] } = useRecords({ brand_id: brandId, dimension: "marketing", channel: activeChannel, ...rangeParams(range), limit: 60 });
@@ -152,7 +154,11 @@ export default function Marketing() {
             )}
           </Card>
           <Card>
-            <SectionTitle title="声量占比 SOV" subtitle="各媒体声量份额(Top 8)" />
+            <SectionTitle
+              title="声量占比 SOV"
+              subtitle="各媒体声量份额(Top 8)"
+              hint="SOV（Share of Voice，声量占比）表示某个媒体的报道声量占全部媒体报道声量的比例。"
+            />
             <ShareOfVoice items={summary.share_of_voice || []} />
           </Card>
         </div>
@@ -160,12 +166,35 @@ export default function Marketing() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
-          <SectionTitle title="声量趋势" />
-          <TrendChart data={summary.trend} keys={[{ key: "total", name: "声量", color: "var(--accent)" }, { key: "negative", name: "负向", color: "var(--danger)" }]} />
+          <SectionTitle
+            title={trendMetric === "volume" ? "声量趋势" : "预计曝光趋势"}
+            action={summary.total_reach > 0 ? (
+              <SegmentGroup
+                value={trendMetric}
+                options={[{ value: "volume", label: "篇数" }, { value: "reach", label: "预计曝光" }]}
+                onChange={setTrendMetric}
+              />
+            ) : undefined}
+          />
+          {trendMetric === "volume" ? (
+            <TrendChart data={summary.trend} keys={[{ key: "total", name: "声量", color: "var(--accent)" }, { key: "negative", name: "负向", color: "var(--danger)" }]} />
+          ) : (
+            <TrendChart
+              data={summary.trend}
+              keys={[{ key: "estimated_reach", name: "预计曝光", color: "var(--violet)" }]}
+              valueFormatter={fmtNum}
+            />
+          )}
         </Card>
         <Card>
-          <SectionTitle title={view === "channel" ? "来源渠道明细" : "平台分布"} subtitle={view === "channel" ? "该渠道下各数据源的采集量" : undefined} />
-          {view === "channel" ? (
+          <SectionTitle
+            title={view === "channel" && channel === "media" ? "媒体来源明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
+            subtitle={view === "channel" && channel === "media" ? "当前时间范围内各媒体网站的发文量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
+            action={view === "channel" && channel === "media" && summary.by_publication?.length ? <Button size="sm" onClick={() => setPublicationDetailOpen(true)}>查看明细</Button> : undefined}
+          />
+          {view === "channel" && channel === "media" ? (
+            <PublicationBreakdown publications={(summary.by_publication || []).slice(0, 8)} />
+          ) : view === "channel" ? (
             <SourceBreakdown sources={summary.by_source || []} />
           ) : summary.by_platform?.length ? (
             <Bars data={summary.by_platform.slice(0, 8)} dataKey="total" nameKey="platform" name="声量" color="var(--violet)" />
@@ -212,7 +241,96 @@ export default function Marketing() {
         <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
         <RecordList records={shownRecords} emptyHint="在数据源页发起媒体 / 广告 / 红人 / 社群采集后查看。" />
       </Card>
+
+      <PublicationDetailModal
+        open={publicationDetailOpen}
+        onClose={() => setPublicationDetailOpen(false)}
+        publications={summary.by_publication || []}
+      />
     </div>
+  );
+}
+
+type PublicationStat = {
+  name: string;
+  domain: string;
+  total: number;
+  monthly_traffic: number;
+  authority: number;
+  tier: string;
+  country: string;
+};
+
+function PublicationBreakdown({ publications }: { publications: PublicationStat[] }) {
+  if (!publications.length) {
+    return <EmptyState title="暂无媒体来源" hint="当前时间范围内尚未采集到带有媒体网站信息的报道。" />;
+  }
+  const max = Math.max(...publications.map((item) => item.total), 1);
+  return (
+    <div className="space-y-2.5">
+      {publications.map((item) => (
+        <div key={item.domain || item.name}>
+          <div className="flex items-center justify-between gap-3 text-[13px] mb-1">
+            <div className="min-w-0 flex items-center gap-2">
+              {item.domain && <img src={`https://www.google.com/s2/favicons?domain=${item.domain}&sz=32`} alt="" className="w-4 h-4 rounded-sm shrink-0" />}
+              <span className="truncate" style={{ color: "var(--ink)" }}>{item.name}</span>
+            </div>
+            <span className="tabular-nums shrink-0" style={{ color: "var(--mute)" }}>{fmtNum(item.total)} 篇</span>
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+            <div className="h-full rounded-full" style={{ width: `${(item.total / max) * 100}%`, background: "var(--accent)" }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PublicationDetailModal({ open, onClose, publications }: { open: boolean; onClose: () => void; publications: PublicationStat[] }) {
+  const [ranking, setRanking] = useState<"frequency" | "reach">("frequency");
+  const ranked = [...publications].sort((a, b) => ranking === "frequency" ? b.total - a.total : b.monthly_traffic - a.monthly_traffic);
+  const max = Math.max(...ranked.map((item) => ranking === "frequency" ? item.total : item.monthly_traffic), 1);
+  return (
+    <Modal open={open} onClose={onClose} title="媒体来源排行" width={760}>
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <SegmentGroup
+          value={ranking}
+          options={[{ value: "frequency", label: "发文频率排行" }, { value: "reach", label: "媒体体量排行" }]}
+          onChange={setRanking}
+        />
+        <span className="text-[12px]" style={{ color: "var(--mute)" }}>
+          {ranking === "frequency" ? "按当前时间范围内收录文章数排序" : "按预估月访问量排序，数据为媒体库估算值"}
+        </span>
+      </div>
+      {ranked.length ? (
+        <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+          {ranked.map((item, index) => {
+            const value = ranking === "frequency" ? item.total : item.monthly_traffic;
+            return (
+              <div key={item.domain || item.name}>
+                <div className="flex items-center justify-between gap-4 text-[13px] mb-1.5">
+                  <div className="min-w-0 flex items-center gap-2">
+                    <span className="w-5 text-right tabular-nums shrink-0" style={{ color: "var(--mute)" }}>{index + 1}</span>
+                    {item.domain && <img src={`https://www.google.com/s2/favicons?domain=${item.domain}&sz=32`} alt="" className="w-4 h-4 rounded-sm shrink-0" />}
+                    <div className="min-w-0">
+                      <div className="truncate font-medium" style={{ color: "var(--ink)" }}>{item.name}</div>
+                      {item.domain && <div className="truncate text-[11px]" style={{ color: "var(--mute)" }}>{item.domain}</div>}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="tabular-nums font-medium" style={{ color: "var(--ink)" }}>{ranking === "frequency" ? `${fmtNum(value)} 篇` : fmtNum(value)}</div>
+                    <div className="text-[11px]" style={{ color: "var(--mute)" }}>{TIER_LABEL[item.tier] || item.tier}{item.authority ? ` · 权威度 ${item.authority}` : ""}</div>
+                  </div>
+                </div>
+                <div className="ml-7 h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+                  <div className="h-full rounded-full" style={{ width: `${(value / max) * 100}%`, background: ranking === "frequency" ? "var(--accent)" : "var(--violet)" }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : <EmptyState title="暂无媒体数据" hint="当前时间范围内尚未收录媒体报道。" />}
+    </Modal>
   );
 }
 
