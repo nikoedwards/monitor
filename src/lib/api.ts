@@ -224,10 +224,64 @@ export interface WebSnapshot {
   final_url?: string;
   title?: string;
   screenshot_url: string;
+  archive_url?: string;
+  archive_size?: number;
+  archive_self_contained?: boolean;
+  capture_method?: string;
   change_score?: number;
+  visual_change_score?: number;
+  visual_change_ratio?: number;
+  effective_change_score?: number;
+  has_meaningful_change?: boolean;
+  visual_regions: { x: number; y: number; width: number; height: number; change_ratio: number }[];
   summary?: string;
   changes: { type: string; text?: string; from?: string; to?: string }[];
   page_path: string;
+  created_at: string;
+  screenshot_path?: string;
+}
+
+export interface WebPeriodStats {
+  start_date: string;
+  end_date: string;
+  range_days: number;
+  total_snapshots: number;
+  changed: number;
+  changed_days: number;
+  change_day_rate: number;
+  capture_change_rate: number;
+  average_interval_days?: number | null;
+  average_severity: number;
+  major_changes: number;
+  daily: { date: string; captures: number; changed: number; severity: number }[];
+  page_activity: { page: string; captures: number; changed: number; average_severity: number }[];
+  highlights: WebSnapshot[];
+}
+
+export interface WebSummary extends WebPeriodStats {
+  previous_period: WebPeriodStats;
+  comparison: {
+    trend: "more_active" | "more_stable" | "flat";
+    changed_delta: number;
+    changed_days_delta: number;
+    frequency_delta_pct?: number | null;
+    severity_delta: number;
+  };
+  ai_configured: boolean;
+}
+
+export interface WebAiAnalysis {
+  summary: string;
+  highlights: string[];
+  change_categories: { category: string; count: number; evidence: string }[];
+  major_events: { date: string; page: string; change: string; impact?: string; persistence?: string }[];
+  frequency_assessment: string;
+  business_signals: string[];
+  caveats: string[];
+  model?: string;
+  cached?: boolean;
+  created_at?: string;
+  analysis_id?: string;
 }
 
 export interface TrendPoint {

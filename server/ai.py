@@ -48,7 +48,7 @@ def is_configured(conn: sqlite3.Connection) -> bool:
     return bool(get_config(conn).get("llm_api_key"))
 
 
-def call_llm(cfg: dict, system: str, prompt: str) -> str:
+def call_llm_content(cfg: dict, system: str, content: str | list[dict]) -> str:
     if not cfg.get("llm_api_key"):
         raise LlmError("尚未配置大模型 Token，请先在设置中填写。")
     try:
@@ -59,7 +59,7 @@ def call_llm(cfg: dict, system: str, prompt: str) -> str:
         "model": cfg.get("llm_model") or DEFAULTS["llm_model"],
         "max_tokens": max_tokens,
         "system": system,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
     }
     request = Request(
         cfg["llm_base_url"] or DEFAULTS["llm_base_url"],
@@ -92,6 +92,10 @@ def call_llm(cfg: dict, system: str, prompt: str) -> str:
     except (json.JSONDecodeError, AttributeError) as exc:
         raise LlmError(f"无法解析大模型响应: {exc}") from exc
     raise LlmError("大模型响应中没有文本内容。")
+
+
+def call_llm(cfg: dict, system: str, prompt: str) -> str:
+    return call_llm_content(cfg, system, prompt)
 
 
 def _extract_json(text: str) -> dict:
@@ -209,6 +213,91 @@ def summarize_records(conn: sqlite3.Connection, records: list[dict], context: di
             parsed[key] = []
     if not isinstance(parsed.get("sentiment"), dict):
         parsed["sentiment"] = {}
+    return parsed
+
+
+# ---------------------------------------------------------- web snapshot analysis
+WEB_ANALYSIS_SYSTEM = (
+    "你是竞品网站视觉变化分析师。你会收到一个日期范围内的确定性统计、文本变化证据，"
+    "以及若干变化前后截图拼图。只描述证据能够支持的变化，不要把轮播图、倒计时、Cookie 弹窗、"
+    "加载失败或采集误差误判成业务动作。仅返回一个 JSON 对象，不要解释或 markdown 围栏。"
+)
+
+WEB_ANALYSIS_PROMPT = """分析范围：{start} 至 {end}
+监控范围：{monitor}
+
+确定性统计（包含与上一等长周期的比较）：
+{stats}
+
+候选变化事件：
+{events}
+
+后续图片按候选事件顺序提供，每张图左侧为 BEFORE、右侧为 AFTER，通常已裁剪到变化最明显的区域。
+
+请严格返回以下 JSON：
+{{
+  "summary": "3-5 句话说明这段时间网站总体发生了什么，以及变化活跃度相对上一周期如何",
+  "highlights": ["最重要发现1", "发现2"],
+  "change_categories": [{{"category": "价格|促销|产品|图片视频|布局导航|CTA|品牌文案|客户案例|政策条款|其他", "count": 0, "evidence": "证据"}}],
+  "major_events": [{{"date": "YYYY-MM-DD", "page": "页面路径", "change": "发生了什么", "impact": "可能影响", "persistence": "持续|短暂|无法判断"}}],
+  "frequency_assessment": "变化频率、间隔、集中时段与环比判断",
+  "business_signals": ["谨慎表达的商业信号"],
+  "caveats": ["数据或采集局限"]
+}}
+
+要求：
+- 截图与文本证据冲突时，明确写入 caveats，不要自行补全。
+- 不要声称无法从截图确认的价格、日期、功能或因果关系。
+- major_events 最多 6 条；没有充分证据的类别不要输出。
+- business_signals 使用“可能、显示出、值得关注”等审慎措辞。
+"""
+
+
+def analyze_web_snapshots(conn: sqlite3.Connection, events: list[dict], context: dict) -> dict:
+    """Explain selected visual snapshot changes with a multimodal model."""
+    cfg = get_config(conn)
+    event_rows = []
+    content: list[dict] = []
+    for index, event in enumerate(events[:6], start=1):
+        event_rows.append({
+            "index": index,
+            "date": event.get("date"),
+            "page": event.get("page"),
+            "visual_score": event.get("visual_score"),
+            "text_score": event.get("text_score"),
+            "text_changes": event.get("text_changes") or [],
+        })
+    prompt = WEB_ANALYSIS_PROMPT.format(
+        start=context.get("start") or "",
+        end=context.get("end") or "",
+        monitor=context.get("monitor") or "全部网页监控",
+        stats=json.dumps(context.get("stats") or {}, ensure_ascii=False),
+        events=json.dumps(event_rows, ensure_ascii=False),
+    )
+    content.append({"type": "text", "text": prompt})
+    for index, event in enumerate(events[:6], start=1):
+        image = event.get("image")
+        if not image:
+            continue
+        content.append({"type": "text", "text": f"候选事件 {index}：{event.get('date')} · {event.get('page')}"})
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.get("media_type") or "image/jpeg",
+                "data": image.get("data") or "",
+            },
+        })
+    text = call_llm_content(cfg, WEB_ANALYSIS_SYSTEM, content)
+    parsed = _extract_json(text)
+    if not isinstance(parsed, dict):
+        raise LlmError("大模型未返回有效的网站分析对象")
+    parsed.setdefault("summary", "")
+    parsed.setdefault("frequency_assessment", "")
+    for key in ("highlights", "change_categories", "major_events", "business_signals", "caveats"):
+        if not isinstance(parsed.get(key), list):
+            parsed[key] = []
+    parsed["model"] = cfg.get("llm_model") or DEFAULTS["llm_model"]
     return parsed
 
 

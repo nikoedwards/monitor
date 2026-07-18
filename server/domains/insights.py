@@ -23,8 +23,10 @@ def _brand_snapshot(conn: sqlite3.Connection, brand_id: str | None, start: str, 
         (brand_id, brand_id, start, end),
     ).fetchone()
     web_changed = conn.execute(
-        "SELECT COUNT(*) AS c FROM web_snapshots WHERE (? IS NULL OR brand_id = ?) AND change_score >= 0.15",
-        (brand_id, brand_id),
+        "SELECT COUNT(*) AS c FROM web_snapshots WHERE (? IS NULL OR brand_id = ?) "
+        "AND snapshot_date >= ? AND snapshot_date <= ? "
+        "AND (change_score >= 0.15 OR visual_change_score >= 0.025)",
+        (brand_id, brand_id, start, end),
     ).fetchone()["c"]
     return {
         "records_total": len(records),

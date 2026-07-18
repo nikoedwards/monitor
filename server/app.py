@@ -41,6 +41,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def secure_snapshot_archives(request, call_next):
+    """Force archived HTML into an opaque, offline sandbox even when opened directly."""
+    response = await call_next(request)
+    path = request.url.path.lower()
+    if path.startswith("/snapshots/") and path.endswith(".html"):
+        response.headers["Content-Security-Policy"] = (
+            "sandbox allow-scripts; default-src 'none'; img-src data: blob:; "
+            "style-src 'unsafe-inline' data:; font-src data:; script-src 'unsafe-inline' data: blob:; "
+            "media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; "
+            "base-uri 'none'; object-src 'none'"
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
 for module in (brands, content, creators, sales, web, sources, insights, settings):
     app.include_router(module.router)
 

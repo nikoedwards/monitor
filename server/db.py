@@ -227,12 +227,28 @@ CREATE TABLE IF NOT EXISTS web_snapshots (
   title TEXT,
   screenshot_path TEXT,
   html_path TEXT,
+  archive_size INTEGER,
   text_hash TEXT,
   text_excerpt TEXT,
   change_score REAL,
+  visual_change_score REAL,
+  visual_change_ratio REAL,
+  visual_regions_json TEXT,
   summary TEXT,
   changes_json TEXT,
   raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS web_snapshot_analyses (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT,
+  monitor_id TEXT,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  snapshot_ids_json TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  model TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -308,6 +324,7 @@ CREATE INDEX IF NOT EXISTS idx_sales_metrics_link ON sales_metrics(link_id, snap
 CREATE INDEX IF NOT EXISTS idx_sales_listings_brand ON sales_listings(brand_id, channel);
 CREATE INDEX IF NOT EXISTS idx_sales_listings_link ON sales_listings(link_id);
 CREATE INDEX IF NOT EXISTS idx_web_snapshots_monitor ON web_snapshots(monitor_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_web_snapshot_analyses_range ON web_snapshot_analyses(brand_id, monitor_id, start_date, end_date);
 CREATE INDEX IF NOT EXISTS idx_voc_actions_status ON voc_actions(status, brand_id);
 CREATE INDEX IF NOT EXISTS idx_creators_brand ON creators(brand_id, platform);
 """
@@ -358,6 +375,10 @@ MIGRATIONS = [
     ("web_monitors", "last_change_score", "REAL NOT NULL DEFAULT 0"),
     ("web_monitors", "last_change_summary", "TEXT"),
     ("web_snapshots", "brand_id", "TEXT"),
+    ("web_snapshots", "archive_size", "INTEGER"),
+    ("web_snapshots", "visual_change_score", "REAL"),
+    ("web_snapshots", "visual_change_ratio", "REAL"),
+    ("web_snapshots", "visual_regions_json", "TEXT"),
     ("sources", "tier", "INTEGER NOT NULL DEFAULT 1"),
     ("sources", "needs_credentials", "INTEGER NOT NULL DEFAULT 0"),
     ("sources", "credential_key", "TEXT"),

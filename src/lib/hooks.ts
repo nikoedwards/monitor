@@ -11,7 +11,9 @@ import {
   type Source,
   type VocAction,
   type WebMonitor,
+  type WebAiAnalysis,
   type WebSnapshot,
+  type WebSummary,
 } from "./api";
 import { rangeParams, type TimeRange } from "./timeRange";
 
@@ -338,19 +340,28 @@ export function useWebMonitors(brandId?: string) {
   });
 }
 
-export function useWebSnapshots(brandId?: string, monitorId?: string) {
+export function useWebSnapshots(brandId?: string, monitorId?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["web-snapshots", brandId, monitorId],
-    queryFn: () => api.get<{ snapshots: WebSnapshot[] }>(`/api/web/snapshots${qs({ brand_id: brandId, monitor_id: monitorId })}`).then((d) => d.snapshots),
+    queryKey: ["web-snapshots", brandId, monitorId, rp],
+    queryFn: () => api.get<{ snapshots: WebSnapshot[] }>(`/api/web/snapshots${qs({ brand_id: brandId, monitor_id: monitorId, ...rp })}`).then((d) => d.snapshots),
     enabled: !!brandId,
   });
 }
 
-export function useWebSummary(brandId?: string) {
+export function useWebSummary(brandId?: string, monitorId?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["web-summary", brandId],
-    queryFn: () => api.get<any>(`/api/web/summary${qs({ brand_id: brandId })}`),
+    queryKey: ["web-summary", brandId, monitorId, rp],
+    queryFn: () => api.get<WebSummary>(`/api/web/summary${qs({ brand_id: brandId, monitor_id: monitorId, ...rp })}`),
     enabled: !!brandId,
+  });
+}
+
+export function useWebAnalysis() {
+  return useMutation({
+    mutationFn: ({ brandId, monitorId, range, refresh = false }: { brandId: string; monitorId?: string; range: TimeRange; refresh?: boolean }) =>
+      api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rangeParams(range) })}`),
   });
 }
 
