@@ -97,6 +97,14 @@ export interface RecordItem {
   occurred_at?: string;
   sentiment?: string;
   sentiment_score?: number;
+  sentiment_explanation?: {
+    method: string;
+    reason: string;
+    positive_terms: string[];
+    negative_terms: string[];
+    negation_terms: string[];
+    evidence: string[];
+  };
   intent?: string;
   topics: string[];
   metrics: Record<string, unknown>;
