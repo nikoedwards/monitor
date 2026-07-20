@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import io
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -9,8 +12,14 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from server.domains.web import _period_stats, delete_snapshot
-from server.snapshot import _playwright_capture, _write_fallback_archive, compare_visuals, upgrade_snapshot_archives
+from server.domains.web import _period_stats, delete_snapshot, snapshot_to_dict
+from server.snapshot import (
+    _optimize_archive_image,
+    _playwright_capture,
+    _write_fallback_archive,
+    compare_visuals,
+    upgrade_snapshot_archives,
+)
 
 
 class VisualDiffTests(unittest.TestCase):
@@ -54,6 +63,23 @@ class PeriodStatsTests(unittest.TestCase):
         self.assertEqual(result["changed_days"], 2)
         self.assertEqual(result["average_interval_days"], 3.0)
         self.assertEqual(len(result["daily"]), 7)
+
+    def test_snapshot_archive_url_carries_replay_cache_version(self):
+        result = snapshot_to_dict(
+            {
+                "id": "snapshot-1",
+                "url": "https://example.com",
+                "final_url": "https://example.com/pricing",
+                "screenshot_path": "snapshot.png",
+                "html_path": "snapshot.html",
+                "changes_json": "[]",
+                "visual_regions_json": "[]",
+                "raw_json": '{"archive":{"self_contained":true}}',
+                "change_score": 0,
+                "visual_change_score": 0,
+            }
+        )
+        self.assertEqual(result["archive_url"], "/snapshots/snapshot.html?v=4")
 
 
 class SnapshotDeletionTests(unittest.TestCase):
@@ -101,6 +127,21 @@ class SnapshotDeletionTests(unittest.TestCase):
 
 
 class ArchiveFallbackTests(unittest.TestCase):
+    @staticmethod
+    def _large_png() -> bytes:
+        image = Image.effect_noise((1800, 1200), 90).convert("RGB")
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    def test_archive_image_optimizer_reduces_large_raster(self):
+        original = self._large_png()
+        mime, optimized = _optimize_archive_image("image/png", original)
+        self.assertEqual(mime, "image/webp")
+        self.assertLess(len(optimized), len(original) * 0.5)
+        with Image.open(io.BytesIO(optimized)) as image:
+            self.assertLessEqual(max(image.size), 1600)
+
     def test_fallback_archive_is_offline_and_contains_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("server.snapshot.SNAPSHOT_DIR", Path(tmp)):
@@ -149,7 +190,7 @@ class ArchiveFallbackTests(unittest.TestCase):
             self.assertTrue((root / "page.png").stat().st_size > 0)
             content = (root / "page.html").read_text(encoding="utf-8")
             self.assertIn("data-monitor-archive-url", content)
-            self.assertIn('data-monitor-archive-guard="3"', content)
+            self.assertIn('data-monitor-archive-guard="4"', content)
             self.assertIn("connect-src 'none'", content)
             self.assertIn("Saved popup", content)
 
@@ -170,10 +211,24 @@ class ArchiveFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             archive = root / "existing.html"
-            archive.write_text("<!doctype html><html><head><title>Old</title></head><body>Saved</body></html>", encoding="utf-8")
+            original_image = self._large_png()
+            encoded_image = base64.b64encode(original_image).decode("ascii")
+            archive.write_text(
+                '<!doctype html><html><head><title>Old</title>'
+                '<script data-monitor-archive-guard="3">window.oldGuard=true;</script>'
+                '<script src="data:text/javascript;base64,Y29uc29sZS5sb2coMSk="></script>'
+                f'</head><body><img src="data:image/png;base64,{encoded_image}">Saved</body></html>',
+                encoding="utf-8",
+            )
             self.assertEqual(upgrade_snapshot_archives(root), 1)
             content = archive.read_text(encoding="utf-8")
-            self.assertEqual(content.count('data-monitor-archive-guard="3"'), 1)
+            self.assertEqual(content.count('data-monitor-archive-guard="4"'), 1)
+            self.assertNotIn('data-monitor-archive-guard="3"', content)
+            self.assertGreater(content.index("data:text/javascript"), content.index("<body"))
+            self.assertRegex(content, r'<script[^>]*src="data:text/javascript[^"]*"[^>]*\bdefer\b')
+            optimized_match = re.search(r"data:image/webp;base64,([A-Za-z0-9+/=]+)", content)
+            self.assertIsNotNone(optimized_match)
+            self.assertLess(len(base64.b64decode(optimized_match.group(1))), len(original_image) * 0.5)
             self.assertEqual(upgrade_snapshot_archives(root), 0)
 
 

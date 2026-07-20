@@ -30,7 +30,15 @@ async def lifespan(app: FastAPI):
         stored = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
         apply_credential_overrides(stored)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    upgrade_snapshot_archives()
+    upgraded_archives = upgrade_snapshot_archives()
+    if upgraded_archives:
+        root = SNAPSHOT_DIR.resolve()
+        with db() as conn:
+            rows = conn.execute("SELECT id, html_path FROM web_snapshots WHERE html_path IS NOT NULL").fetchall()
+            for row in rows:
+                path = (SNAPSHOT_DIR / row["html_path"]).resolve()
+                if path.parent == root and path.is_file():
+                    conn.execute("UPDATE web_snapshots SET archive_size = ? WHERE id = ?", (path.stat().st_size, row["id"]))
     start_scheduler()
     yield
 
@@ -49,6 +57,8 @@ async def secure_snapshot_archives(request, call_next):
     """Force archived HTML into an opaque, offline sandbox even when opened directly."""
     response = await call_next(request)
     path = request.url.path.lower()
+    if path.startswith("/snapshots/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     if path.startswith("/snapshots/") and path.endswith(".html"):
         response.headers["Content-Security-Policy"] = (
             "sandbox allow-scripts; default-src 'none'; img-src data: blob:; "

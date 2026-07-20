@@ -14,6 +14,7 @@ from ..config import DEFAULT_CRAWL_LIMIT, SNAPSHOT_DIR
 from ..fetchers import FetchError, fetch_page
 from ..schemas import WebMonitorIn, WebMonitorUpdate
 from ..snapshot import (
+    ARCHIVE_REPLAY_VERSION,
     analyze_change,
     capture_artifacts,
     compare_visuals,
@@ -100,7 +101,9 @@ def snapshot_to_dict(row: sqlite3.Row | dict) -> dict:
     item["capture_method"] = raw.get("method")
     item["archive_self_contained"] = bool((raw.get("archive") or {}).get("self_contained"))
     item["screenshot_url"] = f"/snapshots/{item['screenshot_path']}" if item.get("screenshot_path") else ""
-    item["archive_url"] = f"/snapshots/{item['html_path']}" if item.get("html_path") else ""
+    item["archive_url"] = (
+        f"/snapshots/{item['html_path']}?v={ARCHIVE_REPLAY_VERSION}" if item.get("html_path") else ""
+    )
     item["page_path"] = urlparse(item.get("final_url") or item.get("url") or "").path or "/"
     item["effective_change_score"] = _effective_score(item)
     item["has_meaningful_change"] = _has_meaningful_change(item)

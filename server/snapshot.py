@@ -31,12 +31,25 @@ logger = logging.getLogger(__name__)
 ARCHIVE_TOTAL_LIMIT = 30_000_000
 ARCHIVE_RESOURCE_LIMIT = 6_000_000
 ARCHIVE_RESOURCE_COUNT_LIMIT = 160
+ARCHIVE_REPLAY_VERSION = 4
+ARCHIVE_IMAGE_OPTIMIZE_THRESHOLD = 96_000
+ARCHIVE_IMAGE_MAX_DIMENSION = 1600
+ARCHIVE_IMAGE_WEBP_QUALITY = 78
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
-_ARCHIVE_GUARD_MARKER = 'data-monitor-archive-guard="3"'
+_ARCHIVE_GUARD_MARKER = f'data-monitor-archive-guard="{ARCHIVE_REPLAY_VERSION}"'
+_ARCHIVE_GUARD_TAG_RE = re.compile(
+    r'<script\b[^>]*data-monitor-archive-guard="\d+"[^>]*>.*?</script>',
+    re.I | re.S,
+)
+_ARCHIVE_SCRIPT_TAG_RE = re.compile(r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.I | re.S)
+_ARCHIVE_DATA_IMAGE_RE = re.compile(
+    r"data:(?P<mime>image/(?:png|jpe?g|webp|avif));base64,(?P<payload>[A-Za-z0-9+/=]+)",
+    re.I,
+)
 _ARCHIVE_REPLAY_GUARD = r"""
 (() => {
-  if (window.__monitorArchiveReplayGuardV3) return;
-  window.__monitorArchiveReplayGuardV3 = true;
+  if (window.__monitorArchiveReplayGuardV4) return;
+  window.__monitorArchiveReplayGuardV4 = true;
 
   const blocked = () => Promise.reject(new Error('Archived page: network access disabled'));
   try { window.fetch = blocked; } catch (_) {}
@@ -203,8 +216,85 @@ def _archive_guard_tag() -> str:
     return f'<script {_ARCHIVE_GUARD_MARKER}>{_ARCHIVE_REPLAY_GUARD}</script>'
 
 
+def _optimize_archive_image(mime: str, body: bytes) -> tuple[str, bytes]:
+    """Shrink raster assets for replay; the lossless PNG screenshot remains the visual source of truth."""
+    if len(body) < ARCHIVE_IMAGE_OPTIMIZE_THRESHOLD:
+        return mime, body
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(body)) as source:
+            if bool(getattr(source, "is_animated", False)):
+                return mime, body
+            image = ImageOps.exif_transpose(source)
+            image.thumbnail(
+                (ARCHIVE_IMAGE_MAX_DIMENSION, ARCHIVE_IMAGE_MAX_DIMENSION),
+                Image.Resampling.LANCZOS,
+            )
+            has_alpha = "A" in image.getbands()
+            image = image.convert("RGBA" if has_alpha else "RGB")
+            output = io.BytesIO()
+            image.save(
+                output,
+                format="WEBP",
+                quality=ARCHIVE_IMAGE_WEBP_QUALITY,
+                method=4,
+            )
+            optimized = output.getvalue()
+            if len(optimized) >= len(body) * 0.92:
+                return mime, body
+            return "image/webp", optimized
+    except Exception:
+        return mime, body
+
+
+def _optimize_archive_data_images(content: str) -> str:
+    """Re-encode data-URI images in archives already stored on the persistent volume."""
+    cache: dict[str, str] = {}
+
+    def replace(match: re.Match) -> str:
+        value = match.group(0)
+        cached = cache.get(value)
+        if cached is not None:
+            return cached
+        try:
+            body = base64.b64decode(match.group("payload"), validate=True)
+        except Exception:
+            cache[value] = value
+            return value
+        mime, optimized = _optimize_archive_image(match.group("mime").lower(), body)
+        replacement = _data_uri(mime, optimized)
+        cache[value] = replacement
+        return replacement
+
+    return _ARCHIVE_DATA_IMAGE_RE.sub(replace, content)
+
+
+def _move_archive_scripts_to_body(content: str) -> str:
+    """Let archived markup and styles paint before original site scripts initialize."""
+    scripts: list[str] = []
+
+    def collect(match: re.Match) -> str:
+        attrs = match.group("attrs")
+        if "data-monitor-archive-guard" in attrs.lower():
+            return match.group(0)
+        if re.search(r"\bsrc\s*=", attrs, re.I) and not re.search(r"\b(?:async|defer)\b", attrs, re.I):
+            attrs = f"{attrs} defer"
+        scripts.append(f"<script{attrs}>{match.group('body')}</script>")
+        return ""
+
+    updated = _ARCHIVE_SCRIPT_TAG_RE.sub(collect, content)
+    if not scripts:
+        return updated
+    closing_body = re.search(r"</body\s*>", updated, re.I)
+    block = "".join(scripts)
+    if closing_body:
+        return updated[:closing_body.start()] + block + updated[closing_body.start():]
+    return updated + block
+
+
 def upgrade_snapshot_archives(root: Path = SNAPSHOT_DIR) -> int:
-    """Inject the current replay guard into existing HTML archives once."""
+    """Upgrade stored archives once: fast raster assets, non-blocking scripts, current guard."""
     root.mkdir(parents=True, exist_ok=True)
     marker = _ARCHIVE_GUARD_MARKER.encode("utf-8")
     tag = _archive_guard_tag()
@@ -216,6 +306,9 @@ def upgrade_snapshot_archives(root: Path = SNAPSHOT_DIR) -> int:
                 if marker in handle.read(262_144):
                     continue
             content = path.read_text(encoding="utf-8")
+            content = _ARCHIVE_GUARD_TAG_RE.sub("", content)
+            content = _optimize_archive_data_images(content)
+            content = _move_archive_scripts_to_body(content)
             head = re.search(r"<head(?:\s[^>]*)?>", content, re.I)
             if head:
                 content = content[:head.end()] + tag + content[head.end():]
@@ -449,7 +542,7 @@ def _build_archive_resource_map(context, manifest: list[dict], loaded: dict[str,
                             mime = _mime_type(clean_url, response.headers)
                 finally:
                     response.dispose()
-            if not body or len(body) > ARCHIVE_RESOURCE_LIMIT or total_bytes + len(body) > ARCHIVE_TOTAL_LIMIT:
+            if not body or len(body) > ARCHIVE_RESOURCE_LIMIT:
                 failures.append(clean_url)
                 return ""
             if mime == "text/css" or kind == "stylesheet":
@@ -464,6 +557,11 @@ def _build_archive_resource_map(context, manifest: list[dict], loaded: dict[str,
 
                 body = _CSS_URL_RE.sub(replace_css, css).encode("utf-8")
                 mime = "text/css"
+            elif mime.startswith("image/"):
+                mime, body = _optimize_archive_image(mime, body)
+            if total_bytes + len(body) > ARCHIVE_TOTAL_LIMIT:
+                failures.append(clean_url)
+                return ""
             total_bytes += len(body)
             value = _data_uri(mime or _mime_type(clean_url), body)
             resources[clean_url] = value
@@ -535,6 +633,11 @@ def _serialize_archive(page, resources: dict[str, str], original_url: str) -> st
             copy.removeAttribute('nonce');
           });
           Array.from(clone.querySelectorAll('script:not([src])')).forEach((script) => script.removeAttribute('nonce'));
+          const replayBody = clone.querySelector('body') || clone.appendChild(document.createElement('body'));
+          for (const script of Array.from(clone.querySelectorAll('script'))) {
+            if (script.src && !script.hasAttribute('async') && !script.hasAttribute('defer')) script.setAttribute('defer', '');
+            replayBody.appendChild(script);
+          }
           Array.from(clone.querySelectorAll('style')).forEach((style) => { style.textContent = rewriteCss(style.textContent); });
           Array.from(clone.querySelectorAll('[style]')).forEach((element) => element.setAttribute('style', rewriteCss(element.getAttribute('style'))));
 
@@ -568,7 +671,7 @@ def _serialize_archive(page, resources: dict[str, str], original_url: str) -> st
           for (const form of clone.querySelectorAll('form')) form.setAttribute('action', '');
 
           const guard = document.createElement('script');
-          guard.setAttribute('data-monitor-archive-guard', '3');
+          guard.setAttribute('data-monitor-archive-guard', '4');
           guard.textContent = guardScript;
           head.insertBefore(guard, csp.nextSibling);
           clone.setAttribute('data-monitor-archive-url', originalUrl);

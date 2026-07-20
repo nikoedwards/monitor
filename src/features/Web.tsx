@@ -234,12 +234,20 @@ function SnapshotViewer({
   onModeChange: (mode: SnapshotMode) => void;
   onDelete?: () => void;
 }) {
+  const [archiveReady, setArchiveReady] = useState(false);
+
+  useEffect(() => {
+    setArchiveReady(false);
+  }, [snapshot.id, snapshot.archive_url]);
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2">
           <Button size="sm" variant={mode === "screenshot" ? "primary" : "secondary"} onClick={() => onModeChange("screenshot")}>截图</Button>
-          <Button size="sm" variant={mode === "archive" ? "primary" : "secondary"} disabled={!snapshot.archive_url} onClick={() => onModeChange("archive")}>交互归档</Button>
+          <Button size="sm" variant={mode === "archive" ? "primary" : "secondary"} disabled={!snapshot.archive_url} onClick={() => onModeChange("archive")}>
+            {archiveReady ? "交互归档" : "交互归档 · 预载中"}
+          </Button>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone={snapshot.archive_self_contained ? "positive" : "warning"}>{snapshot.archive_self_contained ? "自包含归档" : "受限归档"}</Badge>
@@ -258,21 +266,36 @@ function SnapshotViewer({
           ))}
         </div>
       )}
-      {mode === "screenshot" ? (
+      {mode === "screenshot" && (
         <img src={snapshot.screenshot_url} alt={snapshot.title} className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
-      ) : (
-        <div>
+      )}
+      {snapshot.archive_url && (
+        <div style={{ display: mode === "archive" ? "block" : "none" }}>
           <div className="text-[12px] mb-2 rounded-md px-3 py-2" style={{ color: "var(--mute)", background: "var(--bg-soft)" }}>
             归档在独立沙箱中运行：允许离线脚本交互，但禁止联网、表单提交、下载和外部跳转。视频仅保存封面。
           </div>
-          <iframe
-            src={snapshot.archive_url}
-            title={`${snapshot.title || "网页"}交互归档`}
-            sandbox="allow-scripts"
-            referrerPolicy="no-referrer"
-            className="w-full rounded-md bg-white"
-            style={{ height: "72vh", border: "1px solid var(--hairline)" }}
-          />
+          <div className="relative rounded-md overflow-hidden" style={{ minHeight: "72vh", border: "1px solid var(--hairline)", background: "var(--panel)" }}>
+            {!archiveReady && (
+              <>
+                <img src={snapshot.screenshot_url} alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover object-top opacity-30" />
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 px-6 text-center" style={{ background: "rgba(255,255,255,0.78)", backdropFilter: "blur(3px)" }}>
+                  <Spinner />
+                  <div className="text-[13px]" style={{ color: "var(--body)" }}>正在加载交互归档…</div>
+                  <div className="text-[12px]" style={{ color: "var(--mute)" }}>归档已在查看截图时提前加载，大页面首次打开仍可能需要几秒。</div>
+                </div>
+              </>
+            )}
+            <iframe
+              src={snapshot.archive_url}
+              title={`${snapshot.title || "网页"}交互归档`}
+              sandbox="allow-scripts"
+              referrerPolicy="no-referrer"
+              loading="eager"
+              onLoad={() => setArchiveReady(true)}
+              className="w-full bg-white transition-opacity"
+              style={{ height: "72vh", opacity: archiveReady ? 1 : 0 }}
+            />
+          </div>
         </div>
       )}
       <div className="text-[12px] flex flex-wrap gap-x-3 gap-y-1" style={{ color: "var(--mute)" }}>
