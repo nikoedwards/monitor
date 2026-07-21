@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus, urlencode
 
 from ..config import CREDENTIALS, USER_AGENT
@@ -89,26 +89,56 @@ def _classify_error(exc: Exception, *, default: str = "error") -> tuple[str, str
 
 
 # ---------------------------------------------------------------- Google News
-def _google_news_url(query: str, region: str = "US", language: str = "en-US") -> str:
+GOOGLE_NEWS_LOOKBACK_DAYS = 7
+GOOGLE_NEWS_RESULT_LIMIT = 100
+
+
+def _google_news_url(
+    query: str,
+    region: str = "US",
+    language: str = "en-US",
+    lookback_days: int = GOOGLE_NEWS_LOOKBACK_DAYS,
+) -> str:
     lang_code = language.split("-", 1)[0] or "en"
+    search_query = query.strip()
+    if lookback_days > 0 and not re.search(r"(?:^|\s)when:\S+", search_query, flags=re.IGNORECASE):
+        search_query = f"{search_query} when:{lookback_days}d"
     return (
         "https://news.google.com/rss/search?"
-        f"q={quote_plus(query)}&hl={quote_plus(language)}&gl={quote_plus(region)}"
+        f"q={quote_plus(search_query)}&hl={quote_plus(language)}&gl={quote_plus(region)}"
         f"&ceid={quote_plus(f'{region}:{lang_code}')}"
     )
 
 
+def _is_recent_news_item(published_at: str | None, lookback_days: int, *, now: datetime | None = None) -> bool:
+    if not published_at:
+        return False
+    try:
+        published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    return published.astimezone(timezone.utc) >= reference - timedelta(days=max(lookback_days, 1))
+
+
 def collect_google_news(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     payloads: list[dict] = []
+    seen_items: set[str] = set()
     for query in brand_queries(brand):
         try:
             raw = fetch_bytes(_google_news_url(query), accept="application/rss+xml,application/xml", timeout=18)
         except FetchError:
             continue
-        for item in parse_rss(raw, limit=25):
+        for item in parse_rss(raw, limit=GOOGLE_NEWS_RESULT_LIMIT):
             url = item.get("url")
             if not url:
                 continue
+            item_key = clean_text(item.get("guid")) or url
+            if item_key in seen_items or not _is_recent_news_item(item.get("published_at"), GOOGLE_NEWS_LOOKBACK_DAYS):
+                continue
+            seen_items.add(item_key)
             title = item.get("title") or "Untitled media mention"
             body = item.get("description") or title
             publication = item.get("source_name") or host_key(url) or "Unknown publication"

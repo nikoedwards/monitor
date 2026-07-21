@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import json
+import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
+
+from server.connectors import collectors
+
+
+def _item(guid: str, published_at: datetime) -> dict:
+    return {
+        "guid": guid,
+        "url": f"https://news.google.com/rss/articles/{guid}",
+        "title": f"PLAUD story {guid}",
+        "description": "PLAUD media coverage",
+        "source_name": "Example Media",
+        "source_url": "https://example.com",
+        "published_at": published_at.isoformat(),
+    }
+
+
+class GoogleNewsCollectionTests(unittest.TestCase):
+    def test_google_news_url_adds_global_recency_operator(self) -> None:
+        url = collectors._google_news_url("PLAUD")
+        query = parse_qs(urlparse(url).query)
+
+        self.assertEqual(query["q"], ["PLAUD when:7d"])
+        self.assertEqual(query["hl"], ["en-US"])
+        self.assertEqual(query["gl"], ["US"])
+
+    def test_google_news_url_preserves_explicit_recency_operator(self) -> None:
+        url = collectors._google_news_url("PLAUD when:30d")
+        self.assertEqual(parse_qs(urlparse(url).query)["q"], ["PLAUD when:30d"])
+
+    def test_collection_filters_old_items_and_dedupes_across_keywords(self) -> None:
+        now = datetime.now(timezone.utc)
+        recent = _item("recent", now - timedelta(hours=6))
+        old = _item("old", now - timedelta(days=20))
+        brand = {
+            "id": "brand-1",
+            "name": "PLAUD",
+            "monitoring_keywords_json": json.dumps(["PLAUD", "NotePin"]),
+        }
+        parse_limits: list[int] = []
+
+        def fake_parse_rss(_raw: bytes, *, limit: int) -> list[dict]:
+            parse_limits.append(limit)
+            return [old, recent]
+
+        publication = {
+            "name": "Example Media",
+            "est_monthly_traffic": 1000,
+            "tier": "tier_4",
+            "authority": 25,
+            "country": "US",
+            "language": "en",
+            "icon_url": "",
+        }
+
+        with (
+            patch.object(collectors, "fetch_bytes", return_value=b"rss"),
+            patch.object(collectors, "parse_rss", side_effect=fake_parse_rss),
+            patch.object(collectors, "enrich_publication", return_value=publication),
+            patch.object(collectors, "classify_media_property", return_value=("earned", 1.0, [])),
+            patch.object(collectors, "estimate_ave", return_value=25),
+        ):
+            payloads = collectors.collect_google_news(None, brand)
+
+        self.assertEqual(parse_limits, [100, 100])
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["external_id"], "brand-1:recent")
+        self.assertEqual(payloads[0]["raw"]["query"], "PLAUD")
+
+
+if __name__ == "__main__":
+    unittest.main()
