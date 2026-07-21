@@ -49,11 +49,13 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
         result["status"] = "skipped"
         result["error"] = "Connector has no automated collector"
         _update_source_stats(conn, spec.id, status="skipped", error=result["error"], added=0)
+        _update_brand_run(conn, spec.id, brand.get("id"), status="skipped", error=result["error"], added=0)
         return result
     if spec.needs_credentials and not has_credential(spec.credential_key):
         result["status"] = "needs_credential"
         result["error"] = f"Missing credential: {spec.credential_key}"
         _update_source_stats(conn, spec.id, status="needs_credential", error=result["error"], added=0)
+        _update_brand_run(conn, spec.id, brand.get("id"), status="needs_credential", error=result["error"], added=0)
         return result
     try:
         payloads = spec.collect(conn, brand) or []
@@ -64,10 +66,12 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
                 created += 1
         result["created"] = created
         _update_source_stats(conn, spec.id, status="ok", error="", added=created)
+        _update_brand_run(conn, spec.id, brand.get("id"), status="ok", error="", added=created)
     except Exception as exc:  # surface, do not silently swallow
         result["status"] = "error"
         result["error"] = str(exc)[:500]
         _update_source_stats(conn, spec.id, status="error", error=result["error"], added=0)
+        _update_brand_run(conn, spec.id, brand.get("id"), status="error", error=result["error"], added=0)
     return result
 
 
@@ -80,4 +84,21 @@ def _update_source_stats(conn: sqlite3.Connection, source_id: str, *, status: st
         WHERE id = ?
         """,
         (utc_now(), status, error, added, source_id),
+    )
+
+
+def _update_brand_run(conn: sqlite3.Connection, source_id: str, brand_id: str | None, *, status: str, error: str, added: int) -> None:
+    if not brand_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO source_brand_runs (source_id, brand_id, last_collect_at, last_status, last_error, item_count)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, brand_id) DO UPDATE SET
+            last_collect_at = excluded.last_collect_at,
+            last_status = excluded.last_status,
+            last_error = excluded.last_error,
+            item_count = source_brand_runs.item_count + excluded.item_count
+        """,
+        (source_id, brand_id, utc_now(), status, error, added),
     )

@@ -303,6 +303,9 @@ export interface LlmSettings {
   ensembledata_key_hint?: string;
   youtube_configured?: boolean;
   youtube_key_hint?: string;
+  google_search_configured?: boolean;
+  google_search_key_hint?: string;
+  google_search_cx?: string;
 }
 
 export interface CreatorRosterItem {

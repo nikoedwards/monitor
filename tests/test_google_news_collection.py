@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from server.connectors import collectors
+from server import scheduler
 
 
 def _item(guid: str, published_at: datetime) -> dict:
@@ -72,6 +74,68 @@ class GoogleNewsCollectionTests(unittest.TestCase):
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0]["external_id"], "brand-1:recent")
         self.assertEqual(payloads[0]["raw"]["query"], "PLAUD")
+
+    def test_web_search_backfill_accepts_substantive_body_mention(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE records (brand_id TEXT, channel TEXT, occurred_at TEXT, title TEXT, url TEXT)")
+        brand = {
+            "id": "brand-1",
+            "name": "PLAUD",
+            "official_website": "https://www.plaud.ai",
+            "monitoring_keywords_json": json.dumps(["PLAUD"]),
+        }
+        search_response = {
+            "items": [{
+                "title": "14 Smart Gadgets That Feel Like Tiny Assistants",
+                "link": "https://www.gadgetreview.com/smart-gadgets",
+                "displayLink": "www.gadgetreview.com",
+                "snippet": "A roundup of useful AI gadgets.",
+                "pagemap": {"metatags": [{"article:published_time": "2026-07-20T17:15:00Z"}]},
+            }]
+        }
+        page = {
+            "final_url": "https://www.gadgetreview.com/smart-gadgets",
+            "title": "14 Smart Gadgets That Feel Like Tiny Assistants",
+            "text": ("Editorial introduction about practical AI devices. " * 8)
+            + "Plaud Note Pro records meetings, transcribes 112 languages, and creates summaries. ",
+        }
+        publication = {
+            "name": "Gadget Review", "est_monthly_traffic": 1000, "tier": "tier_4",
+            "authority": 40, "country": "US", "language": "en", "icon_url": "",
+        }
+
+        with (
+            patch.dict(collectors.CREDENTIALS, {"google_search_api_key": "key", "google_search_cx": "cx"}),
+            patch.object(collectors, "fetch_json", return_value=search_response),
+            patch.object(collectors, "fetch_page", return_value=page),
+            patch.object(collectors, "enrich_publication", return_value=publication),
+            patch.object(collectors, "classify_media_property", return_value=("earned", 0.9, [])),
+            patch.object(collectors, "estimate_ave", return_value=25),
+        ):
+            payloads = collectors.collect_google_web_search(conn, brand)
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["platform"], "Gadget Review")
+        self.assertEqual(payloads[0]["metrics"]["discovery_method"], "google_web_search_24h")
+        self.assertEqual(payloads[0]["occurred_at"], "2026-07-20T17:15:00+00:00")
+
+    def test_daily_collector_due_state_is_per_brand(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE source_brand_runs (source_id TEXT, brand_id TEXT, last_collect_at TEXT, "
+            "last_status TEXT, last_error TEXT, item_count INTEGER, PRIMARY KEY (source_id, brand_id))"
+        )
+        now = datetime(2026, 7, 21, 12, tzinfo=timezone.utc)
+        conn.execute(
+            "INSERT INTO source_brand_runs VALUES (?, ?, ?, ?, ?, ?)",
+            ("google_web_search", "brand-1", (now - timedelta(hours=23)).isoformat(), "ok", "", 0),
+        )
+
+        self.assertFalse(scheduler._collector_is_due(conn, "google_web_search", "brand-1", "daily", now))
+        self.assertTrue(scheduler._collector_is_due(conn, "google_web_search", "brand-2", "daily", now))
+        self.assertTrue(scheduler._collector_is_due(conn, "google_web_search", "brand-1", "daily", now + timedelta(hours=2)))
 
 
 if __name__ == "__main__":

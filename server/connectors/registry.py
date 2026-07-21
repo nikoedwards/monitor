@@ -23,9 +23,16 @@ REGISTRY: list[ConnectorSpec] = [
     # ---- Tier 1: real, no credential ----
     ConnectorSpec(
         id="google_news", name="Google News", category="media", dimension="marketing",
-        tier=1, vendor="Google", sync_mode="scheduled", cadence="daily",
+        tier=1, vendor="Google", sync_mode="scheduled", cadence="hourly",
         notes="按品牌关键词抓取 Google News RSS 媒体报道。",
         collect=collectors.collect_google_news,
+    ),
+    ConnectorSpec(
+        id="google_web_search", name="Google 网页搜索补漏", category="media", dimension="marketing",
+        tier=2, vendor="Google", sync_mode="scheduled", cadence="daily",
+        credential_key="google_search_api_key",
+        notes="每天通过 Google Programmable Search 查询最近 24 小时网页，抓正文确认品牌实质性提及后补充媒体记录。",
+        collect=collectors.collect_google_web_search,
     ),
     ConnectorSpec(
         id="reddit_search", name="Reddit 搜索", category="community", dimension="marketing",
