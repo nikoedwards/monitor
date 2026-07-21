@@ -79,7 +79,7 @@ class PeriodStatsTests(unittest.TestCase):
                 "visual_change_score": 0,
             }
         )
-        self.assertEqual(result["archive_url"], "/snapshots/snapshot.html?v=4")
+        self.assertEqual(result["archive_url"], "/snapshots/snapshot.html?v=5")
 
 
 class SnapshotDeletionTests(unittest.TestCase):
@@ -161,12 +161,22 @@ class ArchiveFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = """
-                <html><body style="overflow:hidden">
+                <html class="lock" style="overflow:hidden;height:100%"><head><style>html.lock { overflow: hidden !important; }</style></head><body style="overflow:hidden;position:fixed;top:0;height:100%;width:100%;padding-right:15px">
                   <div role="dialog" aria-modal="true" aria-label="Signup popup" style="position:fixed;inset:0">
                     <button aria-label="Close dialog">×</button>
                     <p>Saved popup</p>
                   </div>
+                  <main style="min-height:3200px;padding-top:100px">Tall archived page</main>
+                  <section id="shopify-pc__banner" class="shopify-pc__banner__dialog" role="alertdialog" aria-labelledby="cookie-title" style="position:fixed;left:0;right:0;bottom:0;z-index:20;background:white">
+                    <p id="cookie-title">Cookies on our site</p>
+                    <button id="shopify-pc__banner__btn-decline">Decline</button>
+                  </section>
                   <script>
+                    setTimeout(() => {
+                      document.documentElement.style.overflow = 'hidden';
+                      document.body.style.overflow = 'hidden';
+                      document.body.style.position = 'fixed';
+                    }, 30);
                     document.addEventListener('click', (event) => {
                       if (!event.target.closest('[aria-label="Close dialog"]')) return;
                       setTimeout(() => {
@@ -190,7 +200,7 @@ class ArchiveFallbackTests(unittest.TestCase):
             self.assertTrue((root / "page.png").stat().st_size > 0)
             content = (root / "page.html").read_text(encoding="utf-8")
             self.assertIn("data-monitor-archive-url", content)
-            self.assertIn('data-monitor-archive-guard="4"', content)
+            self.assertIn('data-monitor-archive-guard="5"', content)
             self.assertIn("connect-src 'none'", content)
             self.assertIn("Saved popup", content)
 
@@ -200,6 +210,21 @@ class ArchiveFallbackTests(unittest.TestCase):
                 browser = playwright.chromium.launch(headless=True)
                 page = browser.new_page()
                 page.goto((root / "page.html").as_uri())
+                page.wait_for_timeout(150)
+                overflow = page.evaluate(
+                    "[getComputedStyle(document.documentElement).overflowY, getComputedStyle(document.body).overflowY]"
+                )
+                self.assertNotIn("hidden", overflow)
+                self.assertNotEqual(page.evaluate("getComputedStyle(document.body).position"), "fixed")
+                page.evaluate("window.scrollTo(0, 900)")
+                page.wait_for_timeout(50)
+                self.assertGreater(page.evaluate("window.scrollY"), 0)
+                page.get_by_role("button", name="Decline").click()
+                page.wait_for_timeout(100)
+                self.assertFalse(page.locator("#shopify-pc__banner").is_visible())
+                page.evaluate("window.scrollTo(0, 1500)")
+                page.wait_for_timeout(50)
+                self.assertGreater(page.evaluate("window.scrollY"), 900)
                 self.assertEqual(page.get_by_role("dialog", name="Signup popup").count(), 1)
                 page.get_by_role("button", name="Close dialog").click()
                 page.wait_for_timeout(100)
@@ -215,15 +240,15 @@ class ArchiveFallbackTests(unittest.TestCase):
             encoded_image = base64.b64encode(original_image).decode("ascii")
             archive.write_text(
                 '<!doctype html><html><head><title>Old</title>'
-                '<script data-monitor-archive-guard="3">window.oldGuard=true;</script>'
+                '<script data-monitor-archive-guard="4">window.oldGuard=true;</script>'
                 '<script src="data:text/javascript;base64,Y29uc29sZS5sb2coMSk="></script>'
                 f'</head><body><img src="data:image/png;base64,{encoded_image}">Saved</body></html>',
                 encoding="utf-8",
             )
             self.assertEqual(upgrade_snapshot_archives(root), 1)
             content = archive.read_text(encoding="utf-8")
-            self.assertEqual(content.count('data-monitor-archive-guard="4"'), 1)
-            self.assertNotIn('data-monitor-archive-guard="3"', content)
+            self.assertEqual(content.count('data-monitor-archive-guard="5"'), 1)
+            self.assertNotIn('data-monitor-archive-guard="4"', content)
             self.assertGreater(content.index("data:text/javascript"), content.index("<body"))
             self.assertRegex(content, r'<script[^>]*src="data:text/javascript[^"]*"[^>]*\bdefer\b')
             optimized_match = re.search(r"data:image/webp;base64,([A-Za-z0-9+/=]+)", content)

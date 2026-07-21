@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 ARCHIVE_TOTAL_LIMIT = 30_000_000
 ARCHIVE_RESOURCE_LIMIT = 6_000_000
 ARCHIVE_RESOURCE_COUNT_LIMIT = 160
-ARCHIVE_REPLAY_VERSION = 4
+ARCHIVE_REPLAY_VERSION = 5
 ARCHIVE_IMAGE_OPTIMIZE_THRESHOLD = 96_000
 ARCHIVE_IMAGE_MAX_DIMENSION = 1600
 ARCHIVE_IMAGE_WEBP_QUALITY = 78
@@ -48,15 +48,31 @@ _ARCHIVE_DATA_IMAGE_RE = re.compile(
 )
 _ARCHIVE_REPLAY_GUARD = r"""
 (() => {
-  if (window.__monitorArchiveReplayGuardV4) return;
-  window.__monitorArchiveReplayGuardV4 = true;
+  if (window.__monitorArchiveReplayGuardV5) return;
+  window.__monitorArchiveReplayGuardV5 = true;
 
   const blocked = () => Promise.reject(new Error('Archived page: network access disabled'));
   try { window.fetch = blocked; } catch (_) {}
   try { XMLHttpRequest.prototype.open = function () { throw new Error('Archived page: network access disabled'); }; } catch (_) {}
 
+  const cookieSelector = [
+    '#onetrust-banner-sdk',
+    '#onetrust-consent-sdk',
+    '#shopify-pc__banner',
+    '[id*="shopify-pc__banner" i]',
+    '[class*="shopify-pc__banner" i]',
+    '[id*="cookie" i]',
+    '[class*="cookie" i]',
+    '[data-testid*="cookie" i]',
+    '[aria-label*="cookie" i]',
+    '[id*="consent-banner" i]',
+    '[class*="consent-banner" i]',
+    '[data-testid*="consent-banner" i]',
+    '[aria-label*="consent banner" i]'
+  ].join(',');
   const dialogSelector = [
     '[role="dialog"]',
+    '[role="alertdialog"]',
     '[aria-modal="true"]',
     'dialog',
     '[data-testid="POPUP"]',
@@ -65,27 +81,66 @@ _ARCHIVE_REPLAY_GUARD = r"""
     '[class*="popup"]',
     '[class*="modal"]',
     '[id*="popup"]',
-    '[id*="modal"]'
+    '[id*="modal"]',
+    cookieSelector
   ].join(',');
-  const semanticDialogSelector = '[role="dialog"],[aria-modal="true"],dialog';
-  const controlSelector = 'button,[role="button"],a,input[type="button"],input[type="reset"]';
+  const semanticDialogSelector = '[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog';
+  const controlSelector = 'button,[role="button"],a,input[type="button"],input[type="reset"],input[type="submit"]';
   const dismissedDialogKeys = new Set();
   const dismissedDialogSelectors = new Set();
   const dismissalStyle = document.createElement('style');
   dismissalStyle.setAttribute('data-monitor-archive-dismissals', '');
   (document.head || document.documentElement).appendChild(dismissalStyle);
+  const scrollUnlockStyle = document.createElement('style');
+  scrollUnlockStyle.setAttribute('data-monitor-archive-scroll-unlock', '');
+  scrollUnlockStyle.textContent = `
+    html[data-monitor-archive-scroll-unlocked] {
+      overflow-y: auto !important;
+      position: static !important;
+      top: auto !important;
+      height: auto !important;
+      max-height: none !important;
+      width: auto !important;
+      padding-right: 0 !important;
+    }
+    body[data-monitor-archive-scroll-unlocked] {
+      overflow: visible !important;
+      overflow-y: visible !important;
+      position: static !important;
+      top: auto !important;
+      right: auto !important;
+      bottom: auto !important;
+      left: auto !important;
+      height: auto !important;
+      max-height: none !important;
+      width: auto !important;
+      padding-right: 0 !important;
+      margin-right: 0 !important;
+      touch-action: auto !important;
+      overscroll-behavior: auto !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(scrollUnlockStyle);
+
+  const controlLabel = (control) => [
+    control.getAttribute('aria-label'),
+    control.getAttribute('title'),
+    control.getAttribute('data-testid'),
+    control.id,
+    typeof control.className === 'string' ? control.className : '',
+    control.value,
+    control.textContent
+  ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 
   const isCloseControl = (control) => {
-    const label = [
-      control.getAttribute('aria-label'),
-      control.getAttribute('title'),
-      control.getAttribute('data-testid'),
-      control.id,
-      typeof control.className === 'string' ? control.className : '',
-      control.textContent
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    const label = controlLabel(control);
     return /(?:^|[\s_-])(close|dismiss)(?:$|[\s_-])|关闭|關閉|取消|klaviyo-close|modal-close|popup-close/i.test(label)
       || /^[x×✕✖]$/i.test(label);
+  };
+
+  const isCookieDismissControl = (control) => {
+    const label = controlLabel(control);
+    return /\b(?:accept|reject|decline|agree|allow|continue|save|confirm|okay|ok|close|dismiss)\b|\bgot\s+it\b|接受|同意|允许|允許|拒绝|拒絕|不同意|仅必要|僅必要|只允许必要|只允許必要|保存(?:设置|設置|偏好)?|继续|繼續|知道了|我知道了|关闭|關閉/i.test(label);
   };
 
   const overlayFor = (dialog) => {
@@ -112,7 +167,7 @@ _ARCHIVE_REPLAY_GUARD = r"""
     const ariaLabel = String(dialog.getAttribute('aria-label') || '').trim();
     if (ariaLabel) {
       const value = escapedAttribute(ariaLabel);
-      return `[role="dialog"][aria-label="${value}"],[aria-modal="true"][aria-label="${value}"],dialog[aria-label="${value}"]`;
+      return `[aria-label="${value}"]`;
     }
     const testId = String(dialog.getAttribute('data-testid') || '').trim();
     if (testId) return `[data-testid="${escapedAttribute(testId)}"]`;
@@ -143,22 +198,54 @@ _ARCHIVE_REPLAY_GUARD = r"""
   };
 
   const restoreScroll = () => {
+    const commonOverrides = {
+      position: 'static',
+      top: 'auto',
+      right: 'auto',
+      bottom: 'auto',
+      left: 'auto',
+      height: 'auto',
+      'max-height': 'none',
+      width: 'auto',
+      'padding-right': '0px',
+      'touch-action': 'auto',
+      'overscroll-behavior': 'auto'
+    };
     for (const element of [document.documentElement, document.body]) {
       if (!element) continue;
-      for (const property of ['overflow', 'overflow-x', 'overflow-y', 'padding-right']) {
-        if (element.style.getPropertyValue(property)) element.style.removeProperty(property);
+      if (element.getAttribute('data-monitor-archive-scroll-unlocked') !== 'true') {
+        element.setAttribute('data-monitor-archive-scroll-unlocked', 'true');
+      }
+      const overrides = element === document.documentElement
+        ? { ...commonOverrides, 'overflow-x': 'hidden', 'overflow-y': 'auto' }
+        : { ...commonOverrides, 'overflow-x': 'visible', 'overflow-y': 'visible' };
+      for (const property of [
+        'overflow-x', 'overflow-y', 'position', 'top', 'right', 'bottom', 'left',
+        'height', 'max-height', 'width', 'max-width', 'padding-right', 'margin-right',
+        'touch-action', 'overscroll-behavior'
+      ]) {
+        const safeValue = overrides[property];
+        if (safeValue !== undefined) {
+          if (element.style.getPropertyValue(property) !== safeValue || element.style.getPropertyPriority(property) !== 'important') {
+            element.style.setProperty(property, safeValue, 'important');
+          }
+        } else if (element.style.getPropertyValue(property)) {
+          element.style.removeProperty(property);
+        }
       }
       element.removeAttribute('data-scroll-locked');
       element.removeAttribute('data-kl-scroll-locking-modal');
+      element.removeAttribute('data-lenis-prevent');
     }
   };
 
   const enforceDismissedDialogs = () => {
-    if (!dismissedDialogKeys.size) return;
-    for (const dialog of document.querySelectorAll(dialogSelector)) {
-      if (dismissedDialogKeys.has(dialogKey(dialog))) hideOverlay(overlayFor(dialog));
-    }
     restoreScroll();
+    if (dismissedDialogKeys.size) {
+      for (const dialog of document.querySelectorAll(dialogSelector)) {
+        if (dismissedDialogKeys.has(dialogKey(dialog))) hideOverlay(overlayFor(dialog));
+      }
+    }
   };
 
   const dismiss = (dialog, key = dialogKey(dialog)) => {
@@ -188,8 +275,17 @@ _ARCHIVE_REPLAY_GUARD = r"""
     if (link) event.preventDefault();
 
     const control = target.closest(controlSelector);
-    if (!control || !isCloseControl(control)) return;
-    const dialog = control.closest(semanticDialogSelector) || control.closest(dialogSelector);
+    if (!control) return;
+    const closeControl = isCloseControl(control);
+    const candidateCookie = control.closest(cookieSelector);
+    const cookie = candidateCookie === document.body || candidateCookie === document.documentElement
+      ? null
+      : candidateCookie;
+    const dialog = cookie && (closeControl || isCookieDismissControl(control))
+      ? cookie
+      : closeControl
+        ? control.closest(semanticDialogSelector) || control.closest(dialogSelector)
+        : null;
     if (!dialog) return;
     const key = dialogKey(dialog);
     setTimeout(() => {
@@ -208,6 +304,25 @@ _ARCHIVE_REPLAY_GUARD = r"""
     subtree: true,
     childList: true
   });
+  const observeScrollRoot = (element) => {
+    if (!element || element.hasAttribute('data-monitor-archive-scroll-observed')) return;
+    element.setAttribute('data-monitor-archive-scroll-observed', 'true');
+    new MutationObserver(restoreScroll).observe(element, {
+      attributes: true,
+      attributeFilter: ['style', 'data-scroll-locked', 'data-kl-scroll-locking-modal', 'data-lenis-prevent']
+    });
+  };
+  const initializeScrollRestore = () => {
+    restoreScroll();
+    observeScrollRoot(document.documentElement);
+    observeScrollRoot(document.body);
+  };
+  initializeScrollRestore();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeScrollRestore, { once: true });
+  }
+  window.addEventListener('load', initializeScrollRestore, { once: true });
+  for (const delay of [0, 100, 500, 1500]) setTimeout(initializeScrollRestore, delay);
 })();
 """.strip()
 
@@ -586,7 +701,7 @@ def _build_archive_resource_map(context, manifest: list[dict], loaded: dict[str,
 def _serialize_archive(page, resources: dict[str, str], original_url: str) -> str:
     return page.evaluate(
         r"""
-        ({ resources, originalUrl, guardScript }) => {
+        ({ resources, originalUrl, guardScript, guardVersion }) => {
           const clone = document.documentElement.cloneNode(true);
           const head = clone.querySelector('head') || clone.insertBefore(document.createElement('head'), clone.firstChild);
           for (const base of clone.querySelectorAll('base')) base.remove();
@@ -671,7 +786,7 @@ def _serialize_archive(page, resources: dict[str, str], original_url: str) -> st
           for (const form of clone.querySelectorAll('form')) form.setAttribute('action', '');
 
           const guard = document.createElement('script');
-          guard.setAttribute('data-monitor-archive-guard', '4');
+          guard.setAttribute('data-monitor-archive-guard', String(guardVersion));
           guard.textContent = guardScript;
           head.insertBefore(guard, csp.nextSibling);
           clone.setAttribute('data-monitor-archive-url', originalUrl);
@@ -679,7 +794,12 @@ def _serialize_archive(page, resources: dict[str, str], original_url: str) -> st
           return '<!doctype html>\n' + clone.outerHTML;
         }
         """,
-        {"resources": resources, "originalUrl": original_url, "guardScript": _ARCHIVE_REPLAY_GUARD},
+        {
+            "resources": resources,
+            "originalUrl": original_url,
+            "guardScript": _ARCHIVE_REPLAY_GUARD,
+            "guardVersion": ARCHIVE_REPLAY_VERSION,
+        },
     )
 
 
