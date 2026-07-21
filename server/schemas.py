@@ -157,6 +157,8 @@ class SettingsIn(BaseModel):
     sellersprite_secret_key: Optional[str] = None
     ensembledata_token: Optional[str] = None
     youtube_api_key: Optional[str] = None
+    google_search_api_key: Optional[str] = None
+    google_search_cx: Optional[str] = None
 
 
 class AiDraftIn(BaseModel):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from .config import SCHEDULER_ENABLED, SCHEDULER_SECONDS
 from .connectors.base import run_collector
@@ -11,6 +12,31 @@ from .db import db
 from .util import today
 
 _started = False
+
+
+def _cadence_delta(cadence: str) -> timedelta:
+    value = (cadence or "daily").lower()
+    if value == "hourly":
+        return timedelta(hours=1)
+    if value == "weekly":
+        return timedelta(days=7)
+    return timedelta(days=1)
+
+
+def _collector_is_due(conn, source_id: str, brand_id: str, cadence: str, now: datetime) -> bool:
+    row = conn.execute(
+        "SELECT last_collect_at FROM source_brand_runs WHERE source_id = ? AND brand_id = ?",
+        (source_id, brand_id),
+    ).fetchone()
+    if not row or not row["last_collect_at"]:
+        return True
+    try:
+        last = datetime.fromisoformat(row["last_collect_at"].replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    return now >= last.astimezone(timezone.utc) + _cadence_delta(cadence)
 
 
 def _run_due_collections() -> None:
@@ -24,6 +50,8 @@ def _run_due_collections() -> None:
         for brand in brands:
             try:
                 with db() as conn:
+                    if not _collector_is_due(conn, spec.id, brand["id"], spec.cadence, datetime.now(timezone.utc)):
+                        continue
                     run_collector(conn, spec, brand)
             except Exception:
                 # run_collector already records errors per source; keep loop alive.

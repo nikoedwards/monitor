@@ -28,6 +28,16 @@ CREATE TABLE IF NOT EXISTS sources (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS source_brand_runs (
+  source_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  last_collect_at TEXT NOT NULL,
+  last_status TEXT,
+  last_error TEXT,
+  item_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_id, brand_id)
+);
+
 CREATE TABLE IF NOT EXISTS brands (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -317,6 +327,7 @@ CREATE INDEX IF NOT EXISTS idx_records_brand ON records(brand_id);
 CREATE INDEX IF NOT EXISTS idx_records_dimension ON records(dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_records_occurred ON records(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_records_source ON records(source_id);
+CREATE INDEX IF NOT EXISTS idx_source_brand_runs_due ON source_brand_runs(source_id, last_collect_at);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);
 CREATE INDEX IF NOT EXISTS idx_links_brand ON links(brand_id, dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_sales_metrics_brand ON sales_metrics(brand_id, snapshot_date);

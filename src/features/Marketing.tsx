@@ -22,6 +22,7 @@ const SOURCE_LABEL: Record<string, string> = {
   reddit_search: "Reddit",
   community_site: "自建社群/论坛",
   google_news: "Google News",
+  google_web_search: "Google 网页搜索补漏",
   meta_ads: "Meta 广告库",
   youtube_search: "YouTube",
   discord_community: "Discord",
