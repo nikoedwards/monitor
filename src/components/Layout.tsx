@@ -91,14 +91,14 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState("");
   useEffect(() => {
     if (open && data) {
-      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "" });
+      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "", google_search_api_key: "", google_search_cx: data.google_search_cx || "" });
       setSaved(false);
       setError("");
     }
   }, [open, data]);
   const set = (k: string, v: any) => { setForm((f: any) => ({ ...f, [k]: v })); setSaved(false); };
   return (
-    <Modal open={open} onClose={onClose} title="大模型设置">
+    <Modal open={open} onClose={onClose} title="系统设置">
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-[13px]" style={{ color: "var(--mute)" }}>
           状态：{data?.configured ? <Badge tone="positive">已配置 Token</Badge> : <Badge tone="warning">未配置 Token</Badge>}
@@ -113,6 +113,22 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           <Field label="X-WP-Title"><Input value={form.app_title || ""} onChange={(e) => set("app_title", e.target.value)} placeholder="monitor-hub" /></Field>
         </div>
         <Field label="max_tokens"><Input type="number" value={form.max_tokens || 4096} onChange={(e) => set("max_tokens", Number(e.target.value))} /></Field>
+
+        <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
+            Google 网页搜索补漏：{data?.google_search_configured ? <Badge tone="positive">已配置（每 24 小时）</Badge> : <Badge tone="warning">未配置</Badge>}
+            {data?.google_search_configured && data?.google_search_key_hint && <span>当前 Key：{data.google_search_key_hint}</span>}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label={data?.google_search_configured ? "Search API Key（留空表示不修改）" : "Google Custom Search API Key"}>
+              <Input type="password" value={form.google_search_api_key || ""} onChange={(e) => set("google_search_api_key", e.target.value)} placeholder="Google Cloud Custom Search JSON API key" />
+            </Field>
+            <Field label="Programmable Search Engine ID (cx)">
+              <Input value={form.google_search_cx || ""} onChange={(e) => set("google_search_cx", e.target.value)} placeholder="搜索整个网络的 cx ID" />
+            </Field>
+          </div>
+          <p className="text-[12px] mt-1.5" style={{ color: "var(--mute)" }}>用于每天查询最近 24 小时普通网页结果，并抓正文补充 Google News 未收录的媒体提及。</p>
+        </div>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
           <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
@@ -157,9 +173,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               if (!payload.sellersprite_secret_key) delete payload.sellersprite_secret_key;
               if (!payload.ensembledata_token) delete payload.ensembledata_token;
               if (!payload.youtube_api_key) delete payload.youtube_api_key;
+              if (!payload.google_search_api_key) delete payload.google_search_api_key;
               try {
                 await save.mutateAsync(payload);
-                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "" }));
+                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "", google_search_api_key: "" }));
                 setSaved(true);
               } catch (e: any) {
                 setError(e?.message || "保存失败");
