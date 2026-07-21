@@ -859,7 +859,7 @@ def _write_fallback_archive(filename: str, url: str, title: str, html: str, text
     return filename
 
 
-def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | None:
+def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: str = "") -> dict | None:
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is False:
         return None
@@ -880,6 +880,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | Non
             page = None
             capture_error = ""
             attempt_count = 0
+            source_html_fallback = False
             for attempt_count in range(1, CAPTURE_MAX_ATTEMPTS + 1):
                 if page is not None:
                     page.close()
@@ -906,6 +907,42 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | Non
                     break
                 if attempt_count < CAPTURE_MAX_ATTEMPTS:
                     page.wait_for_timeout(CAPTURE_RETRY_DELAYS_MS[attempt_count - 1])
+            if capture_error and source_html:
+                if page is not None:
+                    page.close()
+                page = context.new_page()
+                loaded.clear()
+                page.on("response", lambda response: _capture_loaded_resource(loaded, response))
+                source_served = False
+
+                def serve_fetched_document(route):
+                    nonlocal source_served
+                    if not source_served and route.request.resource_type == "document":
+                        source_served = True
+                        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=source_html)
+                    else:
+                        route.continue_()
+
+                page.route("**/*", serve_fetched_document)
+                response = None
+                navigation_error = ""
+                try:
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                except PlaywrightTimeoutError as exc:
+                    navigation_error = str(exc)[:300]
+                capture_error = _inspect_playwright_page(page, response)
+                if not capture_error:
+                    try:
+                        page.wait_for_function(
+                            "() => document.body && document.body.innerText.length > 100 && document.documentElement.scrollHeight > window.innerHeight",
+                            timeout=15000,
+                        )
+                    except PlaywrightTimeoutError:
+                        page.wait_for_timeout(2000)
+                    capture_error = _inspect_playwright_page(page, response)
+                if not capture_error:
+                    source_html_fallback = True
+                    attempt_count += 1
             if capture_error:
                 try:
                     browser.close()
@@ -923,7 +960,8 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | Non
             try:
                 manifest = _archive_manifest(page)
                 resources, archive_meta = _build_archive_resource_map(context, manifest, loaded)
-                html_path.write_text(_serialize_archive(page, resources, page.url or url), encoding="utf-8")
+                archive_url = url if source_html_fallback else (page.url or url)
+                html_path.write_text(_serialize_archive(page, resources, archive_url), encoding="utf-8")
                 archive_meta["archive_size"] = html_path.stat().st_size
             except Exception as exc:
                 archive_error = str(exc)[:300]
@@ -935,6 +973,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | Non
                 "media": media,
                 "archive": archive_meta,
                 "attempts": attempt_count,
+                "source_html_fallback": source_html_fallback,
             }
             if navigation_error:
                 result["navigation_warning"] = navigation_error
@@ -1026,7 +1065,7 @@ def capture_artifacts(url: str, title: str, text: str, html: str, base_name: str
     html_path = SNAPSHOT_DIR / html_filename
 
     try:
-        pw_result = _playwright_capture(url, png_path, html_path)
+        pw_result = _playwright_capture(url, png_path, html_path, html)
     except SnapshotCaptureError:
         png_path.unlink(missing_ok=True)
         html_path.unlink(missing_ok=True)

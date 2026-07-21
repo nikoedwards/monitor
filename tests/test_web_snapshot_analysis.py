@@ -5,7 +5,9 @@ import io
 import re
 import sqlite3
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
 from unittest.mock import patch
@@ -201,6 +203,45 @@ class ArchiveFallbackTests(unittest.TestCase):
                 self.fail(f"Rate-limit placeholder was accepted: {result}")
             self.assertFalse((root / "page.png").exists())
             self.assertFalse((root / "page.html").exists())
+
+    def test_playwright_renders_fetched_html_when_live_navigation_is_rate_limited(self):
+        class RateLimitedHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"<html><body><pre>local_rate_limited</pre></body></html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RateLimitedHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source_html = "<html><body><main style='min-height:3200px'>" + ("Recovered real page content. " * 20) + "</main></body></html>"
+                with patch("server.snapshot.CAPTURE_RETRY_DELAYS_MS", (0, 0)):
+                    result = _playwright_capture(
+                        f"http://127.0.0.1:{server.server_port}/",
+                        root / "page.png",
+                        root / "page.html",
+                        source_html,
+                    )
+                if result is None:
+                    self.skipTest("Playwright Chromium unavailable")
+                self.assertNotIn("error", result)
+                self.assertTrue(result["source_html_fallback"])
+                self.assertEqual(result["attempts"], 4)
+                self.assertTrue((root / "page.png").stat().st_size > 0)
+                self.assertIn("Recovered real page content", (root / "page.html").read_text(encoding="utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_fallback_archive_is_offline_and_contains_source(self):
         with tempfile.TemporaryDirectory() as tmp:
