@@ -35,6 +35,8 @@ ARCHIVE_REPLAY_VERSION = 5
 ARCHIVE_IMAGE_OPTIMIZE_THRESHOLD = 96_000
 ARCHIVE_IMAGE_MAX_DIMENSION = 1600
 ARCHIVE_IMAGE_WEBP_QUALITY = 78
+CAPTURE_MAX_ATTEMPTS = 3
+CAPTURE_RETRY_DELAYS_MS = (5_000, 15_000)
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
 _ARCHIVE_GUARD_MARKER = f'data-monitor-archive-guard="{ARCHIVE_REPLAY_VERSION}"'
 _ARCHIVE_GUARD_TAG_RE = re.compile(
@@ -46,6 +48,45 @@ _ARCHIVE_DATA_IMAGE_RE = re.compile(
     r"data:(?P<mime>image/(?:png|jpe?g|webp|avif));base64,(?P<payload>[A-Za-z0-9+/=]+)",
     re.I,
 )
+
+
+class SnapshotCaptureError(RuntimeError):
+    """A rendered page is not a trustworthy visual snapshot and must not be persisted."""
+
+
+def _capture_error_reason(status: int | None, page_url: str, body_text: str) -> str:
+    """Return a reason when Chromium rendered a transient block/error page instead of the target."""
+    normalized = clean_text(body_text or "").casefold()
+    if (page_url or "").casefold().startswith(("chrome-error://", "edge-error://")):
+        return "browser navigation error page"
+    if status in {401, 403, 407, 408, 425, 429} or (status is not None and status >= 500):
+        return f"HTTP {status} returned by rendered page"
+    if len(normalized) <= 1_000:
+        if "local_rate_limited" in normalized:
+            return "local_rate_limited"
+        if re.fullmatch(
+            r"(?:rate[_ -]?limited|too many requests|429(?: too many requests)?|"
+            r"service (?:temporarily )?unavailable|bad gateway|gateway timeout|"
+            r"access denied|forbidden|this site can(?:not|'t) be reached)",
+            normalized,
+            re.I,
+        ):
+            return normalized
+    return ""
+
+
+def _inspect_playwright_page(page, response) -> str:
+    try:
+        status = int(response.status) if response is not None else None
+    except Exception:
+        status = None
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except Exception:
+        body_text = ""
+    return _capture_error_reason(status, page.url or "", body_text)
+
+
 _ARCHIVE_REPLAY_GUARD = r"""
 (() => {
   if (window.__monitorArchiveReplayGuardV5) return;
@@ -832,23 +873,47 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | Non
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--no-sandbox"])
             context = browser.new_context(viewport={"width": 1440, "height": 1200})
-            page = context.new_page()
             loaded: dict[str, tuple[str, bytes]] = {}
-            page.on("response", lambda response: _capture_loaded_resource(loaded, response))
             navigation_error = ""
             archive_error = ""
             archive_meta: dict = {"self_contained": False}
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            except PlaywrightTimeoutError as exc:
-                navigation_error = str(exc)[:300]
-            try:
-                page.wait_for_function(
-                    "() => document.body && document.body.innerText.length > 100 && document.documentElement.scrollHeight > window.innerHeight",
-                    timeout=15000,
+            page = None
+            capture_error = ""
+            attempt_count = 0
+            for attempt_count in range(1, CAPTURE_MAX_ATTEMPTS + 1):
+                if page is not None:
+                    page.close()
+                page = context.new_page()
+                loaded.clear()
+                page.on("response", lambda response: _capture_loaded_resource(loaded, response))
+                navigation_error = ""
+                response = None
+                try:
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                except PlaywrightTimeoutError as exc:
+                    navigation_error = str(exc)[:300]
+                capture_error = _inspect_playwright_page(page, response)
+                if not capture_error:
+                    try:
+                        page.wait_for_function(
+                            "() => document.body && document.body.innerText.length > 100 && document.documentElement.scrollHeight > window.innerHeight",
+                            timeout=15000,
+                        )
+                    except PlaywrightTimeoutError:
+                        page.wait_for_timeout(2000)
+                    capture_error = _inspect_playwright_page(page, response)
+                if not capture_error:
+                    break
+                if attempt_count < CAPTURE_MAX_ATTEMPTS:
+                    page.wait_for_timeout(CAPTURE_RETRY_DELAYS_MS[attempt_count - 1])
+            if capture_error:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                raise SnapshotCaptureError(
+                    f"截图连续 {attempt_count} 次返回无效错误页：{capture_error}"
                 )
-            except PlaywrightTimeoutError:
-                page.wait_for_timeout(2000)
             media = _prepare_page_for_full_capture(page)
             try:
                 page.wait_for_load_state("networkidle", timeout=8000)
@@ -865,12 +930,19 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path) -> dict | Non
             browser.close()
         _PLAYWRIGHT_AVAILABLE = True
         if png_path.exists() and png_path.stat().st_size > 0:
-            result = {"method": "playwright", "media": media, "archive": archive_meta}
+            result = {
+                "method": "playwright",
+                "media": media,
+                "archive": archive_meta,
+                "attempts": attempt_count,
+            }
             if navigation_error:
                 result["navigation_warning"] = navigation_error
             if archive_error:
                 result["archive_error"] = archive_error
             return result
+    except SnapshotCaptureError:
+        raise
     except Exception as exc:
         return {"error": str(exc)[:300]}
     return None
@@ -953,7 +1025,12 @@ def capture_artifacts(url: str, title: str, text: str, html: str, base_name: str
     png_path = SNAPSHOT_DIR / png_filename
     html_path = SNAPSHOT_DIR / html_filename
 
-    pw_result = _playwright_capture(url, png_path, html_path)
+    try:
+        pw_result = _playwright_capture(url, png_path, html_path)
+    except SnapshotCaptureError:
+        png_path.unlink(missing_ok=True)
+        html_path.unlink(missing_ok=True)
+        raise
     if pw_result and "error" not in pw_result:
         if not html_path.exists() or html_path.stat().st_size == 0:
             _write_fallback_archive(html_filename, url, title, html, text, pw_result.get("archive_error", ""))

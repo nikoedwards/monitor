@@ -171,6 +171,11 @@ export default function Web() {
                         </>
                       )}
                     </div>
+                    {monitor.last_status === "error" && monitor.last_error ? (
+                      <div className="mt-2 text-[12px] line-clamp-2" style={{ color: "var(--danger)" }}>
+                        最近一次截图失败：{monitor.last_error}
+                      </div>
+                    ) : null}
                   </button>
                   <div className="flex flex-wrap gap-2 mt-3">
                     <Button size="sm" disabled={capture.isPending} onClick={() => capture.mutate(monitor.id)}>立即截图</Button>

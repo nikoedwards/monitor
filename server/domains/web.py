@@ -237,15 +237,25 @@ def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
             errors.append(f"{url}: {exc}")
     top_change = max(((item.get("effective_change_score") or 0, item.get("summary") or "") for item in snapshots), default=(0, ""))
     now = utc_now()
-    conn.execute(
-        """
-        UPDATE web_monitors
-        SET last_check_at = ?, last_snapshot_at = ?, last_change_score = ?,
-            last_change_summary = ?, last_status = ?, last_error = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (now, now, top_change[0], top_change[1], "ok" if snapshots else "error", "; ".join(errors)[:500], now, monitor["id"]),
-    )
+    if snapshots:
+        conn.execute(
+            """
+            UPDATE web_monitors
+            SET last_check_at = ?, last_snapshot_at = ?, last_change_score = ?,
+                last_change_summary = ?, last_status = 'ok', last_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, top_change[0], top_change[1], "; ".join(errors)[:500], now, monitor["id"]),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE web_monitors
+            SET last_check_at = ?, last_status = 'error', last_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, "; ".join(errors)[:500], now, monitor["id"]),
+        )
     return snapshots
 
 

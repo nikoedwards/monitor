@@ -12,11 +12,14 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from server.domains.web import _period_stats, delete_snapshot, snapshot_to_dict
+from server.domains.web import _period_stats, capture_monitor, delete_snapshot, snapshot_to_dict
 from server.snapshot import (
+    SnapshotCaptureError,
+    _capture_error_reason,
     _optimize_archive_image,
     _playwright_capture,
     _write_fallback_archive,
+    capture_artifacts,
     compare_visuals,
     upgrade_snapshot_archives,
 )
@@ -142,6 +145,63 @@ class ArchiveFallbackTests(unittest.TestCase):
         with Image.open(io.BytesIO(optimized)) as image:
             self.assertLessEqual(max(image.size), 1600)
 
+    def test_capture_error_reason_rejects_rate_limit_placeholder_only(self):
+        self.assertEqual(
+            _capture_error_reason(200, "https://example.com", "local_rate_limited"),
+            "local_rate_limited",
+        )
+        self.assertIn("HTTP 429", _capture_error_reason(429, "https://example.com", ""))
+        self.assertEqual(_capture_error_reason(404, "https://example.com/missing", "Not found"), "")
+        self.assertEqual(
+            _capture_error_reason(
+                200,
+                "https://example.com/guide",
+                "Our API guide explains rate limits and how customers can request higher limits.",
+            ),
+            "",
+        )
+
+    def test_rejected_playwright_page_is_not_replaced_with_fake_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch(
+                    "server.snapshot._playwright_capture",
+                    side_effect=SnapshotCaptureError("local_rate_limited"),
+                ),
+                patch("server.snapshot._subprocess_capture") as subprocess_capture,
+            ):
+                with self.assertRaisesRegex(SnapshotCaptureError, "local_rate_limited"):
+                    capture_artifacts(
+                        "https://example.com",
+                        "Example",
+                        "Real page text",
+                        "<main>Real page</main>",
+                        "capture",
+                    )
+            subprocess_capture.assert_not_called()
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_playwright_rejects_local_rate_limit_page_before_writing_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            try:
+                with patch("server.snapshot.CAPTURE_RETRY_DELAYS_MS", (0, 0)):
+                    result = _playwright_capture(
+                        "data:text/html;charset=utf-8," + quote("<html><body><pre>local_rate_limited</pre></body></html>"),
+                        root / "page.png",
+                        root / "page.html",
+                    )
+            except SnapshotCaptureError as exc:
+                self.assertIn("local_rate_limited", str(exc))
+            else:
+                if result is None:
+                    self.skipTest("Playwright Chromium unavailable")
+                self.fail(f"Rate-limit placeholder was accepted: {result}")
+            self.assertFalse((root / "page.png").exists())
+            self.assertFalse((root / "page.html").exists())
+
     def test_fallback_archive_is_offline_and_contains_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("server.snapshot.SNAPSHOT_DIR", Path(tmp)):
@@ -255,6 +315,50 @@ class ArchiveFallbackTests(unittest.TestCase):
             self.assertIsNotNone(optimized_match)
             self.assertLess(len(base64.b64decode(optimized_match.group(1))), len(original_image) * 0.5)
             self.assertEqual(upgrade_snapshot_archives(root), 0)
+
+
+class SnapshotSchedulingTests(unittest.TestCase):
+    def test_failed_capture_keeps_last_success_time_so_scheduler_can_retry(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE web_monitors (
+              id TEXT PRIMARY KEY,
+              last_check_at TEXT,
+              last_snapshot_at TEXT,
+              last_change_score REAL,
+              last_change_summary TEXT,
+              last_status TEXT,
+              last_error TEXT,
+              updated_at TEXT
+            )
+            """
+        )
+        previous_snapshot_at = "2026-07-20T14:17:16+00:00"
+        conn.execute(
+            "INSERT INTO web_monitors VALUES (?, NULL, ?, ?, ?, 'ok', '', NULL)",
+            ("monitor-1", previous_snapshot_at, 0.25, "Previous valid change"),
+        )
+        monitor = {
+            "id": "monitor-1",
+            "brand_id": "brand-1",
+            "url": "https://example.com",
+            "scope": "single_page",
+        }
+        with patch(
+            "server.domains.web._capture_one",
+            side_effect=SnapshotCaptureError("local_rate_limited"),
+        ):
+            self.assertEqual(capture_monitor(conn, monitor), [])
+        row = conn.execute("SELECT * FROM web_monitors WHERE id = 'monitor-1'").fetchone()
+        self.assertEqual(row["last_snapshot_at"], previous_snapshot_at)
+        self.assertEqual(row["last_change_score"], 0.25)
+        self.assertEqual(row["last_change_summary"], "Previous valid change")
+        self.assertEqual(row["last_status"], "error")
+        self.assertIn("local_rate_limited", row["last_error"])
+        self.assertTrue(row["last_check_at"])
+        conn.close()
 
 
 if __name__ == "__main__":
