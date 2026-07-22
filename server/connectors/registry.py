@@ -28,13 +28,6 @@ REGISTRY: list[ConnectorSpec] = [
         collect=collectors.collect_google_news,
     ),
     ConnectorSpec(
-        id="google_web_search", name="Google 网页搜索补漏", category="media", dimension="marketing",
-        tier=2, vendor="Google", sync_mode="scheduled", cadence="daily",
-        credential_key="google_search_api_key",
-        notes="每天通过 Google Programmable Search 查询最近 24 小时网页，抓正文确认品牌实质性提及后补充媒体记录。",
-        collect=collectors.collect_google_web_search,
-    ),
-    ConnectorSpec(
         id="reddit_search", name="Reddit 搜索", category="community", dimension="marketing",
         tier=1, vendor="Reddit", sync_mode="scheduled", cadence="daily",
         notes="按品牌关键词与配置的 subreddit 抓取 Reddit(JSON 端点,可选 REDDIT_BEARER_TOKEN,回退 RSS)。",
