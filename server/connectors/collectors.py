@@ -176,7 +176,13 @@ def collect_google_news(conn: sqlite3.Connection, brand: dict) -> list[dict]:
                     "publication_url": source_url,
                     "publication_icon": pub["icon_url"],
                 },
-                "raw": {"query": query, "publication": publication, "source_url": source_url},
+                "raw": {
+                    "query": query,
+                    "publication": publication,
+                    "source_url": source_url,
+                    "collection_method": "google_news_rss_keyword_search",
+                    "body_relevance_validated": False,
+                },
             })
     return payloads
 

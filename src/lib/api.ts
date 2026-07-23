@@ -108,6 +108,7 @@ export interface RecordItem {
   intent?: string;
   topics: string[];
   metrics: Record<string, unknown>;
+  raw?: Record<string, unknown>;
 }
 
 export interface Source {

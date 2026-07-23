@@ -12,6 +12,41 @@ const TIER_LABEL: Record<string, string> = {
   unknown: "未知",
 };
 
+const COLLECTION_SOURCE_LABEL: Record<string, string> = {
+  google_news: "Google News（RSS 定时采集）",
+  google_web_search: "Google 普通网页搜索补漏（定时任务）",
+  reddit_search: "Reddit 搜索采集",
+  community_site: "社区站点采集",
+  meta_ads: "Meta 广告采集",
+  youtube_search: "YouTube 搜索采集",
+  manual_csv: "手动导入",
+};
+
+function collectionSourceLabel(sourceId?: string): string | undefined {
+  if (!sourceId) return undefined;
+  return COLLECTION_SOURCE_LABEL[sourceId] || sourceId;
+}
+
+function textValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function collectionReason(record: RecordItem): string | undefined {
+  const raw = record.raw || {};
+  const query = textValue(raw.query);
+  if (record.source_id === "google_news") {
+    return query
+      ? `收录原因：Google News RSS 使用关键词「${query}」搜索返回该条目；当前为搜索结果直入库，未进行正文品牌关联二次校验。`
+      : "收录原因：Google News RSS 搜索结果入库；未保存触发关键词，未进行正文品牌关联二次校验。";
+  }
+  if (record.source_id === "google_web_search") {
+    return query
+      ? `收录原因：定时普通网页搜索补漏以关键词「${query}」发现，并按任务规则核验后收录。`
+      : "收录原因：由定时普通网页搜索补漏任务核验后收录；该历史记录未保存触发关键词。";
+  }
+  return record.source_id ? `收录原因：${collectionSourceLabel(record.source_id) || record.source_id}` : undefined;
+}
+
 function hostOf(url?: string): string {
   if (!url) return "";
   try {
@@ -115,6 +150,9 @@ export function RecordList({ records, emptyHint }: { records: RecordItem[]; empt
                 <SentimentBadge record={r} />
                 {r.platform && <Badge tone="neutral">{r.platform}</Badge>}
                 {r.channel && <Badge tone="neutral">{CHANNEL_LABEL[r.channel] || r.channel}</Badge>}
+                {collectionSourceLabel(r.source_id) && (
+                  <Badge tone="neutral">采集：{collectionSourceLabel(r.source_id)}</Badge>
+                )}
                 {r.intent && <span className="text-[12px]" style={{ color: "var(--mute)" }}>{r.intent}</span>}
               </div>
               {r.title && (
@@ -128,6 +166,14 @@ export function RecordList({ records, emptyHint }: { records: RecordItem[]; empt
               )}
               <p className="text-[13px] mt-1 line-clamp-2" style={{ color: "var(--body)" }}>{r.body}</p>
               {r.metrics && <MediaMeta metrics={r.metrics} />}
+              {collectionReason(r) && (
+                <div
+                  className="mt-2 rounded px-2 py-1.5 text-[12px] leading-relaxed"
+                  style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}
+                >
+                  {collectionReason(r)}
+                </div>
+              )}
               <div className="flex items-center gap-2 mt-2 flex-wrap">
                 {r.topics.map((t) => (
                   <span key={t} className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>#{t}</span>
