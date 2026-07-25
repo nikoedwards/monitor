@@ -76,6 +76,24 @@ def build_record_query(filters: dict) -> tuple[str, list]:
         clauses.append("(body LIKE ? OR title LIKE ? OR author LIKE ? OR platform LIKE ?)")
         params.extend([like, like, like, like])
 
+    publication_domain = filters.get("publication_domain")
+    publication_name = filters.get("publication_name")
+    if publication_domain and publication_name:
+        clauses.append(
+            "(LOWER(COALESCE(json_extract(metrics_json, '$.publication_domain'), '')) = LOWER(?) "
+            "OR (COALESCE(json_extract(metrics_json, '$.publication_domain'), '') = '' "
+            "AND (LOWER(COALESCE(platform, '')) = LOWER(?) OR LOWER(COALESCE(platform, '')) = LOWER(?))))"
+        )
+        params.extend([publication_domain, publication_name, publication_domain])
+    elif publication_domain:
+        clauses.append(
+            "LOWER(COALESCE(json_extract(metrics_json, '$.publication_domain'), '')) = LOWER(?)"
+        )
+        params.append(publication_domain)
+    elif publication_name:
+        clauses.append("LOWER(COALESCE(platform, '')) = LOWER(?)")
+        params.append(publication_name)
+
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     return where, params
 

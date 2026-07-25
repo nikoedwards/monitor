@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
@@ -8,7 +8,7 @@ import { TimeRangePicker } from "../components/TimeRangePicker";
 import { SmartSummary } from "../components/SmartSummary";
 import { useMarketingSummary, useRecords } from "../lib/hooks";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
-import { CHANNEL_LABEL, fmtNum } from "../lib/format";
+import { CHANNEL_LABEL, fmtDate, fmtNum } from "../lib/format";
 
 const CHANNELS = [
   { value: "media", label: "媒体公关" },
@@ -67,10 +67,27 @@ export default function Marketing() {
   const [view, setView] = useState<"overview" | "channel">("overview");
   const [channel, setChannel] = useState("community");
   const [publicationDetailOpen, setPublicationDetailOpen] = useState(false);
+  const [selectedPublication, setSelectedPublication] = useState<PublicationStat | null>(null);
   const [trendMetric, setTrendMetric] = useState<"volume" | "reach">("volume");
+  const contentStreamRef = useRef<HTMLDivElement>(null);
   const activeChannel = view === "channel" ? channel : undefined;
   const { data: summary, isLoading } = useMarketingSummary(brandId, activeChannel, range);
-  const { data: records = [] } = useRecords({ brand_id: brandId, dimension: "marketing", channel: activeChannel, ...rangeParams(range), limit: 60 });
+  const selectedPublicationTotal = selectedPublication
+    ? (summary?.by_publication || []).find((item: PublicationStat) =>
+        selectedPublication.domain
+          ? item.domain === selectedPublication.domain
+          : !item.domain && item.name === selectedPublication.name
+      )?.total || 0
+    : 0;
+  const { data: records = [], isLoading: recordsLoading } = useRecords({
+    brand_id: brandId,
+    dimension: "marketing",
+    channel: selectedPublication ? "media" : activeChannel,
+    publication_domain: selectedPublication?.domain || undefined,
+    publication_name: selectedPublication?.name || undefined,
+    ...rangeParams(range),
+    limit: selectedPublication ? 1000 : 60,
+  });
 
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -80,6 +97,16 @@ export default function Marketing() {
       setHidden(new Set());
     }
   }, [brandId]);
+  useEffect(() => {
+    if (view !== "channel" || channel !== "media") setSelectedPublication(null);
+  }, [view, channel]);
+  useEffect(() => {
+    if (!selectedPublication) return;
+    const frame = requestAnimationFrame(() => {
+      contentStreamRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selectedPublication]);
   const toggleHidden = (platform: string) => {
     setHidden((prev) => {
       const next = new Set(prev);
@@ -139,7 +166,7 @@ export default function Marketing() {
 
       {summary.total_reach > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <StatCard label="预估总触达" value={fmtNum(summary.total_reach)} tone="accent" hint="按媒体月流量估算" />
+          <StatCard label="预估总触达" value={fmtNum(summary.total_reach)} tone="accent" hint="按媒体月流量估算，同一媒体仅计一次" />
           <StatCard label="媒体价值 AVE" value={`$${fmtNum(summary.total_ave)}`} hint="等价广告价值(估算)" />
           <StatCard label="媒体层级" value={summary.by_tier?.length || 0} />
           <StatCard label="覆盖国家" value={summary.by_country?.length || 0} />
@@ -244,15 +271,34 @@ export default function Marketing() {
         <SmartSummary brandId={brandId} dimension="marketing" channel={activeChannel} range={range} />
       </Card>
 
-      <Card>
-        <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
-        <RecordList records={shownRecords} emptyHint="在数据源页发起媒体 / 广告 / 红人 / 社群 / 社媒账号采集后查看。" />
-      </Card>
+      <div ref={contentStreamRef}>
+        <Card>
+          <SectionTitle
+            title={selectedPublication ? `${selectedPublication.name} 收录文章` : view === "channel" ? `${channelName}内容流` : "营销内容流"}
+            subtitle={selectedPublication
+              ? `当前时间范围内共收录 ${fmtNum(selectedPublicationTotal)} 篇文章`
+              : isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"}
+            action={selectedPublication ? <Button size="sm" onClick={() => setSelectedPublication(null)}>清除筛选</Button> : undefined}
+          />
+          {recordsLoading ? (
+            <Spinner />
+          ) : (
+            <RecordList
+              records={shownRecords}
+              emptyHint={selectedPublication ? "当前时间范围内暂无该媒体的收录文章。" : "在数据源页发起媒体 / 广告 / 红人 / 社群 / 社媒账号采集后查看。"}
+            />
+          )}
+        </Card>
+      </div>
 
       <PublicationDetailModal
         open={publicationDetailOpen}
         onClose={() => setPublicationDetailOpen(false)}
         publications={summary.by_publication || []}
+        onSelectPublication={(publication) => {
+          setSelectedPublication(publication);
+          setPublicationDetailOpen(false);
+        }}
       />
     </div>
   );
@@ -263,12 +309,62 @@ type PublicationStat = {
   domain: string;
   total: number;
   monthly_traffic: number;
+  traffic_lower?: number;
+  traffic_upper?: number;
+  popularity_rank?: number;
+  traffic_source?: string;
+  traffic_confidence?: string;
+  traffic_as_of?: string;
   authority: number;
   tier: string;
   country: string;
 };
 
-function PublicationDetailModal({ open, onClose, publications }: { open: boolean; onClose: () => void; publications: PublicationStat[] }) {
+const TRAFFIC_SOURCE_LABEL: Record<string, string> = {
+  seed: "媒体库基准",
+  tranco_model: "Tranco 公开排名估算",
+  tranco_no_rank: "Tranco 暂无排名",
+  tranco_unranked: "待重新查询 Tranco",
+  unavailable: "暂无公开排名",
+  historical: "历史采集值",
+  manual: "人工校准",
+};
+
+const TRAFFIC_CONFIDENCE_LABEL: Record<string, string> = {
+  high: "高可信",
+  medium: "中可信",
+  low: "低可信",
+};
+
+function formatTrafficEstimate(item: PublicationStat): string {
+  const lower = item.traffic_lower || 0;
+  const upper = item.traffic_upper || 0;
+  if (lower > 0 && upper > 0 && lower !== upper) return `${fmtNum(lower)}–${fmtNum(upper)}`;
+  if (lower > 0 && lower === upper) return fmtNum(lower);
+  if (item.monthly_traffic > 0) return fmtNum(item.monthly_traffic);
+  return "暂无可靠估值";
+}
+
+function trafficEstimateMeta(item: PublicationStat): string {
+  const parts: string[] = [];
+  if (item.popularity_rank) parts.push(`Tranco #${item.popularity_rank.toLocaleString("en-US")}`);
+  else if (item.traffic_source) parts.push(TRAFFIC_SOURCE_LABEL[item.traffic_source] || item.traffic_source);
+  if (item.traffic_confidence) parts.push(TRAFFIC_CONFIDENCE_LABEL[item.traffic_confidence] || item.traffic_confidence);
+  if (item.traffic_as_of) parts.push(`更新 ${fmtDate(item.traffic_as_of)}`);
+  return parts.join(" · ");
+}
+
+function PublicationDetailModal({
+  open,
+  onClose,
+  publications,
+  onSelectPublication,
+}: {
+  open: boolean;
+  onClose: () => void;
+  publications: PublicationStat[];
+  onSelectPublication: (publication: PublicationStat) => void;
+}) {
   const [ranking, setRanking] = useState<"frequency" | "reach">("frequency");
   const ranked = [...publications].sort((a, b) => ranking === "frequency" ? b.total - a.total : b.monthly_traffic - a.monthly_traffic);
   const max = Math.max(...ranked.map((item) => ranking === "frequency" ? item.total : item.monthly_traffic), 1);
@@ -281,7 +377,7 @@ function PublicationDetailModal({ open, onClose, publications }: { open: boolean
           onChange={setRanking}
         />
         <span className="text-[12px]" style={{ color: "var(--mute)" }}>
-          {ranking === "frequency" ? "按当前时间范围内收录文章数排序" : "按预估月访问量排序，数据为媒体库估算值"}
+          {ranking === "frequency" ? "按当前时间范围内收录文章数排序" : "按月访问量估算中值排序；区间、来源和可信度见下方"}
         </span>
       </div>
       {ranked.length ? (
@@ -300,8 +396,24 @@ function PublicationDetailModal({ open, onClose, publications }: { open: boolean
                     </div>
                   </div>
                   <div className="text-right shrink-0">
-                    <div className="tabular-nums font-medium" style={{ color: "var(--ink)" }}>{ranking === "frequency" ? `${fmtNum(value)} 篇` : fmtNum(value)}</div>
-                    <div className="text-[11px]" style={{ color: "var(--mute)" }}>{TIER_LABEL[item.tier] || item.tier}{item.authority ? ` · 权威度 ${item.authority}` : ""}</div>
+                    <button
+                      type="button"
+                      className="tabular-nums font-medium cursor-pointer hover:underline underline-offset-2"
+                      style={{ color: "var(--accent)" }}
+                      title={`查看 ${item.name} 的全部收录文章`}
+                      onClick={() => onSelectPublication(item)}
+                    >
+                      {fmtNum(item.total)} 篇
+                    </button>
+                    {ranking === "reach" && (
+                      <div className="text-[12px] font-medium" style={{ color: item.monthly_traffic > 0 ? "var(--violet)" : "var(--mute)" }}>
+                        月访问量 {formatTrafficEstimate(item)}
+                      </div>
+                    )}
+                    <div className="text-[11px]" style={{ color: "var(--mute)" }}>
+                      {ranking === "reach" && trafficEstimateMeta(item) ? `${trafficEstimateMeta(item)} · ` : ""}
+                      {TIER_LABEL[item.tier] || item.tier}{item.authority ? ` · 权威度 ${item.authority}` : ""}
+                    </div>
                   </div>
                 </div>
                 <div className="ml-7 h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>

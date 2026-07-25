@@ -292,6 +292,11 @@ CREATE TABLE IF NOT EXISTS publications (
   name TEXT,
   icon_url TEXT,
   est_monthly_traffic INTEGER NOT NULL DEFAULT 0,
+  traffic_lower INTEGER NOT NULL DEFAULT 0,
+  traffic_upper INTEGER NOT NULL DEFAULT 0,
+  popularity_rank INTEGER,
+  traffic_confidence TEXT NOT NULL DEFAULT 'low',
+  traffic_as_of TEXT,
   authority INTEGER NOT NULL DEFAULT 0,
   tier TEXT,
   country TEXT,
@@ -410,6 +415,11 @@ MIGRATIONS = [
     ("sales_metrics", "image_url", "TEXT"),
     ("sales_metrics", "change_score", "REAL"),
     ("sales_metrics", "changes_json", "TEXT"),
+    ("publications", "traffic_lower", "INTEGER NOT NULL DEFAULT 0"),
+    ("publications", "traffic_upper", "INTEGER NOT NULL DEFAULT 0"),
+    ("publications", "popularity_rank", "INTEGER"),
+    ("publications", "traffic_confidence", "TEXT NOT NULL DEFAULT 'low'"),
+    ("publications", "traffic_as_of", "TEXT"),
 ]
 
 
