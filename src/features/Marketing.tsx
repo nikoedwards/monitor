@@ -86,7 +86,7 @@ export default function Marketing() {
     publication_domain: selectedPublication?.domain || undefined,
     publication_name: selectedPublication?.name || undefined,
     ...rangeParams(range),
-    limit: selectedPublication ? 1000 : 60,
+    limit: selectedPublication || activeChannel === "community" ? 1000 : 60,
   });
 
   const [hidden, setHidden] = useState<Set<string>>(new Set());
