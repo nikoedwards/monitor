@@ -9,6 +9,9 @@ from urllib.parse import parse_qs, urlparse
 
 from server.connectors import collectors
 from server import scheduler
+from server.db import SCHEMA
+from server.domains.common import query_records
+from server.records import insert_record
 
 
 def _item(guid: str, published_at: datetime) -> dict:
@@ -74,6 +77,72 @@ class GoogleNewsCollectionTests(unittest.TestCase):
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0]["external_id"], "brand-1:recent")
         self.assertEqual(payloads[0]["raw"]["query"], "PLAUD")
+        self.assertTrue(payloads[0]["raw"]["body_relevance_validated"])
+        self.assertEqual(payloads[0]["raw"]["matched_text"], "PLAUD")
+
+    def test_collection_rejects_google_news_results_without_visible_brand_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        unrelated = {
+            "guid": "unrelated",
+            "url": "https://news.google.com/rss/articles/unrelated",
+            "title": "How to Use Read Aloud in Microsoft Edge - Technobezz",
+            "description": "How to Use Read Aloud in Microsoft Edge Technobezz",
+            "source_name": "Technobezz",
+            "source_url": "https://technobezz.com",
+            "published_at": now.isoformat(),
+        }
+        brand = {
+            "id": "brand-1",
+            "name": "PLAUD",
+            "monitoring_keywords_json": json.dumps(["PLAUD AI"]),
+        }
+
+        with (
+            patch.object(collectors, "fetch_bytes", return_value=b"rss"),
+            patch.object(collectors, "parse_rss", return_value=[unrelated]),
+        ):
+            payloads = collectors.collect_google_news(None, brand)
+
+        self.assertEqual(payloads, [])
+
+    def test_record_queries_hide_legacy_google_news_false_positives(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        conn.execute(
+            "INSERT INTO brands (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("brand-1", "PLAUD", "2026-07-25", "2026-07-25"),
+        )
+        common = {
+            "source_id": "google_news",
+            "brand_id": "brand-1",
+            "data_type": "media_mention",
+            "dimension": "marketing",
+            "channel": "media",
+            "platform": "Technobezz",
+            "occurred_at": "2026-07-25T03:00:00+00:00",
+        }
+        insert_record(conn, {
+            **common,
+            "external_id": "relevant",
+            "title": "PLAUD launches a new recorder",
+            "body": "PLAUD product announcement",
+            "url": "https://news.google.com/rss/articles/relevant",
+            "raw": {"query": "PLAUD AI"},
+        })
+        insert_record(conn, {
+            **common,
+            "external_id": "unrelated",
+            "title": "How to Use Read Aloud in Microsoft Edge",
+            "body": "A general browser tutorial",
+            "url": "https://news.google.com/rss/articles/unrelated",
+            "raw": {"query": "PLAUD AI"},
+        })
+
+        records = query_records(conn, {"channel": "media"}, limit=10)
+
+        self.assertEqual([record["external_id"] for record in records], ["relevant"])
+        conn.close()
 
     def test_daily_collector_due_state_is_per_brand(self) -> None:
         conn = sqlite3.connect(":memory:")
