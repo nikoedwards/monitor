@@ -531,6 +531,12 @@ def _youtube_posts(account_url: str, cached_channel_id: str = "") -> tuple[list[
         ))
     if not posts:
         return _youtube_page_posts(channel_id, account_url, FetchError("Atom feed 未返回视频")), channel_id
+    try:
+        metrics_page = fetch_page(f"https://www.youtube.com/channel/{channel_id}/videos", timeout=25)
+        _enrich_youtube_web_metrics(posts, metrics_page.get("html") or "")
+    except Exception as exc:
+        for post in posts[:_YT_WEB_METRICS_LIMIT]:
+            post.raw["metrics_error"] = str(exc)[:300]
     return posts, channel_id
 
 
