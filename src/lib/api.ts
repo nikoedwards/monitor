@@ -205,6 +205,9 @@ export interface WebMonitor {
   snapshot_interval_minutes: number;
   last_check_at?: string;
   last_snapshot_at?: string;
+  snapshot_retry_count?: number;
+  next_snapshot_retry_at?: string;
+  last_snapshot_attempt_at?: string;
   next_check_at?: string;
   next_snapshot_at?: string;
   seconds_until_check?: number;

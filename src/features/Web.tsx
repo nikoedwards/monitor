@@ -62,6 +62,7 @@ function countdownLabel(nextAt: string | undefined, status: string, now: number)
 }
 
 function schedulesMatch(monitor: WebMonitor) {
+  if (monitor.next_snapshot_retry_at) return false;
   if (monitor.check_interval_minutes !== monitor.snapshot_interval_minutes) return false;
   if (!monitor.next_check_at && !monitor.next_snapshot_at) return true;
   if (!monitor.next_check_at || !monitor.next_snapshot_at) return false;
@@ -167,13 +168,18 @@ export default function Web() {
                       ) : (
                         <>
                           <div>下次检查：{monitor.next_check_at ? fmtDateTime(monitor.next_check_at) : "—"} · {countdownLabel(monitor.next_check_at, monitor.status, now)}</div>
-                          <div>下次截图归档：{monitor.next_snapshot_at ? fmtDateTime(monitor.next_snapshot_at) : "—"} · {countdownLabel(monitor.next_snapshot_at, monitor.status, now)}</div>
+                          <div>{monitor.next_snapshot_retry_at ? "下次自动补拍" : "下次截图归档"}：{monitor.next_snapshot_at ? fmtDateTime(monitor.next_snapshot_at) : "—"} · {countdownLabel(monitor.next_snapshot_at, monitor.status, now)}</div>
                         </>
                       )}
                     </div>
                     {monitor.last_status === "error" && monitor.last_error ? (
-                      <div className="mt-2 text-[12px] line-clamp-2" style={{ color: "var(--danger)" }}>
-                        最近一次截图失败：{monitor.last_error}
+                      <div className="mt-2 text-[12px]" style={{ color: "var(--danger)" }}>
+                        <div className="line-clamp-2">最近一次截图失败：{monitor.last_error}</div>
+                        {monitor.next_snapshot_retry_at ? (
+                          <div className="mt-1" style={{ color: "var(--warning, #b45309)" }}>
+                            自动重试已启用 · 连续失败 {monitor.snapshot_retry_count || 1} 次，成功后恢复原频率
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </button>

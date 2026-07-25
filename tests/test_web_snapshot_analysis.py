@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -14,7 +15,14 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from server.domains.web import _period_stats, capture_monitor, delete_snapshot, snapshot_to_dict
+from server.domains.web import (
+    _period_stats,
+    capture_monitor,
+    delete_snapshot,
+    next_run_at,
+    _snapshot_retry_at,
+    snapshot_to_dict,
+)
 from server.snapshot import (
     SnapshotCaptureError,
     _capture_error_reason,
@@ -368,6 +376,9 @@ class SnapshotSchedulingTests(unittest.TestCase):
               id TEXT PRIMARY KEY,
               last_check_at TEXT,
               last_snapshot_at TEXT,
+              snapshot_retry_count INTEGER NOT NULL DEFAULT 0,
+              next_snapshot_retry_at TEXT,
+              last_snapshot_attempt_at TEXT,
               last_change_score REAL,
               last_change_summary TEXT,
               last_status TEXT,
@@ -378,7 +389,7 @@ class SnapshotSchedulingTests(unittest.TestCase):
         )
         previous_snapshot_at = "2026-07-20T14:17:16+00:00"
         conn.execute(
-            "INSERT INTO web_monitors VALUES (?, NULL, ?, ?, ?, 'ok', '', NULL)",
+            "INSERT INTO web_monitors VALUES (?, NULL, ?, 0, NULL, NULL, ?, ?, 'ok', '', NULL)",
             ("monitor-1", previous_snapshot_at, 0.25, "Previous valid change"),
         )
         monitor = {
@@ -399,7 +410,31 @@ class SnapshotSchedulingTests(unittest.TestCase):
         self.assertEqual(row["last_status"], "error")
         self.assertIn("local_rate_limited", row["last_error"])
         self.assertTrue(row["last_check_at"])
+        self.assertEqual(row["snapshot_retry_count"], 1)
+        self.assertTrue(row["next_snapshot_retry_at"])
+        retry_delay = (
+            datetime.fromisoformat(row["next_snapshot_retry_at"])
+            - datetime.fromisoformat(row["last_snapshot_attempt_at"])
+        )
+        self.assertEqual(retry_delay, timedelta(minutes=10))
         conn.close()
+
+    def test_snapshot_retry_deadline_overrides_normal_schedule(self):
+        monitor = {
+            "status": "active",
+            "created_at": "2026-07-01T00:00:00+00:00",
+            "last_snapshot_at": "2026-07-24T00:00:00+00:00",
+            "snapshot_interval_minutes": 1440,
+            "last_status": "error",
+            "next_snapshot_retry_at": "2026-07-25T00:10:00+00:00",
+        }
+        self.assertEqual(next_run_at(monitor, "snapshot").isoformat(), "2026-07-25T00:10:00+00:00")
+
+    def test_snapshot_retry_uses_bounded_backoff_then_recovery_interval(self):
+        now = datetime.fromisoformat("2026-07-25T00:00:00+00:00")
+        expected_minutes = (10, 30, 60, 180, 360, 360)
+        for failure_count, minutes in enumerate(expected_minutes, start=1):
+            self.assertEqual(_snapshot_retry_at(failure_count, now) - now, timedelta(minutes=minutes))
 
 
 if __name__ == "__main__":

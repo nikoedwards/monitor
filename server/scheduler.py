@@ -1,17 +1,19 @@
 """Background scheduler: periodically run due collectors and web snapshots."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from .config import SCHEDULER_ENABLED, SCHEDULER_SECONDS
+from .config import SCHEDULER_ENABLED, SCHEDULER_SECONDS, WEB_SCHEDULER_SECONDS
 from .connectors.base import run_collector
 from .connectors.registry import REGISTRY
 from .db import db
 from .util import today
 
 _started = False
+logger = logging.getLogger(__name__)
 
 
 def _cadence_delta(cadence: str) -> timedelta:
@@ -107,18 +109,28 @@ def _run_due_web_snapshots() -> None:
                 elif monitor_is_due(monitor, "check", now):
                     check_monitor(conn, monitor)
         except Exception:
+            logger.exception("Web monitor scheduler failed for %s", monitor.get("id"))
             continue
 
 
-def _loop() -> None:
+def _collection_loop() -> None:
     while True:
         try:
             _run_due_collections()
             _run_due_sales()
+        except Exception:
+            logger.exception("Collection scheduler cycle failed")
+        time.sleep(max(60, SCHEDULER_SECONDS))
+
+
+def _web_snapshot_loop() -> None:
+    """Poll webpage work independently so slow collectors cannot delay retries."""
+    while True:
+        try:
             _run_due_web_snapshots()
         except Exception:
-            pass
-        time.sleep(max(60, SCHEDULER_SECONDS))
+            logger.exception("Web snapshot scheduler cycle failed")
+        time.sleep(max(30, WEB_SCHEDULER_SECONDS))
 
 
 def start_scheduler() -> None:
@@ -126,5 +138,8 @@ def start_scheduler() -> None:
     if _started or not SCHEDULER_ENABLED:
         return
     _started = True
-    thread = threading.Thread(target=_loop, daemon=True)
-    thread.start()
+    for target, name in (
+        (_collection_loop, "monitor-collections"),
+        (_web_snapshot_loop, "monitor-web-snapshots"),
+    ):
+        threading.Thread(target=target, name=name, daemon=True).start()

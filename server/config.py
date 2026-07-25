@@ -15,6 +15,7 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 
 # Background scheduler interval (seconds). Set MONITOR_SCHEDULER=0 to disable.
 SCHEDULER_SECONDS = int(os.environ.get("MONITOR_SCHEDULER_SECONDS", "3600"))
+WEB_SCHEDULER_SECONDS = int(os.environ.get("MONITOR_WEB_SCHEDULER_SECONDS", "60"))
 SCHEDULER_ENABLED = os.environ.get("MONITOR_SCHEDULER", "1") != "0"
 DEFAULT_CRAWL_LIMIT = int(os.environ.get("MONITOR_CRAWL_LIMIT", "20"))
 

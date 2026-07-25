@@ -39,6 +39,8 @@ router = APIRouter(prefix="/api/web", tags=["web"])
 DEFAULT_INTERVAL_MINUTES = 1440
 VISUAL_CHANGE_THRESHOLD = 0.025
 TEXT_CHANGE_THRESHOLD = 0.15
+SNAPSHOT_RETRY_DELAYS_MINUTES = (10, 30, 60, 180)
+SNAPSHOT_RECOVERY_RETRY_MINUTES = 360
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -79,6 +81,10 @@ def _interval_minutes(monitor: dict, kind: str) -> int:
 
 
 def next_run_at(monitor: dict, kind: str) -> datetime:
+    if kind == "snapshot" and monitor.get("last_status") == "error":
+        retry_at = _parse_datetime(monitor.get("next_snapshot_retry_at"))
+        if retry_at:
+            return retry_at
     last_field = "last_check_at" if kind == "check" else "last_snapshot_at"
     last_value = monitor.get(last_field)
     if kind == "check" and not last_value:
@@ -143,6 +149,14 @@ def monitor_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
         monitor["seconds_until_check"] = None
         monitor["seconds_until_snapshot"] = None
     return monitor
+
+
+def _snapshot_retry_at(failure_count: int, now: datetime | None = None) -> datetime:
+    if failure_count <= len(SNAPSHOT_RETRY_DELAYS_MINUTES):
+        delay = SNAPSHOT_RETRY_DELAYS_MINUTES[max(0, failure_count - 1)]
+    else:
+        delay = SNAPSHOT_RECOVERY_RETRY_MINUTES
+    return (now or datetime.now(timezone.utc)) + timedelta(minutes=delay)
 
 
 def _discover_pages(start_url: str, limit: int) -> list[str]:
@@ -236,25 +250,32 @@ def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
         except Exception as exc:
             errors.append(f"{url}: {exc}")
     top_change = max(((item.get("effective_change_score") or 0, item.get("summary") or "") for item in snapshots), default=(0, ""))
-    now = utc_now()
+    attempted_at = datetime.now(timezone.utc)
+    now = attempted_at.isoformat()
     if snapshots:
         conn.execute(
             """
             UPDATE web_monitors
             SET last_check_at = ?, last_snapshot_at = ?, last_change_score = ?,
-                last_change_summary = ?, last_status = 'ok', last_error = ?, updated_at = ?
+                last_change_summary = ?, last_status = 'ok', last_error = ?,
+                snapshot_retry_count = 0, next_snapshot_retry_at = NULL,
+                last_snapshot_attempt_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (now, now, top_change[0], top_change[1], "; ".join(errors)[:500], now, monitor["id"]),
+            (now, now, top_change[0], top_change[1], "; ".join(errors)[:500], now, now, monitor["id"]),
         )
     else:
+        failure_count = max(0, int(monitor.get("snapshot_retry_count") or 0)) + 1
+        retry_at = _snapshot_retry_at(failure_count, attempted_at).isoformat()
         conn.execute(
             """
             UPDATE web_monitors
-            SET last_check_at = ?, last_status = 'error', last_error = ?, updated_at = ?
+            SET last_check_at = ?, last_status = 'error', last_error = ?,
+                snapshot_retry_count = ?, next_snapshot_retry_at = ?,
+                last_snapshot_attempt_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (now, "; ".join(errors)[:500], now, monitor["id"]),
+            (now, "; ".join(errors)[:500], failure_count, retry_at, now, now, monitor["id"]),
         )
     return snapshots
 
@@ -482,7 +503,12 @@ def update_monitor(monitor_id: str, payload: WebMonitorUpdate, conn: sqlite3.Con
     )
     if data["url"] != existing_data["url"]:
         conn.execute(
-            "UPDATE web_monitors SET last_check_at = NULL, last_snapshot_at = NULL, last_change_score = 0, last_change_summary = NULL WHERE id = ?",
+            """UPDATE web_monitors
+               SET last_check_at = NULL, last_snapshot_at = NULL, last_change_score = 0,
+                   last_change_summary = NULL, last_status = NULL, last_error = NULL,
+                   snapshot_retry_count = 0, next_snapshot_retry_at = NULL,
+                   last_snapshot_attempt_at = NULL
+               WHERE id = ?""",
             (monitor_id,),
         )
     return monitor_to_dict(conn, conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone())
