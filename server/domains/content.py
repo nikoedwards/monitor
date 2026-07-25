@@ -301,6 +301,14 @@ def marketing_summary(
     coverage = Counter((r.get("metrics") or {}).get("coverage_type") for r in records if (r.get("metrics") or {}).get("coverage_type"))
     posts = sum(1 for r in records if r.get("data_type") != "community_reply")
     replies = sum(1 for r in records if r.get("data_type") == "community_reply")
+    social_totals = {"views": 0, "likes": 0, "comments": 0, "engagement": 0}
+    for record in records:
+        metrics = record.get("metrics") or {}
+        for key in social_totals:
+            try:
+                social_totals[key] += int(metrics.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
 
     publication_names: dict[str, str] = {}
     publication_name_keys: dict[str, str] = {}
@@ -418,6 +426,13 @@ def marketing_summary(
         "total": len(records),
         "posts": posts,
         "replies": replies,
+        "total_views": social_totals["views"],
+        "total_likes": social_totals["likes"],
+        "total_comments": social_totals["comments"],
+        "total_engagement": social_totals["engagement"],
+        "engagement_rate": round(social_totals["engagement"] / social_totals["views"], 6)
+        if social_totals["views"]
+        else None,
         "total_reach": total_reach,
         "total_ave": total_ave,
         "by_channel": [{"channel": k, "total": v} for k, v in by_channel.most_common()],

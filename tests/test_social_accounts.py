@@ -3,7 +3,12 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from server.connectors.social import _compact_count, collect_social_accounts
+from server.connectors.social import (
+    _compact_count,
+    _refresh_existing_social_records,
+    _youtube_web_video_metrics,
+    collect_social_accounts,
+)
 from server.fetchers import FetchError
 from server.util import today
 
@@ -85,6 +90,10 @@ class SocialAccountCollectorTests(unittest.TestCase):
               last_status TEXT, last_error TEXT, config_json TEXT, created_at TEXT, updated_at TEXT
             );
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+            CREATE TABLE records (
+              id TEXT PRIMARY KEY, source_id TEXT, external_id TEXT, title TEXT,
+              author TEXT, body TEXT, url TEXT, metrics_json TEXT, raw_json TEXT
+            );
             """
         )
 
@@ -159,6 +168,74 @@ class SocialAccountCollectorTests(unittest.TestCase):
 
     def test_localized_youtube_view_count_is_parsed(self):
         self.assertEqual(_compact_count("收看次數：3.5K 次"), 3500)
+
+    @patch("server.connectors.social.fetch_json_post")
+    def test_youtube_web_metrics_include_views_likes_and_comments(self, fetch_json_post):
+        fetch_json_post.side_effect = [
+            {
+                "contents": {
+                    "videoPrimaryInfoRenderer": {
+                        "viewCount": {"videoViewCountRenderer": {"viewCount": {"simpleText": "3,538 views"}}},
+                        "videoActions": {
+                            "segmentedLikeDislikeButtonViewModel": {
+                                "defaultButtonViewModel": {
+                                    "buttonViewModel": {"iconName": "LIKE", "title": "27"}
+                                }
+                            }
+                        },
+                    },
+                    "itemSectionRenderer": {
+                        "targetId": "comments-section",
+                        "contents": [{
+                            "continuationItemRenderer": {
+                                "continuationEndpoint": {
+                                    "continuationCommand": {"token": "comment-token"}
+                                }
+                            }
+                        }],
+                    },
+                }
+            },
+            {"commentsHeaderRenderer": {"countText": {"runs": [{"text": "3"}, {"text": " Comments"}]}}},
+        ]
+        config = {"api_key": "public-web-key", "client_version": "test", "context": {"client": {}}}
+
+        metrics = _youtube_web_video_metrics(config, "video-1")
+
+        self.assertEqual(metrics, {"views": 3538, "likes": 27, "comments": 3})
+        self.assertEqual(fetch_json_post.call_count, 2)
+
+    def test_existing_social_record_metrics_are_refreshed(self):
+        self.conn.execute(
+            """
+            INSERT INTO records
+            (id, source_id, external_id, title, author, body, url, metrics_json, raw_json)
+            VALUES ('record-1', 'social_accounts', 'brand-1:link-youtube:youtube:video-1',
+                    'Old', 'Brand', 'Old', 'https://youtube.com/watch?v=video-1',
+                    '{"views": 100}', '{"collection_method": "youtube_channel_page"}')
+            """
+        )
+        payload = {
+            "source_id": "social_accounts",
+            "external_id": "brand-1:link-youtube:youtube:video-1",
+            "title": "Updated",
+            "author": "Brand",
+            "body": "Updated",
+            "url": "https://youtube.com/watch?v=video-1",
+            "metrics": {"views": 3538, "likes": 27, "comments": 3, "engagement": 30},
+            "raw": {"metrics_collection_method": "youtube_web_next"},
+        }
+
+        remaining = _refresh_existing_social_records(self.conn, [payload])
+
+        self.assertEqual(remaining, [])
+        row = self.conn.execute("SELECT title, metrics_json, raw_json FROM records WHERE id = 'record-1'").fetchone()
+        self.assertEqual(row["title"], "Updated")
+        metrics = json.loads(row["metrics_json"])
+        self.assertEqual(metrics["views"], 3538)
+        self.assertEqual(metrics["likes"], 27)
+        self.assertEqual(metrics["comments"], 3)
+        self.assertEqual(json.loads(row["raw_json"])["metrics_collection_method"], "youtube_web_next")
 
     def test_unimplemented_platform_is_not_left_waiting(self):
         self.add_link("linkedin", "https://www.linkedin.com/company/example/")

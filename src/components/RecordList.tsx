@@ -19,6 +19,7 @@ const COLLECTION_SOURCE_LABEL: Record<string, string> = {
   community_site: "社区站点采集",
   meta_ads: "Meta 广告采集",
   youtube_search: "YouTube 搜索采集",
+  social_accounts: "官方社媒账号采集",
   manual_csv: "手动导入",
 };
 
@@ -123,6 +124,34 @@ function MediaMeta({ metrics }: { metrics: Record<string, unknown> }) {
   );
 }
 
+function metricNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function SocialMeta({ metrics }: { metrics: Record<string, unknown> }) {
+  const views = metricNumber(metrics.views);
+  const likes = metricNumber(metrics.likes);
+  const comments = metricNumber(metrics.comments);
+  const engagement = metricNumber(metrics.engagement);
+  const engagementRate = metricNumber(metrics.engagement_rate);
+  const followers = metricNumber(metrics.follower_count);
+  const parts: string[] = [];
+  if (views !== undefined) parts.push(`播放 ${fmtNum(views)}`);
+  if (likes !== undefined) parts.push(`点赞 ${fmtNum(likes)}`);
+  if (comments !== undefined) parts.push(`评论 ${fmtNum(comments)}`);
+  if (engagement !== undefined) parts.push(`互动 ${fmtNum(engagement)}`);
+  if (engagementRate !== undefined) parts.push(`互动率 ${(engagementRate * 100).toFixed(2)}%`);
+  if (followers !== undefined) parts.push(`粉丝 ${fmtNum(followers)}`);
+  if (!parts.length) return null;
+  return (
+    <div className="flex items-center gap-2 mt-1.5 text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>
+      {parts.join("  ·  ")}
+    </div>
+  );
+}
+
 function SentimentBadge({ record }: { record: RecordItem }) {
   const sentiment = record.sentiment;
   if (!sentiment) return null;
@@ -188,7 +217,7 @@ export function RecordList({ records, emptyHint }: { records: RecordItem[]; empt
                 </div>
               )}
               <p className="text-[13px] mt-1 line-clamp-2" style={{ color: "var(--body)" }}>{r.body}</p>
-              {r.metrics && <MediaMeta metrics={r.metrics} />}
+              {r.metrics && (r.channel === "social" ? <SocialMeta metrics={r.metrics} /> : <MediaMeta metrics={r.metrics} />)}
               {collectionReason(r) && (
                 <div
                   className="mt-2 rounded px-2 py-1.5 text-[12px] leading-relaxed"
