@@ -1,17 +1,20 @@
-"""Media/publication enrichment: a domain-keyed media library with heuristic
-traffic/authority estimates, DB-cached, plus a pluggable real-traffic seam.
+"""Media/publication enrichment backed by a cached traffic-estimate library.
 
-The library upgrades the previously hardcoded `PUBLICATION_REACH_HINTS` list
-into a persisted `publications` table so media records can be enriched with
-Meltwater-style dimensions (monthly traffic / reach, authority, tier, country,
-language, AVE).
+Monthly traffic is never inferred from a publication name alone.  Known seed
+values and optional paid/provider data take priority; other domains use their
+public Tranco popularity rank to produce a deliberately broad traffic range.
+The midpoint remains available for sorting and legacy calculations, while the
+range/source/confidence fields make the uncertainty visible to callers.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
-from ..config import CREDENTIALS
-from ..util import clean_text, utc_now
+from ..fetchers import FetchError, fetch_json
+from ..util import clean_text, compact_key, utc_now
 
 # domain -> (name, est_monthly_traffic, authority, tier, country, language)
 SEED_PUBLICATIONS: dict[str, tuple[str, int, int, str, str, str]] = {
@@ -39,19 +42,65 @@ SEED_PUBLICATIONS: dict[str, tuple[str, int, int, str, str, str]] = {
     "msn.com": ("MSN", 400_000_000, 88, "tier_1", "US", "en"),
 }
 
-# Tier -> (default monthly traffic, default authority) used as heuristic fallback.
+# Tier defaults now supply authority only.  They are not used as fake traffic.
 TIER_DEFAULTS: dict[str, tuple[int, int]] = {
-    "tier_1": (5_000_000, 88),
-    "tier_2": (1_500_000, 80),
-    "wire": (500_000, 70),
-    "tier_3": (220_000, 55),
-    "tier_4": (80_000, 40),
-    "unknown": (25_000, 25),
+    "tier_1": (0, 88),
+    "tier_2": (0, 80),
+    "wire": (0, 70),
+    "tier_3": (0, 55),
+    "tier_4": (0, 40),
+    "unknown": (0, 25),
 }
 
-# Rough CPM (USD per 1000 impressions) and placement weight for AVE estimation.
 _AVE_CPM = 25.0
 _AVE_PLACEMENT_WEIGHT = {"earned": 1.0, "paid_pr": 0.4}
+_TRANCO_URL = "https://tranco-list.eu/api/ranks/domain/{domain}"
+_TRANCO_TTL = timedelta(days=30)
+_UNAVAILABLE_TTL = timedelta(days=1)
+
+# Calibrated order-of-magnitude anchors: Tranco rank -> monthly visits midpoint.
+# These are intentionally broad proxies, not claimed measured traffic.
+_TRAFFIC_ANCHORS = (
+    (1, 2_000_000_000),
+    (100, 400_000_000),
+    (1_000, 60_000_000),
+    (10_000, 8_000_000),
+    (100_000, 1_000_000),
+    (1_000_000, 120_000),
+    (5_000_000, 25_000),
+)
+
+_COMMON_SECOND_LEVEL_SUFFIXES = {
+    "ac.uk", "co.uk", "gov.uk", "org.uk",
+    "asn.au", "com.au", "net.au", "org.au",
+    "co.jp", "ne.jp", "or.jp",
+    "com.cn", "net.cn", "org.cn",
+    "co.nz", "com.br", "com.mx", "co.in", "co.kr", "com.sg", "com.hk", "com.tw",
+}
+
+_PUBLICATION_NAME_ALIASES = {
+    compact_key(seed_name): domain
+    for domain, (seed_name, *_rest) in SEED_PUBLICATIONS.items()
+}
+_PUBLICATION_NAME_ALIASES.update({
+    "cnet": "cnet.com",
+    "gizmodo": "gizmodo.com",
+    "mashable": "mashable.com",
+    "kotaku": "kotaku.com",
+    "pcworld": "pcworld.com",
+    "macworld": "macworld.com",
+    "techradar": "techradar.com",
+    "9to5toys": "9to5toys.com",
+    "9to5google": "9to5google.com",
+    "9to5mac": "9to5mac.com",
+    "androidauthority": "androidauthority.com",
+    "androidpolice": "androidpolice.com",
+    "pcmag": "pcmag.com",
+    "soundguys": "soundguys.com",
+    "tomsguide": "tomsguide.com",
+    "zdnet": "zdnet.com",
+    "xda": "xda-developers.com",
+})
 
 
 def _heuristic_tier(name: str, domain: str) -> str:
@@ -63,16 +112,153 @@ def _heuristic_tier(name: str, domain: str) -> str:
     return "unknown"
 
 
-def _provider_traffic(domain: str) -> int | None:
-    """Pluggable seam for a real traffic API (SimilarWeb/Tranco/etc.).
+def _normalize_domain(value: str) -> str:
+    domain = clean_text(value).lower().strip().strip(".")
+    if "://" in domain:
+        domain = domain.split("://", 1)[1].split("/", 1)[0]
+    else:
+        domain = domain.split("/", 1)[0]
+    domain = domain.split("@")[-1].split(":", 1)[0].strip(".")
+    if domain.startswith("www."):
+        domain = domain[4:]
+    try:
+        return domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return domain
 
-    Returns monthly traffic when a provider credential is configured; otherwise
-    None so callers fall back to the heuristic library. Intentionally a no-op
-    until a real provider is wired in.
-    """
-    if not CREDENTIALS.get("traffic_api_key"):
+
+def _registrable_domain(domain: str) -> str:
+    parts = [part for part in domain.split(".") if part]
+    if len(parts) <= 2:
+        return domain
+    suffix = ".".join(parts[-2:])
+    if suffix in _COMMON_SECOND_LEVEL_SUFFIXES and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _domain_candidates(domain: str) -> list[str]:
+    normalized = _normalize_domain(domain)
+    if not normalized:
+        return []
+    root = _registrable_domain(normalized)
+    return [normalized] if root == normalized else [normalized, root]
+
+
+def publication_domain_hint(name: str) -> str:
+    """Resolve well-known publisher names when legacy records lack a domain."""
+    return _PUBLICATION_NAME_ALIASES.get(compact_key(name), "")
+
+
+def _round_estimate(value: float) -> int:
+    value = max(0, value)
+    if value < 100:
+        return int(round(value))
+    magnitude = 10 ** max(0, len(str(int(value))) - 2)
+    return int(round(value / magnitude) * magnitude)
+
+
+def _traffic_range_for_rank(rank: int) -> tuple[int, int, int]:
+    """Return (lower, midpoint, upper) monthly visits for a Tranco rank."""
+    rank = max(1, int(rank))
+    anchors = _TRAFFIC_ANCHORS
+    if rank <= anchors[0][0]:
+        midpoint = float(anchors[0][1])
+    elif rank >= anchors[-1][0]:
+        midpoint = float(anchors[-1][1]) * anchors[-1][0] / rank
+    else:
+        midpoint = float(anchors[-1][1])
+        for (left_rank, left_value), (right_rank, right_value) in zip(anchors, anchors[1:]):
+            if left_rank <= rank <= right_rank:
+                progress = (math.log10(rank) - math.log10(left_rank)) / (
+                    math.log10(right_rank) - math.log10(left_rank)
+                )
+                midpoint = 10 ** (
+                    math.log10(left_value) + progress * (math.log10(right_value) - math.log10(left_value))
+                )
+                break
+    lower = _round_estimate(midpoint * 0.45)
+    middle = _round_estimate(midpoint)
+    upper = _round_estimate(midpoint * 2.2)
+    return lower, middle, upper
+
+
+def _rank_dimensions(rank: int) -> tuple[str, int]:
+    if rank <= 1_000:
+        return "tier_1", 90
+    if rank <= 25_000:
+        return "tier_2", 80
+    if rank <= 500_000:
+        return "tier_3", 65
+    return "tier_4", 45
+
+
+def _fetch_tranco_rank(domain: str) -> dict | None:
+    had_response = False
+    for candidate in _domain_candidates(domain):
+        try:
+            payload = fetch_json(_TRANCO_URL.format(domain=quote(candidate, safe="")), timeout=4)
+        except (FetchError, TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        had_response = True
+        ranks = payload.get("ranks")
+        if not isinstance(ranks, list):
+            continue
+        valid = [item for item in ranks if isinstance(item, dict) and item.get("rank")]
+        if not valid:
+            continue
+        latest = max(valid, key=lambda item: clean_text(item.get("date")))
+        try:
+            rank = int(latest["rank"])
+        except (TypeError, ValueError):
+            continue
+        return {"rank": rank, "as_of": clean_text(latest.get("date")), "ranked_domain": candidate}
+    if had_response:
+        return {"rank": None, "as_of": utc_now()[:10], "ranked_domain": "", "status": "unranked"}
+    return None
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
         return None
-    return None  # seam reserved; no live provider implemented yet
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _cache_is_fresh(row: sqlite3.Row) -> bool:
+    source = row["source"] or ""
+    if source == "manual":
+        return True
+    if source == "seed":
+        return bool(row["traffic_lower"] or row["traffic_upper"])
+    updated_at = _parse_timestamp(row["updated_at"])
+    if not updated_at:
+        return False
+    age = datetime.now(timezone.utc) - updated_at
+    if source == "tranco_model":
+        return bool(row["popularity_rank"]) and age < _TRANCO_TTL
+    if source == "tranco_no_rank":
+        return age < _TRANCO_TTL
+    if source == "unavailable":
+        return age < _UNAVAILABLE_TTL
+    # Old heuristic/api rows (including the repeated 80K/220K values) refresh now.
+    return False
+
+
+def publication_needs_network(conn: sqlite3.Connection, domain: str) -> bool:
+    """Whether refreshing this domain may require an outbound provider call."""
+    domain = _normalize_domain(domain)
+    if not domain or domain in SEED_PUBLICATIONS:
+        return False
+    row = conn.execute("SELECT * FROM publications WHERE domain = ?", (domain,)).fetchone()
+    return row is None or not _cache_is_fresh(row)
 
 
 def estimate_ave(monthly_traffic: int, coverage_type: str) -> int:
@@ -80,19 +266,21 @@ def estimate_ave(monthly_traffic: int, coverage_type: str) -> int:
     return round((monthly_traffic / 1000.0) * _AVE_CPM * weight)
 
 
-def enrich_publication(conn: sqlite3.Connection, name: str, domain: str) -> dict:
-    """Return enriched publication metrics for a media outlet, caching to DB.
-
-    Lookup order: persisted table -> seed library -> heuristic estimate. Results
-    (except table hits) are upserted into `publications` so the library grows
-    as new outlets are seen.
-    """
-    domain = clean_text(domain).lower()
+def enrich_publication(
+    conn: sqlite3.Connection,
+    name: str,
+    domain: str,
+    *,
+    allow_network: bool = True,
+) -> dict:
+    """Return current publication metrics and cache them in ``publications``."""
+    domain = _normalize_domain(domain)
     name = clean_text(name)
+    row = None
 
     if domain:
         row = conn.execute("SELECT * FROM publications WHERE domain = ?", (domain,)).fetchone()
-        if row is not None:
+        if row is not None and _cache_is_fresh(row):
             return _row_to_dict(row)
 
     if domain in SEED_PUBLICATIONS:
@@ -102,6 +290,11 @@ def enrich_publication(conn: sqlite3.Connection, name: str, domain: str) -> dict
             "name": name or seed_name,
             "icon_url": _favicon(domain),
             "est_monthly_traffic": traffic,
+            "traffic_lower": traffic,
+            "traffic_upper": traffic,
+            "popularity_rank": None,
+            "traffic_confidence": "medium",
+            "traffic_as_of": "",
             "authority": authority,
             "tier": tier,
             "country": country,
@@ -109,20 +302,64 @@ def enrich_publication(conn: sqlite3.Connection, name: str, domain: str) -> dict
             "source": "seed",
         }
     else:
-        tier = _heuristic_tier(name, domain)
-        provider_traffic = _provider_traffic(domain)
-        traffic, authority = TIER_DEFAULTS.get(tier, TIER_DEFAULTS["unknown"])
-        record = {
-            "domain": domain,
-            "name": name or domain,
-            "icon_url": _favicon(domain),
-            "est_monthly_traffic": provider_traffic or traffic,
-            "authority": authority,
-            "tier": tier,
-            "country": "",
-            "language": "",
-            "source": "api" if provider_traffic else "heuristic",
-        }
+        heuristic_tier = _heuristic_tier(name, domain)
+        _, heuristic_authority = TIER_DEFAULTS.get(heuristic_tier, TIER_DEFAULTS["unknown"])
+        if not allow_network:
+            if row is not None and row["source"] == "tranco_model":
+                return _row_to_dict(row)
+            return {
+                "domain": domain,
+                "name": name or domain or "Unknown publication",
+                "icon_url": _favicon(domain),
+                "est_monthly_traffic": 0,
+                "traffic_lower": 0,
+                "traffic_upper": 0,
+                "popularity_rank": None,
+                "traffic_confidence": "low",
+                "traffic_as_of": "",
+                "authority": heuristic_authority,
+                "tier": heuristic_tier,
+                "country": "",
+                "language": "",
+                "source": "unavailable",
+            }
+        rank_data = _fetch_tranco_rank(domain) if domain else None
+        if rank_data and rank_data.get("rank"):
+            lower, midpoint, upper = _traffic_range_for_rank(rank_data["rank"])
+            tier, authority = _rank_dimensions(rank_data["rank"])
+            record = {
+                "domain": domain,
+                "name": name or domain,
+                "icon_url": _favicon(domain),
+                "est_monthly_traffic": midpoint,
+                "traffic_lower": lower,
+                "traffic_upper": upper,
+                "popularity_rank": rank_data["rank"],
+                "traffic_confidence": "medium",
+                "traffic_as_of": rank_data["as_of"],
+                "authority": authority,
+                "tier": tier,
+                "country": "",
+                "language": "",
+                "source": "tranco_model",
+            }
+        else:
+            record = {
+                "domain": domain,
+                "name": name or domain or "Unknown publication",
+                "icon_url": _favicon(domain),
+                "est_monthly_traffic": 0,
+                "traffic_lower": 0,
+                "traffic_upper": 0,
+                "popularity_rank": None,
+                "traffic_confidence": "low",
+                "traffic_as_of": utc_now()[:10],
+                "authority": heuristic_authority,
+                "tier": heuristic_tier,
+                "country": "",
+                "language": "",
+                "source": "tranco_no_rank" if rank_data else "unavailable",
+            }
 
     if domain:
         _upsert(conn, record)
@@ -139,6 +376,11 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "name": row["name"],
         "icon_url": row["icon_url"],
         "est_monthly_traffic": row["est_monthly_traffic"],
+        "traffic_lower": row["traffic_lower"],
+        "traffic_upper": row["traffic_upper"],
+        "popularity_rank": row["popularity_rank"],
+        "traffic_confidence": row["traffic_confidence"],
+        "traffic_as_of": row["traffic_as_of"],
         "authority": row["authority"],
         "tier": row["tier"],
         "country": row["country"],
@@ -150,13 +392,19 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 def _upsert(conn: sqlite3.Connection, record: dict) -> None:
     conn.execute(
         """
-        INSERT INTO publications (domain, name, icon_url, est_monthly_traffic, authority,
-            tier, country, language, source, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO publications (domain, name, icon_url, est_monthly_traffic,
+            traffic_lower, traffic_upper, popularity_rank, traffic_confidence, traffic_as_of,
+            authority, tier, country, language, source, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(domain) DO UPDATE SET
             name = excluded.name,
             icon_url = excluded.icon_url,
             est_monthly_traffic = excluded.est_monthly_traffic,
+            traffic_lower = excluded.traffic_lower,
+            traffic_upper = excluded.traffic_upper,
+            popularity_rank = excluded.popularity_rank,
+            traffic_confidence = excluded.traffic_confidence,
+            traffic_as_of = excluded.traffic_as_of,
             authority = excluded.authority,
             tier = excluded.tier,
             country = excluded.country,
@@ -166,7 +414,8 @@ def _upsert(conn: sqlite3.Connection, record: dict) -> None:
         """,
         (
             record["domain"], record["name"], record["icon_url"], record["est_monthly_traffic"],
-            record["authority"], record["tier"], record["country"], record["language"],
-            record["source"], utc_now(),
+            record.get("traffic_lower", 0), record.get("traffic_upper", 0), record.get("popularity_rank"),
+            record.get("traffic_confidence", "low"), record.get("traffic_as_of"), record["authority"],
+            record["tier"], record["country"], record["language"], record["source"], utc_now(),
         ),
     )
