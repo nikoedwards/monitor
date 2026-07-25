@@ -20,7 +20,7 @@ const CUSTOM_CHANNEL: Record<string, string> = { sales: "other_ecom", social: "s
 
 const KEYWORD_HINT = (
   <span>
-    监控关键词决定<b>媒体公关(PR)等渠道的抓取范围</b>:系统会用每个关键词<b>分别</b>去 Google News、Reddit、YouTube 等源搜索品牌内容。
+    监控关键词决定<b>媒体公关(PR)等渠道的抓取范围</b>:系统会用每个关键词<b>分别</b>去 Google News、YouTube 等源搜索品牌内容；Reddit 全站搜索只使用品牌主名称。
     <br />
     建议穷举品牌的<b>所有写法</b>——中文名、英文名、缩写、别称、旧名,以及核心子品牌 / 产品线名。漏写某种写法,只用该写法报道的内容会<b>整批抓不到</b>。
     <br />
