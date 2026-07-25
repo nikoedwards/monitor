@@ -1,8 +1,10 @@
+import json
 import sqlite3
 import unittest
 from unittest.mock import patch
 
-from server.connectors.social import collect_social_accounts
+from server.connectors.social import _compact_count, collect_social_accounts
+from server.fetchers import FetchError
 from server.util import today
 
 
@@ -29,6 +31,46 @@ YOUTUBE_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
   </entry>
 </feed>
 """
+
+
+YOUTUBE_CHANNEL_DATA = {
+    "metadata": {"channelMetadataRenderer": {"title": "Example Brand"}},
+    "contents": {
+        "richGridRenderer": {
+            "contents": [{
+                "richItemRenderer": {
+                    "content": {
+                        "lockupViewModel": {
+                            "contentId": "page-video-1",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                                "thumbnailViewModel": {
+                                    "image": {"sources": [{"url": "https://img.youtube.com/page-test.jpg"}]}
+                                }
+                            },
+                            "metadata": {
+                                "lockupMetadataViewModel": {
+                                    "title": {"content": "Production fallback video"},
+                                    "metadata": {
+                                        "contentMetadataViewModel": {
+                                            "metadataRows": [{
+                                                "metadataParts": [
+                                                    {"text": {"content": "3.4K views"}},
+                                                    {"text": {"content": "1 month ago"}},
+                                                ]
+                                            }]
+                                        }
+                                    },
+                                }
+                            },
+                        }
+                    }
+                }
+            }]
+        }
+    },
+}
+YOUTUBE_CHANNEL_HTML = f"<html><script>var ytInitialData = {json.dumps(YOUTUBE_CHANNEL_DATA)};</script></html>"
 
 
 class SocialAccountCollectorTests(unittest.TestCase):
@@ -84,6 +126,27 @@ class SocialAccountCollectorTests(unittest.TestCase):
         config = self.conn.execute("SELECT config_json FROM links WHERE id = 'link-youtube'").fetchone()["config_json"]
         self.assertIn("UC1234567890123456789012", config)
 
+    @patch("server.connectors.social.fetch_page")
+    @patch("server.connectors.social.fetch_bytes", side_effect=FetchError("HTTP Error 404: Not Found"))
+    def test_youtube_channel_page_is_used_when_atom_feed_fails(self, _fetch_bytes, fetch_page):
+        fetch_page.return_value = {
+            "meta": {},
+            "final_url": "https://www.youtube.com/channel/UC1234567890123456789012/videos",
+            "html": YOUTUBE_CHANNEL_HTML,
+            "title": "Example Brand - YouTube",
+        }
+        self.add_link("youtube", "https://www.youtube.com/channel/UC1234567890123456789012")
+
+        records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["external_id"], "brand-1:link-youtube:youtube:page-video-1")
+        self.assertEqual(records[0]["metrics"]["views"], 3400)
+        self.assertEqual(records[0]["raw"]["collection_method"], "youtube_channel_page")
+        status = self.conn.execute("SELECT last_status, last_error FROM links WHERE id = 'link-youtube'").fetchone()
+        self.assertEqual(status["last_status"], "ok")
+        self.assertEqual(status["last_error"], "")
+
     def test_paid_platform_without_token_is_explained(self):
         self.add_link("instagram", "https://www.instagram.com/example/")
         with patch("server.connectors.creators.CREDENTIALS", {"ensembledata_token": ""}):
@@ -93,6 +156,9 @@ class SocialAccountCollectorTests(unittest.TestCase):
         status = self.conn.execute("SELECT last_status, last_error FROM links WHERE id = 'link-instagram'").fetchone()
         self.assertEqual(status["last_status"], "needs_credential")
         self.assertIn("ensembledata_token", status["last_error"])
+
+    def test_localized_youtube_view_count_is_parsed(self):
+        self.assertEqual(_compact_count("收看次數：3.5K 次"), 3500)
 
     def test_unimplemented_platform_is_not_left_waiting(self):
         self.add_link("linkedin", "https://www.linkedin.com/company/example/")
