@@ -135,6 +135,21 @@ class SocialAccountCollectorTests(unittest.TestCase):
         config = self.conn.execute("SELECT config_json FROM links WHERE id = 'link-youtube'").fetchone()["config_json"]
         self.assertIn("UC1234567890123456789012", config)
 
+    @patch("server.connectors.social._enrich_youtube_web_metrics")
+    @patch("server.connectors.social.fetch_bytes", return_value=YOUTUBE_FEED)
+    @patch("server.connectors.social.fetch_page")
+    def test_youtube_atom_feed_also_enriches_engagement_metrics(self, fetch_page, _fetch_bytes, enrich):
+        fetch_page.return_value = {"html": "channel-page", "title": "Example Brand"}
+        self.add_link("youtube", "https://www.youtube.com/channel/UC1234567890123456789012")
+
+        records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
+
+        self.assertEqual(len(records), 1)
+        enrich.assert_called_once()
+        posts, html = enrich.call_args.args
+        self.assertEqual(posts[0].external_id, "test-video-1")
+        self.assertEqual(html, "channel-page")
+
     @patch("server.connectors.social.fetch_page")
     @patch("server.connectors.social.fetch_bytes", side_effect=FetchError("HTTP Error 404: Not Found"))
     def test_youtube_channel_page_is_used_when_atom_feed_fails(self, _fetch_bytes, fetch_page):
