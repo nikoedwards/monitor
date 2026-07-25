@@ -54,7 +54,7 @@ const PLATFORM_LABEL: Record<string, string> = {
 const COMMUNITY_CRAWL_NOTE = (
   <div className="space-y-1.5">
     <div className="font-medium" style={{ color: "var(--ink)" }}>社群数据来源与采集逻辑</div>
-    <div><span style={{ color: "var(--mute)" }}>Reddit：</span>按品牌关键词全站搜索 + 指定 subreddit 抓帖子，JSON 失败自动回退公开 RSS。</div>
+    <div><span style={{ color: "var(--mute)" }}>Reddit：</span>品牌主名称用于全站搜索；指定 subreddit 作为官方大本营，全部帖子按时间顺序收录且不要求关键词命中。</div>
     <div><span style={{ color: "var(--mute)" }}>自建社群：</span>Discourse 取帖子与回复；Frill 等反馈站从页面内嵌数据取功能建议（帖子）；其余尝试 RSS，最后才退化为页面快照。</div>
     <div><span style={{ color: "var(--mute)" }}>Discord / FB 群 / Telegram：</span>多需登录或特权令牌，列为阶段二。</div>
     <div style={{ color: "var(--mute)" }}>「回复」以加粗左边框标记，可在内容流中区分帖子与回复。</div>

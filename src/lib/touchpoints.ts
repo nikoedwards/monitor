@@ -66,8 +66,8 @@ export const TOUCHPOINTS: TouchpointSection[] = [
       {
         platform: "reddit", label: "Reddit", channel: "community", multi: true,
         placeholder: "subreddit，如 r/anker 或 https://www.reddit.com/r/anker",
-        dataSource: "指定 subreddit 的帖子与回复，及全站按品牌关键词的讨论",
-        method: "Reddit JSON 端点抓取，失败回退公开 RSS；可同时追踪多个 subreddit",
+        dataSource: "指定官方 subreddit 的全部帖子，及全站按品牌主名称发现的讨论",
+        method: "官方 subreddit 读取 /new 内容流；全站 /search 仅使用品牌主名称；失败回退公开 RSS",
         requires: "公开免登录即可；配置 REDDIT_BEARER_TOKEN 可显著提升配额、降低被限流",
       },
       {

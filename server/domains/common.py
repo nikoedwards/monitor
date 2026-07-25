@@ -1,6 +1,7 @@
 """Shared dependencies, serializers, and the record query builder."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterator
@@ -9,6 +10,7 @@ from fastapi import HTTPException
 
 from ..db import db as _db
 from ..records import record_to_dict
+from ..relevance import reddit_search_record_is_relevant
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:
@@ -80,11 +82,35 @@ def build_record_query(filters: dict) -> tuple[str, list]:
 
 def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> list[dict]:
     where, params = build_record_query(filters)
+    requested = max(1, min(limit, 1000))
     rows = conn.execute(
-        f"SELECT * FROM records{where} ORDER BY occurred_at DESC LIMIT ?",
-        (*params, max(1, min(limit, 1000))),
-    ).fetchall()
-    return [record_to_dict(row) for row in rows]
+        f"SELECT * FROM records{where} ORDER BY occurred_at DESC",
+        params,
+    )
+    records: list[dict] = []
+    brand_names: dict[str, str] = {}
+    for row in rows:
+        if row["source_id"] == "reddit_search":
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError):
+                raw = {}
+            brand_id = row["brand_id"] or ""
+            if brand_id and brand_id not in brand_names:
+                brand_row = conn.execute("SELECT name FROM brands WHERE id = ?", (brand_id,)).fetchone()
+                brand_names[brand_id] = brand_row["name"] if brand_row else ""
+            if not reddit_search_record_is_relevant({
+                "source_id": row["source_id"],
+                "raw": raw,
+                "url": row["url"],
+                "title": row["title"],
+                "body": row["body"],
+            }, brand_names.get(brand_id) or None):
+                continue
+        records.append(record_to_dict(row))
+        if len(records) >= requested:
+            break
+    return records
 
 
 def trend_by_day(records: list[dict], days: int = 14) -> list[dict]:

@@ -11,6 +11,7 @@ from urllib.parse import quote_plus, urlencode
 from ..config import CREDENTIALS, USER_AGENT
 from ..fetchers import FetchError, fetch_bytes, fetch_json, fetch_page, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
+from ..relevance import query_match_evidence, reddit_post_id, search_query_parts
 from ..util import (
     clean_text,
     host_key,
@@ -231,8 +232,17 @@ def _reddit_time(created_utc) -> str | None:
 
 
 def _reddit_post_id(url: str) -> str:
-    match = re.search(r"/comments/([a-z0-9]+)", url or "", re.I)
-    return match.group(1) if match else ""
+    return reddit_post_id(url)
+
+
+def _reddit_search_term(query: str) -> str:
+    """Ask Reddit for an exact phrase when a brand name has several parts."""
+    return f'"{query}"' if len(search_query_parts(query)) > 1 else query
+
+
+def _reddit_brand_query(brand: dict) -> str:
+    """Reddit-wide discovery uses only the primary brand name, not product keywords."""
+    return clean_text(brand.get("name"))
 
 
 def _reddit_listing_payloads(
@@ -250,10 +260,16 @@ def _reddit_listing_payloads(
         link = f"{REDDIT_WEB}{permalink}" if permalink else item.get("url")
         if not link:
             continue
-        post_id = item.get("id") or _reddit_post_id(link)
+        post_id = _reddit_post_id(link)
+        if not post_id:
+            continue
         title = clean_text(item.get("title")) or "Reddit post"
         body = html_fragment_to_text(item.get("selftext")) or title
+        relevance = query_match_evidence(query, title, body) if query else None
+        if query and relevance is None:
+            continue
         sub = item.get("subreddit") or subreddit
+        collection_mode = "site_search" if query else "official_hub"
         payloads.append({
             "source_id": "reddit_search",
             "brand_id": brand.get("id"),
@@ -273,14 +289,20 @@ def _reddit_listing_payloads(
                 "subreddit": sub,
                 "scope": scope,
             },
-            "raw": {"query": query, "subreddit": sub, "scope": scope},
+            "raw": {
+                "query": query,
+                "subreddit": sub,
+                "scope": scope,
+                "collection_mode": collection_mode,
+                **(relevance or {}),
+            },
         })
     return payloads
 
 
 def _reddit_rss_payloads(brand: dict, query: str) -> list[dict]:
     """Last-resort anonymous RSS fallback when the JSON endpoints are blocked."""
-    url = f"{REDDIT_WEB}/search.rss?q={quote_plus(query)}&sort=new&limit=25"
+    url = f"{REDDIT_WEB}/search.rss?q={quote_plus(_reddit_search_term(query))}&sort=new&limit=25"
     try:
         raw = fetch_bytes(url, accept="application/rss+xml,application/atom+xml", timeout=16)
         items = parse_rss(raw, limit=25)
@@ -291,10 +313,14 @@ def _reddit_rss_payloads(brand: dict, query: str) -> list[dict]:
     payloads: list[dict] = []
     for item in items:
         link = item.get("url")
-        if not link:
-            continue
         post_id = _reddit_post_id(link)
+        if not link or not post_id:
+            continue
         title = item.get("title") or "Reddit post"
+        body = item.get("description") or title
+        relevance = query_match_evidence(query, title, body)
+        if relevance is None:
+            continue
         payloads.append({
             "source_id": "reddit_search",
             "brand_id": brand.get("id"),
@@ -304,29 +330,34 @@ def _reddit_rss_payloads(brand: dict, query: str) -> list[dict]:
             "channel": "community",
             "platform": "reddit",
             "title": title,
-            "body": item.get("description") or title,
+            "body": body,
             "url": link,
             "occurred_at": item.get("published_at"),
             "metrics": {"scope": "site"},
-            "raw": {"query": query, "scope": "site"},
+            "raw": {
+                "query": query,
+                "scope": "site",
+                "collection_mode": "site_search",
+                **relevance,
+            },
         })
     return payloads
 
 
 def _reddit_subreddit_rss_payloads(brand: dict, subreddit: str, scope: str) -> list[dict]:
     """Anonymous per-subreddit RSS fallback used when the JSON endpoints are 403/blocked."""
-    url = f"{REDDIT_WEB}/r/{subreddit}/new.rss?limit=25"
+    url = f"{REDDIT_WEB}/r/{subreddit}/new.rss?limit=100"
     try:
         raw = fetch_bytes(url, accept="application/rss+xml,application/atom+xml", timeout=16)
-        items = parse_rss(raw, limit=25)
+        items = parse_rss(raw, limit=100)
     except Exception:
         return []
     payloads: list[dict] = []
     for item in items:
         link = item.get("url")
-        if not link:
-            continue
         post_id = _reddit_post_id(link)
+        if not link or not post_id:
+            continue
         payloads.append({
             "source_id": "reddit_search",
             "brand_id": brand.get("id"),
@@ -340,7 +371,12 @@ def _reddit_subreddit_rss_payloads(brand: dict, subreddit: str, scope: str) -> l
             "url": link,
             "occurred_at": item.get("published_at"),
             "metrics": {"subreddit": subreddit, "scope": scope},
-            "raw": {"subreddit": subreddit, "scope": scope, "via": "rss"},
+            "raw": {
+                "subreddit": subreddit,
+                "scope": scope,
+                "via": "rss",
+                "collection_mode": "official_hub",
+            },
         })
     return payloads
 
@@ -361,16 +397,20 @@ def _extract_subreddit(value: str) -> str:
 
 def collect_reddit(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     payloads: list[dict] = []
-    queries = brand_queries(brand)
-    # 1) Keyword search across all of Reddit.
-    for query in queries:
+    query = _reddit_brand_query(brand)
+    # 1) Search all of Reddit using only the primary brand name. Product names
+    #    and other monitoring keywords intentionally do not widen this search.
+    if query:
         try:
-            data = _reddit_get("/search.json", {"q": query, "sort": "new", "limit": 25, "type": "link"})
+            data = _reddit_get(
+                "/search.json",
+                {"q": _reddit_search_term(query), "sort": "new", "limit": 25, "type": "link"},
+            )
             payloads.extend(_reddit_listing_payloads(data, brand, query))
         except (FetchError, ValueError):
             payloads.extend(_reddit_rss_payloads(brand, query))
-    # 2) Brand-configured subreddits (links table, platform=reddit). One brand can
-    #    track several subreddits; each configured link is crawled independently.
+    # 2) Brand-configured official hubs. Every post returned by the newest feed
+    #    is accepted in feed order without keyword matching; deduplication happens downstream.
     for link in community_links(conn, brand.get("id"), platform="reddit"):
         link_id = link.get("id")
         subreddit = _extract_subreddit(link.get("url"))
@@ -381,24 +421,12 @@ def collect_reddit(conn: sqlite3.Connection, brand: dict) -> list[dict]:
         got = 0
         last_exc: Exception | None = None
         try:
-            data = _reddit_get(f"/r/{subreddit}/new.json", {"limit": 25})
+            data = _reddit_get(f"/r/{subreddit}/new.json", {"limit": 100})
             items = _reddit_listing_payloads(data, brand, "", subreddit=subreddit, scope=scope)
             payloads.extend(items)
             got += len(items)
         except (FetchError, ValueError) as exc:
             last_exc = exc
-        for query in queries:
-            try:
-                data = _reddit_get(
-                    f"/r/{subreddit}/search.json",
-                    {"q": query, "restrict_sr": 1, "sort": "new", "limit": 25},
-                )
-                items = _reddit_listing_payloads(data, brand, query, subreddit=subreddit, scope=scope)
-                payloads.extend(items)
-                got += len(items)
-            except (FetchError, ValueError) as exc:
-                last_exc = exc
-                continue
         # JSON endpoints blocked/failed → recover via anonymous RSS before reporting an error.
         if got == 0 and last_exc is not None:
             rss = _reddit_subreddit_rss_payloads(brand, subreddit, scope)
@@ -410,7 +438,7 @@ def collect_reddit(conn: sqlite3.Connection, brand: dict) -> list[dict]:
                 _touch_link(conn, link_id, status=status, error=msg)
         else:
             _touch_link(conn, link_id, status="ok" if got else "empty",
-                        error="" if got else "该 subreddit 暂无匹配新帖子")
+                        error="" if got else "该 subreddit 暂无新帖子")
     return payloads
 
 

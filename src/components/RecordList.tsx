@@ -15,7 +15,7 @@ const TIER_LABEL: Record<string, string> = {
 const COLLECTION_SOURCE_LABEL: Record<string, string> = {
   google_news: "Google News（RSS 定时采集）",
   google_web_search: "Google 普通网页搜索补漏（定时任务）",
-  reddit_search: "Reddit 搜索采集",
+  reddit_search: "Reddit 采集",
   community_site: "社区站点采集",
   meta_ads: "Meta 广告采集",
   youtube_search: "YouTube 搜索采集",
@@ -43,6 +43,23 @@ function collectionReason(record: RecordItem): string | undefined {
     return query
       ? `收录原因：定时普通网页搜索补漏以关键词「${query}」发现，并按任务规则核验后收录。`
       : "收录原因：由定时普通网页搜索补漏任务核验后收录；该历史记录未保存触发关键词。";
+  }
+  if (record.source_id === "reddit_search") {
+    const matchedIn = textValue(raw.matched_in);
+    const matchedText = textValue(raw.matched_text);
+    const subreddit = textValue(raw.subreddit);
+    const scope = textValue(raw.scope);
+    if (query) {
+      const evidence = matchedText
+        ? `，并在${matchedIn === "title" ? "标题" : "正文"}命中「${matchedText}」`
+        : "；历史记录已按当前标题/正文关键词规则复核";
+      return `收录原因：Reddit 使用品牌主名称「${query}」进行全站搜索${evidence}后收录。`;
+    }
+    if (subreddit || scope?.startsWith("subreddit:")) {
+      const name = subreddit || scope?.slice("subreddit:".length);
+      return `收录原因：来自已配置的 Reddit 官方大本营 r/${name}；按发布时间顺序直接收录，不要求帖子命中关键词。`;
+    }
+    return "收录原因：Reddit 社群采集；该历史记录未保存触发关键词。";
   }
   return record.source_id ? `收录原因：${collectionSourceLabel(record.source_id) || record.source_id}` : undefined;
 }

@@ -29,9 +29,9 @@ REGISTRY: list[ConnectorSpec] = [
         collect=collectors.collect_google_news,
     ),
     ConnectorSpec(
-        id="reddit_search", name="Reddit 搜索", category="community", dimension="marketing",
+        id="reddit_search", name="Reddit 社群", category="community", dimension="marketing",
         tier=1, vendor="Reddit", sync_mode="scheduled", cadence="daily",
-        notes="按品牌关键词与配置的 subreddit 抓取 Reddit(JSON 端点,可选 REDDIT_BEARER_TOKEN,回退 RSS)。",
+        notes="品牌主名称全站搜索 + 配置的官方 subreddit 全量内容流(JSON 端点,可选 REDDIT_BEARER_TOKEN,回退 RSS)。",
         collect=collectors.collect_reddit,
     ),
     ConnectorSpec(
