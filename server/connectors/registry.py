@@ -6,6 +6,7 @@ import sqlite3
 from ..util import utc_now
 from .base import ConnectorSpec
 from . import collectors
+from . import social
 from .creators import runner as creator_runner
 
 REGISTRY: list[ConnectorSpec] = [
@@ -38,6 +39,12 @@ REGISTRY: list[ConnectorSpec] = [
         tier=1, vendor="Web", sync_mode="scheduled", cadence="daily",
         notes="抓取品牌配置的自建社群/论坛链接:Discourse JSON API → RSS 发现 → 通用页面爬取。",
         collect=collectors.collect_community_sites,
+    ),
+    ConnectorSpec(
+        id="social_accounts", name="官方社媒账号", category="social", dimension="marketing",
+        tier=1, vendor="Platform API / Public Feed", sync_mode="scheduled", cadence="daily",
+        notes="按品牌配置的社媒账号链接采集官方内容。YouTube 使用公开 Atom feed；Instagram / TikTok / X 需 Ensemble Data；其余平台会明确标记暂未支持。",
+        collect=social.collect_social_accounts,
     ),
     ConnectorSpec(
         id="app_store_reviews", name="App Store 评论", category="voc", dimension="voc",

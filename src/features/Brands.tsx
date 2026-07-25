@@ -12,6 +12,7 @@ import {
   useProducts,
   useSalesSync,
   useSettings,
+  useSourceMutations,
 } from "../lib/hooks";
 import { AUTOMATED_SALES_CHANNELS, SECTION_BY_KEY, TOUCHPOINTS, type TouchpointPlatform, type TouchpointSection } from "../lib/touchpoints";
 import type { Brand, BrandDraft, Link } from "../lib/api";
@@ -249,15 +250,17 @@ type SlotFeedback = { kind: "pending" | "ok" | "saved" | "err"; text?: string };
 function TouchpointSlot({ brandId, section, platform, label, channel, placeholder, link, grouped, crawlInfo }: { brandId: string; section: TouchpointSection; platform: string; label: string; channel: string; placeholder?: string; link?: Link; grouped?: boolean; crawlInfo?: TouchpointPlatform }) {
   const { addLink, updateLink, delLink } = useCatalogMutations();
   const sync = useSalesSync();
+  const socialCollect = useSourceMutations().collect;
   const [val, setVal] = useState(link?.url || "");
   const [feedback, setFeedback] = useState<SlotFeedback | null>(null);
   useEffect(() => { setVal(link?.url || ""); }, [link?.id, link?.url]);
 
   const isAutoSales = section.dimension === "sales" && AUTOMATED_SALES_CHANNELS.has(channel);
+  const isAutoSocial = section.key === "social";
   const paused = link?.status === "paused";
   const url = val.trim();
   const dirty = url !== (link?.url || "");
-  const busy = addLink.isPending || updateLink.isPending || sync.isPending;
+  const busy = addLink.isPending || updateLink.isPending || sync.isPending || socialCollect.isPending;
 
   const runSync = async (linkId: string) => {
     setFeedback({ kind: "pending" });
@@ -267,6 +270,18 @@ function TouchpointSlot({ brandId, section, platform, label, channel, placeholde
       setFeedback(n > 0 ? { kind: "ok", text: `✓ 展开 ${n} 个 Listing` } : { kind: "ok", text: "✓ 已保存，未发现 Listing（可改用店铺/商品页）" });
     } catch (e: any) {
       setFeedback({ kind: "err", text: e?.message || "同步失败" });
+    }
+  };
+
+  const runSocialSync = async () => {
+    setFeedback({ kind: "pending" });
+    try {
+      const res: any = await socialCollect.mutateAsync({ sourceId: "social_accounts", brandId });
+      const n = res?.created ?? 0;
+      if (n > 0) setFeedback({ kind: "ok", text: `✓ 新增 ${n} 条内容` });
+      else setFeedback(null);
+    } catch (e: any) {
+      setFeedback({ kind: "err", text: e?.message || "采集失败" });
     }
   };
 
@@ -280,6 +295,7 @@ function TouchpointSlot({ brandId, section, platform, label, channel, placeholde
       linkId = created?.id;
     }
     if (isAutoSales && linkId) await runSync(linkId);
+    else if (isAutoSocial && linkId) await runSocialSync();
     else setFeedback({ kind: "saved", text: "✓ 已保存" });
   };
 
@@ -311,7 +327,7 @@ function TouchpointSlot({ brandId, section, platform, label, channel, placeholde
       {/* explicit save when there are unsaved edits */}
       {dirty && url && (
         <Button size="sm" variant="primary" disabled={busy} onClick={save} className="shrink-0 whitespace-nowrap">
-          {busy ? "处理中…" : isAutoSales ? "保存并同步" : "保存"}
+          {busy ? "处理中…" : isAutoSales ? "保存并同步" : isAutoSocial ? "保存并采集" : "保存"}
         </Button>
       )}
 
@@ -319,6 +335,12 @@ function TouchpointSlot({ brandId, section, platform, label, channel, placeholde
       {!dirty && link && isAutoSales && (
         <Button size="sm" disabled={busy} onClick={() => runSync(link.id)} className="shrink-0 whitespace-nowrap">
           {sync.isPending ? "同步中…" : "同步"}
+        </Button>
+      )}
+
+      {!dirty && link && isAutoSocial && (
+        <Button size="sm" disabled={busy} onClick={runSocialSync} className="shrink-0 whitespace-nowrap">
+          {socialCollect.isPending ? "采集中…" : "立即采集"}
         </Button>
       )}
 

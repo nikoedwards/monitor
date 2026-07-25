@@ -451,8 +451,10 @@ export function useSourceMutations() {
         api.post<any>(`/api/sources/${sourceId}/collect${qs({ brand_id: brandId })}`),
       onSuccess: () => {
         qc.invalidateQueries({ queryKey: ["sources"] });
+        qc.invalidateQueries({ queryKey: ["links"] });
         qc.invalidateQueries({ queryKey: ["records"] });
         qc.invalidateQueries({ queryKey: ["overview"] });
+        qc.invalidateQueries({ queryKey: ["marketing-summary"] });
       },
     }),
   };
