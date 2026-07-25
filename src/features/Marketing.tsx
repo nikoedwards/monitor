@@ -27,6 +27,7 @@ const SOURCE_LABEL: Record<string, string> = {
   youtube_search: "YouTube",
   discord_community: "Discord",
   facebook_groups: "Facebook 群组",
+  social_accounts: "官方社媒账号",
   manual_csv: "手动录入",
 };
 
@@ -245,7 +246,7 @@ export default function Marketing() {
 
       <Card>
         <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
-        <RecordList records={shownRecords} emptyHint="在数据源页发起媒体 / 广告 / 红人 / 社群采集后查看。" />
+        <RecordList records={shownRecords} emptyHint="在数据源页发起媒体 / 广告 / 红人 / 社群 / 社媒账号采集后查看。" />
       </Card>
 
       <PublicationDetailModal

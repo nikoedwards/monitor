@@ -44,6 +44,8 @@ def collect_source(source_id: str, brand_id: str, conn: sqlite3.Connection = Dep
     if not spec:
         raise HTTPException(status_code=404, detail="Source not found")
     brand = fetch_brand(conn, brand_id)
+    if source_id == "social_accounts":
+        brand = {**brand, "_force_collect": True}
     result = run_collector(conn, spec, brand)
     return result
 
@@ -121,7 +123,8 @@ def monitoring_refresh(
     for spec in REGISTRY:
         if spec.dimension != dimension or spec.collect is None or spec.status != "ready":
             continue
-        res = run_collector(conn, spec, brand)
+        collector_brand = {**brand, "_force_collect": True} if spec.id == "social_accounts" else brand
+        res = run_collector(conn, spec, collector_brand)
         created += res.get("created", 0)
         results.append(res)
     return {"dimension": dimension, "created": created, "results": results}

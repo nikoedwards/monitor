@@ -23,6 +23,12 @@ const STATUS_MAP: Record<string, StatusMeta> = {
     reason: "该来源需要配置访问凭证后才能采集。",
     fix: "在「设置」或环境变量中配置相应凭证后重试。",
   },
+  unsupported: {
+    label: "暂未支持",
+    tone: "var(--mute)",
+    reason: "该平台的官方账号采集适配器尚未接入，当前链接只会保留为监控配置。",
+    fix: "可先使用已支持的 YouTube；Instagram / TikTok / X 配置第三方 Token 后可采集。",
+  },
   network: {
     label: "网络异常",
     tone: "var(--warning)",
