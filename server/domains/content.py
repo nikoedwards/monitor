@@ -7,13 +7,16 @@ from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, priority_for_records, team_for_records
 from ..records import insert_record, record_to_dict
 from ..schemas import ImportIn, RecordIn, VocActionIn, VocActionUpdate
-from ..util import new_id, utc_now
+from ..util import compact_key, new_id, utc_now
 from .common import build_trend, get_conn, query_records, resolve_window
 
 router = APIRouter(prefix="/api", tags=["content"])
+
+_LEGACY_FIXED_PUBLICATION_TRAFFIC = {25_000, 80_000, 220_000, 500_000, 1_500_000, 5_000_000}
 
 
 # ------------------------------------------------------------------- records
@@ -28,6 +31,8 @@ def list_records(
     sentiment: str | None = None,
     intent: str | None = None,
     platform: str | None = None,
+    publication_domain: str | None = None,
+    publication_name: str | None = None,
     region: str | None = None,
     days: int | None = None,
     start_date: str | None = None,
@@ -297,6 +302,49 @@ def marketing_summary(
     posts = sum(1 for r in records if r.get("data_type") != "community_reply")
     replies = sum(1 for r in records if r.get("data_type") == "community_reply")
 
+    publication_names: dict[str, str] = {}
+    publication_name_keys: dict[str, str] = {}
+    publication_name_counts: Counter = Counter()
+    for record in records:
+        metrics = record.get("metrics") or {}
+        domain = str(metrics.get("publication_domain") or "").strip().lower()
+        if record.get("channel") != "media":
+            continue
+        name = record.get("platform") or domain or "Unknown publication"
+        name_key = compact_key(name)
+        publication_name_keys.setdefault(name_key, name)
+        publication_name_counts[name_key] += 1
+        if domain:
+            publication_names.setdefault(domain, name)
+
+    domain_hints: dict[str, str] = {}
+    for row in conn.execute("SELECT domain, name FROM publications").fetchall():
+        key = compact_key(row["name"])
+        if key in publication_name_keys:
+            domain_hints.setdefault(key, row["domain"])
+    for key, name in publication_name_keys.items():
+        hinted_domain = domain_hints.get(key) or publication_domain_hint(name)
+        if hinted_domain:
+            publication_names.setdefault(hinted_domain, name)
+
+    current_publications: dict[str, dict] = {}
+    network_refresh_budget = 10
+    ranked_publication_names = sorted(
+        publication_names.items(),
+        key=lambda item: publication_name_counts[compact_key(item[1])],
+        reverse=True,
+    )
+    for domain, name in ranked_publication_names:
+        needs_network = publication_needs_network(conn, domain)
+        allow_network = not needs_network or network_refresh_budget > 0
+        if needs_network and allow_network:
+            network_refresh_budget -= 1
+        current_publications[domain] = enrich_publication(conn, name, domain, allow_network=allow_network)
+    current_publications_by_name: dict[str, dict] = {}
+    for publication in current_publications.values():
+        current_publications_by_name.setdefault(compact_key(publication.get("name")), publication)
+        current_publications_by_name.setdefault(compact_key(publication.get("domain")), publication)
+
     by_tier: Counter = Counter()
     by_country: Counter = Counter()
     sov: Counter = Counter()
@@ -305,43 +353,66 @@ def marketing_summary(
     total_ave = 0
     for r in records:
         m = r.get("metrics") or {}
-        if m.get("media_tier"):
-            by_tier[m["media_tier"]] += 1
-        if m.get("country"):
-            by_country[m["country"]] += 1
-        try:
-            total_reach += int(m.get("monthly_traffic") or m.get("estimated_reach") or 0)
-        except (TypeError, ValueError):
-            pass
+        domain = str(m.get("publication_domain") or "").strip().lower()
+        record_name = r.get("platform") or domain or "Unknown publication"
+        current_publication = None
+        if r.get("channel") == "media":
+            current_publication = current_publications.get(domain) or current_publications_by_name.get(compact_key(record_name))
+            if current_publication and not domain:
+                domain = current_publication.get("domain") or ""
+        media_tier = (current_publication or {}).get("tier") or m.get("media_tier")
+        country = (current_publication or {}).get("country") or m.get("country")
+        if media_tier:
+            by_tier[media_tier] += 1
+        if country:
+            by_country[country] += 1
+        if r.get("channel") != "media":
+            try:
+                total_reach += int(m.get("monthly_traffic") or m.get("estimated_reach") or 0)
+            except (TypeError, ValueError):
+                pass
         try:
             total_ave += int(m.get("ave") or 0)
         except (TypeError, ValueError):
             pass
         if r.get("channel") == "media":
-            domain = m.get("publication_domain") or ""
-            name = r.get("platform") or domain or "Unknown publication"
+            name = (current_publication or {}).get("name") or record_name
             key = domain or name
             publication = publications.setdefault(key, {
                 "name": name,
                 "domain": domain,
                 "total": 0,
-                "monthly_traffic": 0,
-                "authority": 0,
-                "tier": m.get("media_tier") or "unknown",
-                "country": m.get("country") or "",
+                "monthly_traffic": int((current_publication or {}).get("est_monthly_traffic") or 0),
+                "traffic_lower": int((current_publication or {}).get("traffic_lower") or m.get("traffic_lower") or 0),
+                "traffic_upper": int((current_publication or {}).get("traffic_upper") or m.get("traffic_upper") or 0),
+                "popularity_rank": (current_publication or {}).get("popularity_rank") or m.get("popularity_rank"),
+                "traffic_source": (current_publication or {}).get("source") or m.get("traffic_source") or "historical",
+                "traffic_confidence": (current_publication or {}).get("traffic_confidence") or m.get("traffic_confidence") or "low",
+                "traffic_as_of": (current_publication or {}).get("traffic_as_of") or m.get("traffic_as_of") or "",
+                "authority": int((current_publication or {}).get("authority") or 0),
+                "tier": media_tier or "unknown",
+                "country": country or "",
             })
             publication["total"] += 1
-            for field in ("monthly_traffic", "estimated_reach"):
+            if current_publication is None:
+                for field in ("monthly_traffic", "estimated_reach"):
+                    try:
+                        candidate = int(m.get(field) or 0)
+                        if candidate not in _LEGACY_FIXED_PUBLICATION_TRAFFIC:
+                            publication["monthly_traffic"] = max(publication["monthly_traffic"], candidate)
+                    except (TypeError, ValueError):
+                        pass
                 try:
-                    publication["monthly_traffic"] = max(publication["monthly_traffic"], int(m.get(field) or 0))
+                    publication["authority"] = max(publication["authority"], int(m.get("authority") or 0))
                 except (TypeError, ValueError):
                     pass
-            try:
-                publication["authority"] = max(publication["authority"], int(m.get("authority") or 0))
-            except (TypeError, ValueError):
-                pass
+                if publication["monthly_traffic"] <= 0:
+                    publication["traffic_source"] = "unavailable"
+                    publication["traffic_confidence"] = "low"
         sov[r.get("platform") or "unknown"] += 1
     sov_total = sum(sov.values()) or 1
+
+    total_reach += sum(int(item.get("monthly_traffic") or 0) for item in publications.values())
 
     return {
         "total": len(records),
