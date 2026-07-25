@@ -7,6 +7,39 @@ from test_publication_traffic import PUBLICATIONS_SCHEMA
 
 
 class MarketingSummaryTests(unittest.TestCase):
+    def test_social_metrics_are_aggregated(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(PUBLICATIONS_SCHEMA)
+        records = [
+            {
+                "channel": "social",
+                "platform": "youtube",
+                "source_id": "social_accounts",
+                "data_type": "social_post",
+                "occurred_at": "2026-07-24T10:00:00+00:00",
+                "metrics": {"views": 3538, "likes": 27, "comments": 3, "engagement": 30},
+            },
+            {
+                "channel": "social",
+                "platform": "youtube",
+                "source_id": "social_accounts",
+                "data_type": "social_post",
+                "occurred_at": "2026-07-23T10:00:00+00:00",
+                "metrics": {"views": 1000, "likes": 10, "comments": 2, "engagement": 12},
+            },
+        ]
+        with patch("server.domains.content.query_records", return_value=records), patch(
+            "server.domains.content.build_trend", return_value=[]
+        ):
+            summary = marketing_summary(conn=conn, channel="social")
+
+        self.assertEqual(summary["total_views"], 4538)
+        self.assertEqual(summary["total_likes"], 37)
+        self.assertEqual(summary["total_comments"], 5)
+        self.assertEqual(summary["total_engagement"], 42)
+        self.assertEqual(summary["engagement_rate"], round(42 / 4538, 6))
+
     def test_latest_publication_metrics_override_historical_record_values(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

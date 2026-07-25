@@ -279,6 +279,7 @@ function TouchpointSlot({ brandId, section, platform, label, channel, placeholde
       const res: any = await socialCollect.mutateAsync({ sourceId: "social_accounts", brandId });
       const n = res?.created ?? 0;
       if (n > 0) setFeedback({ kind: "ok", text: `✓ 新增 ${n} 条内容` });
+      else if (res?.status === "ok") setFeedback({ kind: "ok", text: "✓ 已刷新现有内容指标" });
       else setFeedback(null);
     } catch (e: any) {
       setFeedback({ kind: "err", text: e?.message || "采集失败" });

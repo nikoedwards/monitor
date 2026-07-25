@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from xml.etree import ElementTree as ET
 
-from ..fetchers import FetchError, fetch_bytes, fetch_page
+from ..fetchers import FetchError, fetch_bytes, fetch_json_post, fetch_page
 from ..util import clean_text, today, utc_now
 from .creators import creator_credential
 from .creators.base import CreatorPost
@@ -31,6 +32,7 @@ UNSUPPORTED_PLATFORM_MESSAGE = {
 _ATOM = "http://www.w3.org/2005/Atom"
 _YT = "http://www.youtube.com/xml/schemas/2015"
 _MEDIA = "http://search.yahoo.com/mrss/"
+_YT_WEB_METRICS_LIMIT = 12
 
 
 def _touch_link(conn: sqlite3.Connection, link_id: str, status: str, error: str = "") -> None:
@@ -234,6 +236,140 @@ def _relative_timestamp(label: str) -> str:
     return now.isoformat()
 
 
+def _youtube_web_config(html: str) -> dict | None:
+    def match(pattern: str) -> str:
+        found = re.search(pattern, html)
+        return found.group(1) if found else ""
+
+    api_key = match(r'"INNERTUBE_API_KEY":"([^"]+)"')
+    client_version = match(r'"INNERTUBE_CLIENT_VERSION":"([^"]+)"')
+    visitor_data = match(r'"VISITOR_DATA":"([^"]+)"')
+    if not api_key or not client_version:
+        return None
+    client = {
+        "clientName": "WEB",
+        "clientVersion": client_version,
+        "hl": "en",
+        "gl": "US",
+    }
+    if visitor_data:
+        client["visitorData"] = visitor_data
+    return {"api_key": api_key, "client_version": client_version, "context": {"client": client}}
+
+
+def _youtube_next(config: dict, payload: dict) -> dict:
+    url = (
+        "https://www.youtube.com/youtubei/v1/next?prettyPrint=false"
+        f"&key={quote_plus(config['api_key'])}"
+    )
+    data = fetch_json_post(
+        url,
+        {"context": config["context"], **payload},
+        timeout=16,
+        headers={
+            "Origin": "https://www.youtube.com",
+            "X-YouTube-Client-Name": "1",
+            "X-YouTube-Client-Version": config["client_version"],
+        },
+    )
+    if not isinstance(data, dict):
+        raise FetchError("YouTube 视频指标接口返回格式异常。")
+    return data
+
+
+def _button_metric(value, icon_name: str) -> int | None:
+    if isinstance(value, dict):
+        if value.get("iconName") == icon_name:
+            count = _compact_count(_yt_text(value.get("title")))
+            if count is not None:
+                return count
+        for child in value.values():
+            count = _button_metric(child, icon_name)
+            if count is not None:
+                return count
+    elif isinstance(value, list):
+        for child in value:
+            count = _button_metric(child, icon_name)
+            if count is not None:
+                return count
+    return None
+
+
+def _comment_continuation(data: dict) -> str:
+    sections = [
+        section
+        for section in _yt_renderers(data, "itemSectionRenderer")
+        if section.get("targetId") == "comments-section"
+    ]
+    for section in sections:
+        for item in section.get("contents", []):
+            token = (
+                ((item.get("continuationItemRenderer") or {}).get("continuationEndpoint") or {})
+                .get("continuationCommand", {})
+                .get("token", "")
+            )
+            if token:
+                return token
+    return ""
+
+
+def _comment_count(data: dict) -> int | None:
+    for header in _yt_renderers(data, "commentsHeaderRenderer"):
+        count = _compact_count(_yt_text(header.get("countText")))
+        if count is not None:
+            return count
+    for header in _yt_renderers(data, "commentsEntryPointHeaderRenderer"):
+        count = _compact_count(_yt_text(header.get("commentCount")))
+        if count is not None:
+            return count
+    return None
+
+
+def _youtube_web_video_metrics(config: dict, video_id: str) -> dict:
+    initial = _youtube_next(config, {"videoId": video_id})
+    views = None
+    for renderer in _yt_renderers(initial, "videoViewCountRenderer"):
+        views = _compact_count(_yt_text(renderer.get("viewCount") or renderer.get("shortViewCount")))
+        if views is not None:
+            break
+    likes = _button_metric(initial, "LIKE")
+    comments = _comment_count(initial)
+    if comments is None:
+        continuation = _comment_continuation(initial)
+        if continuation:
+            comments = _comment_count(_youtube_next(config, {"continuation": continuation}))
+    return {"views": views, "likes": likes, "comments": comments}
+
+
+def _enrich_youtube_web_metrics(posts: list[CreatorPost], html: str) -> None:
+    config = _youtube_web_config(html)
+    targets = posts[:_YT_WEB_METRICS_LIMIT]
+    if not config or not targets:
+        return
+
+    def collect(post: CreatorPost) -> dict:
+        try:
+            return _youtube_web_video_metrics(config, post.external_id)
+        except Exception as exc:
+            return {"error": str(exc)[:300]}
+
+    workers = min(4, len(targets))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(collect, targets))
+    collected_at = utc_now()
+    for post, metrics in zip(targets, results):
+        if metrics.get("views") is not None:
+            post.views = metrics["views"]
+        if metrics.get("likes") is not None:
+            post.likes = metrics["likes"]
+        if metrics.get("comments") is not None:
+            post.comments = metrics["comments"]
+        post.raw["metrics_collection_method"] = "youtube_web_next"
+        post.raw["metrics_collected_at"] = collected_at
+        if metrics.get("error"):
+            post.raw["metrics_error"] = metrics["error"]
+
+
 def _youtube_page_posts(channel_id: str, account_url: str, feed_error: Exception) -> list[CreatorPost]:
     page = fetch_page(f"https://www.youtube.com/channel/{channel_id}/videos", timeout=25)
     data = _yt_initial_data(page.get("html") or "")
@@ -339,6 +475,7 @@ def _youtube_page_posts(channel_id: str, account_url: str, feed_error: Exception
 
     if not posts:
         raise FetchError(f"YouTube Atom feed 失败，频道页也未解析到视频：{feed_error}")
+    _enrich_youtube_web_metrics(posts, page.get("html") or "")
     return posts
 
 
@@ -429,6 +566,7 @@ def _third_party_posts(conn: sqlite3.Connection, platform: str, account_url: str
 
 
 def _payload(brand: dict, link: dict, post: CreatorPost) -> dict:
+    has_engagement = any(value is not None for value in (post.likes, post.comments, post.shares))
     return {
         "source_id": SOURCE_ID,
         "brand_id": brand.get("id"),
@@ -448,8 +586,8 @@ def _payload(brand: dict, link: dict, post: CreatorPost) -> dict:
             "likes": post.likes,
             "comments": post.comments,
             "shares": post.shares,
-            "engagement": post.engagement(),
-            "engagement_rate": post.engagement_rate(),
+            "engagement": post.engagement() if has_engagement else None,
+            "engagement_rate": post.engagement_rate() if has_engagement else None,
             "follower_count": post.follower_count,
             "author_handle": post.author_handle,
             "author_url": post.author_url or link.get("url"),
@@ -458,6 +596,47 @@ def _payload(brand: dict, link: dict, post: CreatorPost) -> dict:
         },
         "raw": {**(post.raw or {}), "configured_account_url": link.get("url")},
     }
+
+
+def _json_object(value: str | None) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _refresh_existing_social_records(conn: sqlite3.Connection, payloads: list[dict]) -> list[dict]:
+    new_payloads: list[dict] = []
+    for payload in payloads:
+        existing = conn.execute(
+            "SELECT id, metrics_json, raw_json FROM records WHERE source_id = ? AND external_id = ?",
+            (payload.get("source_id"), payload.get("external_id")),
+        ).fetchone()
+        if not existing:
+            new_payloads.append(payload)
+            continue
+
+        metrics = _json_object(existing["metrics_json"])
+        metrics.update({key: value for key, value in (payload.get("metrics") or {}).items() if value is not None})
+        raw = {**_json_object(existing["raw_json"]), **(payload.get("raw") or {})}
+        conn.execute(
+            """
+            UPDATE records
+            SET title = ?, author = ?, body = ?, url = ?, metrics_json = ?, raw_json = ?
+            WHERE id = ?
+            """,
+            (
+                payload.get("title") or "",
+                payload.get("author") or "",
+                payload.get("body") or "",
+                payload.get("url") or "",
+                json.dumps(metrics, ensure_ascii=False),
+                json.dumps(raw, ensure_ascii=False),
+                existing["id"],
+            ),
+        )
+    return new_payloads
 
 
 def collect_social_accounts(conn: sqlite3.Connection, brand: dict) -> list[dict]:
@@ -491,4 +670,4 @@ def collect_social_accounts(conn: sqlite3.Connection, brand: dict) -> list[dict]
         except Exception as exc:
             status, message = _error_status(exc)
             _touch_link(conn, link["id"], status, message)
-    return payloads
+    return _refresh_existing_social_records(conn, payloads)

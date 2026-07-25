@@ -121,6 +121,7 @@ export default function Marketing() {
 
   const channelName = CHANNEL_LABEL[channel] || channel;
   const isCommunity = view === "channel" && channel === "community";
+  const isSocial = view === "channel" && channel === "social";
   const selectedSection = view === "overview" ? "overview" : channel;
   const subchannelCount = (summary.by_subchannel || []).reduce((acc: number, g: any) => acc + (g.subchannels?.length || 0), 0);
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
@@ -154,6 +155,13 @@ export default function Marketing() {
           <StatCard label="新增回复" value={fmtNum(summary.replies)} />
           <StatCard label="子渠道数" value={subchannelCount} hint="如多个 subreddit / 自建站" />
           <StatCard label="数据源" value={summary.by_source?.length || 0} />
+        </div>
+      ) : isSocial ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatCard label="社媒内容" value={fmtNum(summary.total)} />
+          <StatCard label="总播放" value={fmtNum(summary.total_views)} tone="accent" />
+          <StatCard label="总点赞" value={fmtNum(summary.total_likes)} />
+          <StatCard label="总评论" value={fmtNum(summary.total_comments)} />
         </div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

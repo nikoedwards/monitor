@@ -92,6 +92,28 @@ def fetch_json(url: str, *, timeout: int = 16, headers: dict | None = None) -> d
     return json.loads(raw.decode("utf-8", errors="replace"))
 
 
+def fetch_json_post(
+    url: str,
+    payload: dict,
+    *,
+    timeout: int = 16,
+    headers: dict | None = None,
+) -> dict | list:
+    merged = {"User-Agent": USER_AGENT, "Accept": "application/json", "Content-Type": "application/json"}
+    merged.update(headers or {})
+    request = Request(
+        normalize_url(url),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=merged,
+    )
+    try:
+        with _open(request, timeout) as response:
+            raw = response.read(3_000_000)
+    except (URLError, OSError, ValueError) as exc:
+        raise FetchError(str(exc)) from exc
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
 def fetch_page(input_url: str, *, timeout: int = 18) -> dict:
     """Fetch a page and return parsed metadata + visible text."""
     url = normalize_url(input_url)
