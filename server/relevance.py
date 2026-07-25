@@ -44,6 +44,49 @@ def query_match_evidence(query: str, title: str = "", body: str = "") -> dict[st
     return None
 
 
+def google_news_match_evidence(
+    query: str,
+    brand_name: str = "",
+    title: str = "",
+    body: str = "",
+) -> dict[str, str] | None:
+    """Require visible Google News evidence for the trigger query or brand name.
+
+    Google News RSS occasionally returns unrelated items for a keyword bucket.
+    We therefore fail closed unless the RSS title/summary visibly contains the
+    triggering phrase or the brand's primary name.
+    """
+    seen: set[str] = set()
+    for candidate in (query, brand_name):
+        candidate = str(candidate or "").strip()
+        key = candidate.casefold()
+        if not candidate or key in seen:
+            continue
+        seen.add(key)
+        evidence = query_match_evidence(candidate, title, body)
+        if evidence:
+            return {
+                **evidence,
+                "matched_query": candidate,
+                "validation_method": "rss_title_summary",
+            }
+    return None
+
+
+def google_news_record_is_relevant(record: dict[str, Any], brand_name: str | None = None) -> bool:
+    """Hide legacy Google News rows that have no visible brand evidence."""
+    if record.get("source_id") != "google_news":
+        return True
+    raw = record.get("raw") or {}
+    query = raw.get("query") if isinstance(raw, dict) else ""
+    return google_news_match_evidence(
+        str(query or ""),
+        str(brand_name or ""),
+        str(record.get("title") or ""),
+        str(record.get("body") or ""),
+    ) is not None
+
+
 def reddit_search_record_is_relevant(record: dict[str, Any], brand_name: str | None = None) -> bool:
     """Hide legacy Reddit search false positives while retaining official hubs.
 

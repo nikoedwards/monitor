@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from ..db import db as _db
 from ..records import record_to_dict
-from ..relevance import reddit_search_record_is_relevant
+from ..relevance import google_news_record_is_relevant, reddit_search_record_is_relevant
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:
@@ -108,7 +108,7 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
     records: list[dict] = []
     brand_names: dict[str, str] = {}
     for row in rows:
-        if row["source_id"] == "reddit_search":
+        if row["source_id"] in {"google_news", "reddit_search"}:
             try:
                 raw = json.loads(row["raw_json"] or "{}")
             except (TypeError, ValueError):
@@ -117,13 +117,21 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
             if brand_id and brand_id not in brand_names:
                 brand_row = conn.execute("SELECT name FROM brands WHERE id = ?", (brand_id,)).fetchone()
                 brand_names[brand_id] = brand_row["name"] if brand_row else ""
-            if not reddit_search_record_is_relevant({
+            relevance_record = {
                 "source_id": row["source_id"],
                 "raw": raw,
                 "url": row["url"],
                 "title": row["title"],
                 "body": row["body"],
-            }, brand_names.get(brand_id) or None):
+            }
+            brand_name = brand_names.get(brand_id) or None
+            if row["source_id"] == "google_news" and not google_news_record_is_relevant(
+                relevance_record, brand_name
+            ):
+                continue
+            if row["source_id"] == "reddit_search" and not reddit_search_record_is_relevant(
+                relevance_record, brand_name
+            ):
                 continue
         records.append(record_to_dict(row))
         if len(records) >= requested:

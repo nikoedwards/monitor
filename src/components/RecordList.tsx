@@ -35,9 +35,15 @@ function collectionReason(record: RecordItem): string | undefined {
   const raw = record.raw || {};
   const query = textValue(raw.query);
   if (record.source_id === "google_news") {
-    return query
-      ? `收录原因：Google News RSS 使用关键词「${query}」搜索返回该条目；当前为搜索结果直入库，未进行正文品牌关联二次校验。`
-      : "收录原因：Google News RSS 搜索结果入库；未保存触发关键词，未进行正文品牌关联二次校验。";
+    const matchedIn = textValue(raw.matched_in);
+    const matchedText = textValue(raw.matched_text);
+    const matchedQuery = textValue(raw.matched_query) || query;
+    if (matchedText) {
+      return `收录原因：Google News RSS 使用关键词「${query || matchedQuery}」发现，并在${matchedIn === "title" ? "标题" : "摘要"}命中「${matchedText}」后通过品牌相关性校验。`;
+    }
+    return matchedQuery
+      ? `收录原因：Google News RSS 使用关键词「${matchedQuery}」发现；该历史记录已按当前标题/摘要品牌关键词规则复核通过。`
+      : "收录原因：Google News RSS 历史记录；已按当前标题/摘要品牌关键词规则复核通过。";
   }
   if (record.source_id === "google_web_search") {
     return query

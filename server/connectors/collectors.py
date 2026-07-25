@@ -11,7 +11,7 @@ from urllib.parse import quote_plus, urlencode
 from ..config import CREDENTIALS, USER_AGENT
 from ..fetchers import FetchError, fetch_bytes, fetch_json, fetch_page, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
-from ..relevance import query_match_evidence, reddit_post_id, search_query_parts
+from ..relevance import google_news_match_evidence, query_match_evidence, reddit_post_id, search_query_parts
 from ..util import (
     clean_text,
     host_key,
@@ -127,7 +127,8 @@ def _is_recent_news_item(published_at: str | None, lookback_days: int, *, now: d
 def collect_google_news(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     payloads: list[dict] = []
     seen_items: set[str] = set()
-    for query in brand_queries(brand):
+    queries = brand_queries(brand)
+    for query in queries:
         try:
             raw = fetch_bytes(_google_news_url(query), accept="application/rss+xml,application/xml", timeout=18)
         except FetchError:
@@ -139,9 +140,12 @@ def collect_google_news(conn: sqlite3.Connection, brand: dict) -> list[dict]:
             item_key = clean_text(item.get("guid")) or url
             if item_key in seen_items or not _is_recent_news_item(item.get("published_at"), GOOGLE_NEWS_LOOKBACK_DAYS):
                 continue
-            seen_items.add(item_key)
             title = item.get("title") or "Untitled media mention"
             body = item.get("description") or title
+            relevance = google_news_match_evidence(query, brand.get("name") or "", title, body)
+            if relevance is None:
+                continue
+            seen_items.add(item_key)
             publication = item.get("source_name") or host_key(url) or "Unknown publication"
             source_url = item.get("source_url") or ""
             pub_domain = host_key(source_url)
@@ -188,7 +192,8 @@ def collect_google_news(conn: sqlite3.Connection, brand: dict) -> list[dict]:
                     "publication": publication,
                     "source_url": source_url,
                     "collection_method": "google_news_rss_keyword_search",
-                    "body_relevance_validated": False,
+                    "body_relevance_validated": True,
+                    **relevance,
                 },
             })
     return payloads
