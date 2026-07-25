@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
@@ -111,14 +112,247 @@ def _int(value) -> int | None:
         return None
 
 
+def _yt_text(value) -> str:
+    if isinstance(value, str):
+        return clean_text(value)
+    if not isinstance(value, dict):
+        return ""
+    direct = value.get("content") or value.get("simpleText")
+    if direct:
+        return clean_text(str(direct))
+    return clean_text(
+        "".join(str(run.get("text") or "") for run in (value.get("runs") or []) if isinstance(run, dict))
+    )
+
+
+def _yt_initial_data(html: str) -> dict:
+    """Extract YouTube's embedded ``ytInitialData`` without a brittle regex."""
+    marker = "ytInitialData ="
+    marker_at = html.find(marker)
+    if marker_at < 0:
+        raise FetchError("YouTube 频道页缺少结构化视频数据。")
+    start = html.find("{", marker_at + len(marker))
+    if start < 0:
+        raise FetchError("YouTube 频道页结构化数据格式异常。")
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(html)):
+        char = html[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    value = json.loads(html[start:index + 1])
+                except json.JSONDecodeError as exc:
+                    raise FetchError("YouTube 频道页结构化数据无法解析。") from exc
+                if isinstance(value, dict):
+                    return value
+                break
+    raise FetchError("YouTube 频道页结构化数据不完整。")
+
+
+def _yt_renderers(value, renderer_name: str):
+    if isinstance(value, dict):
+        renderer = value.get(renderer_name)
+        if isinstance(renderer, dict):
+            yield renderer
+        for child in value.values():
+            yield from _yt_renderers(child, renderer_name)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _yt_renderers(child, renderer_name)
+
+
+def _compact_count(label: str) -> int | None:
+    normalized = clean_text(label).lower().replace(",", "")
+    if not normalized or any(token in normalized for token in ("no views", "无观看", "沒有觀看")):
+        return 0 if normalized else None
+    match = re.search(r"([\d.]+)\s*([kmb]|万|萬|亿|億)?", normalized)
+    if not match:
+        return None
+    multiplier = {
+        "k": 1_000,
+        "m": 1_000_000,
+        "b": 1_000_000_000,
+        "万": 10_000,
+        "萬": 10_000,
+        "亿": 100_000_000,
+        "億": 100_000_000,
+    }.get(match.group(2) or "", 1)
+    try:
+        return int(float(match.group(1)) * multiplier)
+    except ValueError:
+        return None
+
+
+def _relative_timestamp(label: str) -> str:
+    normalized = clean_text(label).lower()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    if not normalized:
+        return now.isoformat()
+    if normalized in {"today", "just now", "今天", "刚刚", "剛剛"}:
+        return now.isoformat()
+    if normalized in {"yesterday", "昨天"}:
+        return (now - timedelta(days=1)).isoformat()
+
+    match = re.search(
+        r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s+ago",
+        normalized,
+    ) or re.search(r"(\d+)\s*(秒钟?|分鐘?|分钟?|小时|小時|天|周|週|个月|個月|月|年)前", normalized)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith("second") or unit.startswith("秒"):
+            delta = timedelta(seconds=amount)
+        elif unit.startswith("minute") or unit.startswith(("分钟", "分鐘")):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith("hour") or unit.startswith(("小时", "小時")):
+            delta = timedelta(hours=amount)
+        elif unit.startswith("day") or unit == "天":
+            delta = timedelta(days=amount)
+        elif unit.startswith("week") or unit in {"周", "週"}:
+            delta = timedelta(weeks=amount)
+        elif unit.startswith("month") or unit in {"个月", "個月", "月"}:
+            delta = timedelta(days=amount * 30)
+        else:
+            delta = timedelta(days=amount * 365)
+        return (now - delta).isoformat()
+    return now.isoformat()
+
+
+def _youtube_page_posts(channel_id: str, account_url: str, feed_error: Exception) -> list[CreatorPost]:
+    page = fetch_page(f"https://www.youtube.com/channel/{channel_id}/videos", timeout=25)
+    data = _yt_initial_data(page.get("html") or "")
+    author = clean_text(page.get("title") or "")
+    author = re.sub(r"\s*[-–—]\s*YouTube\s*$", "", author, flags=re.I)
+    for channel in _yt_renderers(data, "channelMetadataRenderer"):
+        author = _yt_text(channel.get("title")) or author
+        if author:
+            break
+
+    posts: list[CreatorPost] = []
+    seen: set[str] = set()
+
+    # Current desktop channel pages use lockupViewModel (July 2026).
+    for lockup in _yt_renderers(data, "lockupViewModel"):
+        video_id = clean_text(lockup.get("contentId"))
+        if lockup.get("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO" or not video_id or video_id in seen:
+            continue
+        metadata = ((lockup.get("metadata") or {}).get("lockupMetadataViewModel") or {})
+        title = _yt_text(metadata.get("title"))
+        labels: list[str] = []
+        rows = ((metadata.get("metadata") or {}).get("contentMetadataViewModel") or {}).get("metadataRows", [])
+        for row in rows:
+            for part in (row.get("metadataParts", []) if isinstance(row, dict) else []):
+                label = _yt_text((part or {}).get("text"))
+                if label:
+                    labels.append(label)
+        view_label = next(
+            (
+                label
+                for label in labels
+                if "view" in label.lower()
+                or any(token in label for token in ("观看", "觀看", "收看", "播放"))
+            ),
+            "",
+        )
+        published_label = next((label for label in labels if label != view_label), "")
+        sources = (((lockup.get("contentImage") or {}).get("thumbnailViewModel") or {}).get("image") or {}).get(
+            "sources", []
+        )
+        thumbnail = next(
+            (item.get("url") for item in reversed(sources) if isinstance(item, dict) and item.get("url")),
+            "",
+        )
+        seen.add(video_id)
+        posts.append(CreatorPost(
+            platform="youtube",
+            external_id=video_id,
+            url=f"https://www.youtube.com/watch?v={video_id}",
+            title=title,
+            body=title,
+            author=author,
+            author_handle=channel_id,
+            author_url=account_url,
+            avatar_url=thumbnail,
+            occurred_at=_relative_timestamp(published_label),
+            views=_compact_count(view_label),
+            raw={
+                "account_url": account_url,
+                "channel_id": channel_id,
+                "collection_method": "youtube_channel_page",
+                "feed_error": str(feed_error)[:300],
+                "published_label": published_label,
+                "view_count_label": view_label,
+            },
+        ))
+
+    # Keep compatibility with YouTube's older videoRenderer response shape.
+    for renderer in _yt_renderers(data, "videoRenderer"):
+        video_id = clean_text(renderer.get("videoId"))
+        if not video_id or video_id in seen:
+            continue
+        title = _yt_text(renderer.get("title"))
+        thumbnails = (renderer.get("thumbnail") or {}).get("thumbnails", [])
+        thumbnail = next(
+            (item.get("url") for item in reversed(thumbnails) if isinstance(item, dict) and item.get("url")),
+            "",
+        )
+        view_label = _yt_text(renderer.get("viewCountText") or renderer.get("shortViewCountText"))
+        published_label = _yt_text(renderer.get("publishedTimeText"))
+        seen.add(video_id)
+        posts.append(CreatorPost(
+            platform="youtube",
+            external_id=video_id,
+            url=f"https://www.youtube.com/watch?v={video_id}",
+            title=title,
+            body=_yt_text(renderer.get("descriptionSnippet")) or title,
+            author=author,
+            author_handle=channel_id,
+            author_url=account_url,
+            avatar_url=thumbnail,
+            occurred_at=_relative_timestamp(published_label),
+            views=_compact_count(view_label),
+            raw={
+                "account_url": account_url,
+                "channel_id": channel_id,
+                "collection_method": "youtube_channel_page",
+                "feed_error": str(feed_error)[:300],
+                "published_label": published_label,
+                "view_count_label": view_label,
+            },
+        ))
+
+    if not posts:
+        raise FetchError(f"YouTube Atom feed 失败，频道页也未解析到视频：{feed_error}")
+    return posts
+
+
 def _youtube_posts(account_url: str, cached_channel_id: str = "") -> tuple[list[CreatorPost], str]:
     if re.fullmatch(r"UC[\w-]{20,}", cached_channel_id or "", re.I):
         channel_id, page = cached_channel_id, {}
     else:
         channel_id, page = _youtube_channel_id(account_url)
     feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    raw = fetch_bytes(feed_url, accept="application/atom+xml,application/xml", timeout=20)
-    root = ET.fromstring(raw)
+    try:
+        raw = fetch_bytes(feed_url, accept="application/atom+xml,application/xml", timeout=20)
+        root = ET.fromstring(raw)
+    except (FetchError, ET.ParseError) as exc:
+        return _youtube_page_posts(channel_id, account_url, exc), channel_id
     ns = {"a": _ATOM, "yt": _YT, "m": _MEDIA}
     posts: list[CreatorPost] = []
     for entry in root.findall("a:entry", ns):
@@ -158,6 +392,8 @@ def _youtube_posts(account_url: str, cached_channel_id: str = "") -> tuple[list[
                 "rating_count": _int(rating.get("count") if rating is not None else None),
             },
         ))
+    if not posts:
+        return _youtube_page_posts(channel_id, account_url, FetchError("Atom feed 未返回视频")), channel_id
     return posts, channel_id
 
 
