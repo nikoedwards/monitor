@@ -9,7 +9,6 @@ import {
   Plug,
   Settings,
   ShoppingCart,
-  Sparkles,
   Sun,
   Users,
 } from "lucide-react";
@@ -21,7 +20,6 @@ const NAV = [
   { to: "overview", label: "经营总览", icon: LayoutDashboard },
   { to: "sales", label: "销售监控", icon: ShoppingCart },
   { to: "marketing", label: "营销监控", icon: Megaphone },
-  { to: "creators", label: "红人达人", icon: Sparkles },
   { to: "voice", label: "用户之声", icon: MessageSquare },
   { to: "web", label: "网页快照", icon: Globe },
   { to: "sources", label: "数据源采集", icon: Plug },
