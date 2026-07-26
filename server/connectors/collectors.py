@@ -6,7 +6,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 from ..config import CREDENTIALS, USER_AGENT
 from ..fetchers import FetchError, fetch_bytes, fetch_json, fetch_page, parse_rss
@@ -717,14 +717,46 @@ def _next_data_apollo(html: str) -> dict | None:
     return apollo if isinstance(apollo, dict) else None
 
 
-def _frill_payloads(url: str, brand: dict, link_id) -> list[dict]:
-    """Frill feedback boards (e.g. feedback.plaud.ai): ideas are server-rendered into the
-    Apollo cache on the roadmap page; we collect them as posts (+ any SSR'd comments as replies)."""
+def _frill_latest_url(final_url: str, apollo: dict | None, root: str) -> str | None:
+    """Return the board's public Ideas URL with Frill's "Latest Ideas" sort selected."""
+    parsed = urlparse(final_url or "")
+    path = parsed.path.rstrip("/")
+    if not re.fullmatch(r"/b/[^/]+/[^/]+", path):
+        board = next(
+            (
+                value
+                for value in (apollo or {}).values()
+                if isinstance(value, dict)
+                and value.get("__typename") == "Board"
+                and value.get("idx")
+                and value.get("slug")
+            ),
+            None,
+        )
+        if not board:
+            return None
+        board_id = str(board["idx"])
+        if board_id.startswith("board_"):
+            board_id = board_id.removeprefix("board_")
+        path = f"/b/{board_id}/{board['slug']}"
+        parsed = urlparse(root + path)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["sortBy"] = "created_at"
+    return urlunparse(parsed._replace(path=path, query=urlencode(query), fragment=""))
+
+
+def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
+    """Collect each item from a Frill board's public ``Latest Ideas`` listing.
+
+    ``None`` means the site is not recognized as Frill. An empty list means it is a
+    Frill site but the structured listing could not be parsed, which prevents the
+    caller from silently replacing real ideas with a daily homepage snapshot.
+    """
     root = root_url(url).rstrip("/")
     try:
         base = fetch_page(root + "/", timeout=22)
     except (FetchError, ValueError):
-        return []
+        return None
     base_html = base.get("html") or ""
     base_apollo = _next_data_apollo(base_html)
     # Only treat as Frill when we see its signature, otherwise let other adapters handle it.
@@ -732,7 +764,7 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict]:
         base_apollo is not None and any(isinstance(v, dict) and v.get("__typename") == "Board" for v in base_apollo.values())
     )
     if not is_frill:
-        return []
+        return None
     host = host_key(root)
 
     ideas: dict[str, dict] = {}
@@ -754,15 +786,24 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict]:
                 refs[key] = val
 
     ingest(base_apollo)
-    # The landing page carries board metadata only; the roadmap SSRs the actual ideas.
+    latest_url = _frill_latest_url(base.get("final_url") or url, base_apollo, root)
+    if not latest_url:
+        return []
+
+    latest_page = base if (base.get("final_url") or "") == latest_url else None
     try:
-        roadmap = fetch_page(root + "/roadmap", timeout=25)
-        ingest(_next_data_apollo(roadmap.get("html") or ""))
+        if latest_page is None:
+            latest_page = fetch_page(latest_url, timeout=25)
+        ingest(_next_data_apollo(latest_page.get("html") or ""))
     except (FetchError, ValueError):
-        pass
+        return []
 
     if not ideas:
         return []
+
+    latest_final_url = (latest_page or {}).get("final_url") or latest_url
+    latest_parsed = urlparse(latest_final_url)
+    board_url = urlunparse(latest_parsed._replace(query="", fragment="")).rstrip("/")
 
     def resolve_name(val: dict) -> str | None:
         ref = (val.get("author") or {}).get("__ref")
@@ -773,9 +814,14 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict]:
 
     payloads: list[dict] = []
     idea_ext_by_idx: dict[str, str] = {}
-    for idea in ideas.values():
+    sorted_ideas = sorted(
+        ideas.values(),
+        key=lambda idea: str(idea.get("created_at") or ""),
+        reverse=True,
+    )
+    for idea in sorted_ideas:
         slug = idea.get("slug")
-        idea_url = f"{root}/roadmap/{slug}" if slug else root
+        idea_url = f"{board_url}/{slug}" if slug else board_url
         title = clean_text(idea.get("name")) or "Feature idea"
         body = clean_text(idea.get("excerpt")) or title
         ext = f"{brand.get('id')}:frill:{host}:{idea.get('idx')}"
@@ -799,7 +845,13 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict]:
                 "comment_count": idea.get("comment_count"),
                 "follower_count": idea.get("follower_count"),
             },
-            "raw": {"idx": idea.get("idx"), "number": idea.get("number"), "site": root},
+            "raw": {
+                "idx": idea.get("idx"),
+                "number": idea.get("number"),
+                "site": root,
+                "collection_method": "frill_latest_ideas",
+                "sort_by": "created_at",
+            },
         })
     # If a board ever SSRs comments, attach them as replies linked to their parent idea.
     for comment in comments:
@@ -878,15 +930,22 @@ def collect_community_sites(conn: sqlite3.Connection, brand: dict) -> list[dict]
             continue
         link_id = link.get("id")
         try:
-            items = (
-                _discourse_payloads(url, brand, link_id)
-                or _frill_payloads(url, brand, link_id)
-                or _rss_payloads(url, brand, link_id)
-                or _generic_site_payload(url, brand, link_id)
-            )
+            items = _discourse_payloads(url, brand, link_id)
+            frill_recognized = False
+            if not items:
+                frill_items = _frill_payloads(url, brand, link_id)
+                frill_recognized = frill_items is not None
+                if frill_recognized:
+                    items = frill_items
+                else:
+                    items = _rss_payloads(url, brand, link_id) or _generic_site_payload(url, brand, link_id)
             payloads.extend(items)
-            _touch_link(conn, link_id, status="ok" if items else "empty",
-                        error="" if items else "未解析到可采集内容（站点可能为纯前端渲染或无公开数据接口）")
+            empty_error = (
+                "Frill 的 Latest Ideas 页面未解析到结构化条目"
+                if frill_recognized
+                else "未解析到可采集内容（站点可能为纯前端渲染或无公开数据接口）"
+            )
+            _touch_link(conn, link_id, status="ok" if items else "empty", error="" if items else empty_error)
         except Exception as exc:
             status, msg = _classify_error(exc)
             _touch_link(conn, link_id, status=status, error=msg)
