@@ -69,8 +69,16 @@ def fetch_bytes(url: str, *, accept: str = "*/*", timeout: int = 16, max_bytes: 
         raise FetchError(str(exc)) from exc
 
 
-def fetch_text(url: str, *, accept: str = "text/html,application/xhtml+xml", timeout: int = 16) -> str:
-    request = Request(normalize_url(url), headers={"User-Agent": USER_AGENT, "Accept": accept})
+def fetch_text(
+    url: str,
+    *,
+    accept: str = "text/html,application/xhtml+xml",
+    timeout: int = 16,
+    headers: dict | None = None,
+) -> str:
+    merged = {"User-Agent": USER_AGENT, "Accept": accept}
+    merged.update(headers or {})
+    request = Request(normalize_url(url), headers=merged)
     try:
         with _open(request, timeout) as response:
             charset = response.headers.get_content_charset() or "utf-8"

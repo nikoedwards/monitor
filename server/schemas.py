@@ -155,7 +155,6 @@ class SettingsIn(BaseModel):
     app_title: Optional[str] = None
     max_tokens: Optional[int] = None
     sellersprite_secret_key: Optional[str] = None
-    ensembledata_token: Optional[str] = None
     youtube_api_key: Optional[str] = None
     boss_cookie: Optional[str] = None
     linkedin_cookie: Optional[str] = None

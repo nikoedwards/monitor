@@ -43,7 +43,7 @@ REGISTRY: list[ConnectorSpec] = [
     ConnectorSpec(
         id="social_accounts", name="官方社媒账号", category="social", dimension="marketing",
         tier=1, vendor="Platform API / Public Feed", sync_mode="scheduled", cadence="daily",
-        notes="按品牌配置的社媒账号链接采集官方内容。YouTube 使用公开 Atom feed；Instagram / TikTok / X 需 Ensemble Data；其余平台会明确标记暂未支持。",
+        notes="按品牌配置的社媒账号链接采集公开内容。YouTube 使用 Atom feed/网页指标；Instagram 使用公开网页接口；TikTok 使用公开页面提取；X 等平台会明确标记暂未支持。",
         collect=social.collect_social_accounts,
     ),
     ConnectorSpec(
@@ -78,25 +78,19 @@ REGISTRY: list[ConnectorSpec] = [
         collect=creator_runner.collect_youtube,
     ),
     ConnectorSpec(
-        id="instagram_listening", name="Instagram 红人(第三方)", category="creators", dimension="marketing",
-        tier=2, vendor="Ensemble Data", sync_mode="scheduled", cadence="daily",
-        credential_key="ensembledata_token",
-        notes="Instagram 无免费关键词搜索 API,经第三方聚合源采集红人内容;需 ensembledata_token。",
-        collect=creator_runner.collect_instagram,
+        id="instagram_listening", name="Instagram 红人关键词发现", category="creators", dimension="marketing",
+        tier=3, vendor="Public Web", sync_mode="manual", cadence="daily",
+        notes="免费方案仅采集品牌已配置的公开官方账号；全站关键词发现暂无稳定免费接口。",
     ),
     ConnectorSpec(
-        id="tiktok_listening", name="TikTok 红人(第三方)", category="creators", dimension="marketing",
-        tier=2, vendor="Ensemble Data", sync_mode="scheduled", cadence="daily",
-        credential_key="ensembledata_token",
-        notes="TikTok 无免费关键词搜索 API,经第三方聚合源采集红人内容;需 ensembledata_token。",
-        collect=creator_runner.collect_tiktok,
+        id="tiktok_listening", name="TikTok 红人关键词发现", category="creators", dimension="marketing",
+        tier=3, vendor="Public Web", sync_mode="manual", cadence="daily",
+        notes="免费方案仅采集品牌已配置的公开官方账号；全站关键词发现暂无稳定免费接口。",
     ),
     ConnectorSpec(
-        id="x_search", name="X 红人(第三方)", category="creators", dimension="marketing",
-        tier=2, vendor="Ensemble Data", sync_mode="scheduled", cadence="daily",
-        credential_key="ensembledata_token",
-        notes="X(Twitter)经第三方聚合源采集红人内容(官方 API 限额高/付费贵);需 ensembledata_token。",
-        collect=creator_runner.collect_x,
+        id="x_search", name="X 红人关键词发现", category="creators", dimension="marketing",
+        tier=3, vendor="Public Web", sync_mode="manual", cadence="daily",
+        notes="X 对未登录访问和自动化采集限制严格；暂无稳定免费关键词发现接口。",
     ),
     ConnectorSpec(
         id="discord_community", name="Discord 社群", category="community", dimension="marketing",

@@ -91,7 +91,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState("");
   useEffect(() => {
     if (open && data) {
-      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" });
+      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" });
       setSaved(false);
       setError("");
     }
@@ -136,16 +136,6 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
           <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
-            红人第三方源（Ensemble Data）：{data?.ensembledata_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（Instagram / TikTok / X 红人不可采）</Badge>}
-            {data?.ensembledata_configured && data?.ensembledata_key_hint && <span>当前：{data.ensembledata_key_hint}</span>}
-          </div>
-          <Field label={data?.ensembledata_configured ? "token（已保存，留空表示不修改）" : "token（可选，付费聚合源）"}>
-            <Input type="password" value={form.ensembledata_token || ""} onChange={(e) => set("ensembledata_token", e.target.value)} placeholder="配置后 Instagram / TikTok / X 红人内容经第三方采集" />
-          </Field>
-        </div>
-
-        <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
-          <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
             Boss 直聘 Cookie：{data?.boss_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（招聘监控将被反爬拦截）</Badge>}
             {data?.boss_configured && data?.boss_key_hint && <span>当前：{data.boss_key_hint}</span>}
           </div>
@@ -175,13 +165,12 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               const payload: any = { ...form };
               if (!payload.api_key) delete payload.api_key;
               if (!payload.sellersprite_secret_key) delete payload.sellersprite_secret_key;
-              if (!payload.ensembledata_token) delete payload.ensembledata_token;
               if (!payload.youtube_api_key) delete payload.youtube_api_key;
               if (!payload.boss_cookie) delete payload.boss_cookie;
               if (!payload.linkedin_cookie) delete payload.linkedin_cookie;
               try {
                 await save.mutateAsync(payload);
-                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" }));
+                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" }));
                 setSaved(true);
               } catch (e: any) {
                 setError(e?.message || "保存失败");

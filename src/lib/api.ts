@@ -375,8 +375,6 @@ export interface LlmSettings {
   max_tokens?: string;
   sellersprite_configured?: boolean;
   sellersprite_key_hint?: string;
-  ensembledata_configured?: boolean;
-  ensembledata_key_hint?: string;
   youtube_configured?: boolean;
   youtube_key_hint?: string;
   boss_configured?: boolean;

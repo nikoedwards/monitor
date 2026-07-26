@@ -150,7 +150,7 @@ export default function Creators() {
       {empty ? (
         <EmptyState
           title="红人达人板块暂无数据"
-          hint="YouTube 配置 youtube_api_key 后即可免费采集；Instagram / TikTok / X 需在设置中配置第三方源 token。配置后点「立即同步」。"
+          hint="YouTube 配置免费 Data API key 后可做全站关键词发现；Instagram / TikTok 的免费自采目前用于品牌管理中已配置的公开官方账号，全站红人关键词发现暂无稳定免费接口。"
           action={<Button variant="primary" onClick={runSync} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即同步"}</Button>}
         />
       ) : (

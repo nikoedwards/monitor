@@ -25,9 +25,9 @@
 
 | 档位 | 含义 | 连接器 |
 | --- | --- | --- |
-| 第 1 档 | 免费、无需凭证、可直接采真实数据 | Google News、Reddit 搜索、App Store 评论、品牌站点分析、网页快照 |
+| 第 1 档 | 免费、无需凭证、可直接采真实数据 | Google News、Reddit 搜索、YouTube/Instagram/TikTok 官方账号、App Store 评论、品牌站点分析、网页快照 |
 | 第 2 档 | 需配置凭证后启用 | Meta 广告库、YouTube、Discord、Facebook 群组 |
-| 第 3 档 | 付费 / 难获取，预留接缝 + 手动录入 | Amazon 竞品销量、Instagram / TikTok 监听、线下销售 |
+| 第 3 档 | 难获取，预留接缝 + 手动录入 | Amazon 竞品销量、Instagram / TikTok / X 全站关键词发现、线下销售 |
 
 第 2 档凭证通过环境变量提供（可选）：
 
@@ -63,6 +63,16 @@ SELLERSPRITE_SECRET_KEY=... # 卖家精灵 OpenAPI（可选，也可在「设置
 ## 招聘监控
 
 招聘监控支持 Boss 直聘、LinkedIn 职位与 LinkedIn 员工动态。通过品牌下 `dimension='hiring'` 的链接配置采集入口，并按日保存岗位/JD 快照、上下线状态和员工公开动态。Boss 与 LinkedIn 反爬严格，需要在设置中配置对应登录 Cookie；采集为最佳努力模式，Cookie 失效或触发风控时不会影响其他板块。
+
+## 社媒官方账号自采
+
+在「品牌管理 → 社媒」配置公开账号主页后，系统会立即采集并按日刷新：
+
+- YouTube：公开 Atom feed + 频道页结构化数据 + 网页互动指标。
+- Instagram：无登录 Chromium 会话读取公开主页接口，采集最近帖子、粉丝、点赞、评论及公开视频播放量（平台返回时）。
+- TikTok：公开主页资料 + `yt-dlp` 网页提取，采集最近视频、播放、点赞、评论、转发和粉丝数。
+
+以上路径不需要 Ensemble Data 或其他付费聚合 Token，也不会绕过登录、验证码、私密账号或平台访问控制。公开网页结构和风控可能变化，失败会保留在对应账号链接的采集状态中。X、Facebook、LinkedIn 官方账号免费适配器仍待后续开发；红人板块的“全站关键词发现”也不等同于已知官方账号自采。
 
 ## 本地运行
 

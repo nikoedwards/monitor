@@ -17,16 +17,15 @@ from xml.etree import ElementTree as ET
 
 from ..fetchers import FetchError, fetch_bytes, fetch_json_post, fetch_page
 from ..util import clean_text, today, utc_now
-from .creators import creator_credential
 from .creators.base import CreatorPost
-from .creators.thirdparty import ThirdPartyCreatorProvider
+from .public_social import collect_instagram_public, collect_tiktok_public
 
 SOURCE_ID = "social_accounts"
-SUPPORTED_THIRD_PARTY = {"instagram", "tiktok", "x"}
 UNSUPPORTED_PLATFORM_MESSAGE = {
     "facebook": "Facebook 公开主页采集尚未接入；Graph API 通常只允许已授权主页。",
     "linkedin": "LinkedIn 公司动态采集尚未接入；官方接口权限受限，不建议直接爬取竞品页面。",
     "pinterest": "Pinterest 账号内容采集尚未接入。",
+    "x": "X 公开账号页面对未登录访问和自动化采集限制严格，免费稳定适配器尚未接入。",
 }
 
 _ATOM = "http://www.w3.org/2005/Atom"
@@ -48,7 +47,7 @@ def _error_status(exc: Exception) -> tuple[str, str]:
     lowered = message.lower()
     if any(token in lowered for token in ("401", "unauthorized", "credential", "token", "api key")):
         return "needs_credential", message
-    if any(token in lowered for token in ("403", "429", "forbidden", "blocked", "rate limit")):
+    if any(token in lowered for token in ("403", "429", "forbidden", "blocked", "rate limit", "private", "私密")):
         return "blocked", message
     if any(token in lowered for token in ("timeout", "timed out", "connection", "resolve", "ssl", "network")):
         return "network", message
@@ -559,16 +558,15 @@ def _cache_youtube_channel_id(conn: sqlite3.Connection, link: dict, channel_id: 
     )
 
 
-def _third_party_posts(conn: sqlite3.Connection, platform: str, account_url: str) -> list[CreatorPost]:
-    token = creator_credential(conn, "ensembledata_token")
-    if not token:
-        raise PermissionError("缺少 ensembledata_token；Instagram / TikTok / X 官方账号内容需第三方数据源。")
+def _public_social_posts(platform: str, account_url: str) -> list[CreatorPost]:
     handle = _account_handle(account_url)
     if not handle:
         raise ValueError("无法从社媒链接解析账号 handle。")
-    provider = ThirdPartyCreatorProvider(platform, token)
-    posts = provider.collect(conn, {}, [handle]) or []
-    return [post for post in posts if (post.author_handle or "").lstrip("@").lower() == handle]
+    if platform == "instagram":
+        return collect_instagram_public(account_url, handle)
+    if platform == "tiktok":
+        return collect_tiktok_public(account_url, handle)
+    return []
 
 
 def _payload(brand: dict, link: dict, post: CreatorPost) -> dict:
@@ -656,8 +654,8 @@ def collect_social_accounts(conn: sqlite3.Connection, brand: dict) -> list[dict]
                 config = _link_config(link)
                 posts, channel_id = _youtube_posts(link["url"], config.get("youtube_channel_id") or "")
                 _cache_youtube_channel_id(conn, link, channel_id)
-            elif platform in SUPPORTED_THIRD_PARTY:
-                posts = _third_party_posts(conn, platform, link["url"])
+            elif platform in {"instagram", "tiktok"}:
+                posts = _public_social_posts(platform, link["url"])
             else:
                 message = UNSUPPORTED_PLATFORM_MESSAGE.get(
                     platform,
