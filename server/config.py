@@ -24,7 +24,6 @@ USER_AGENT = "MonitorIntelligenceHub/1.0 (+brand intelligence monitor)"
 # Optional credentials for tier-2/3 connectors (filled in later by the user).
 CREDENTIALS = {
     "youtube_api_key": os.environ.get("YOUTUBE_API_KEY", ""),
-    "ensembledata_token": os.environ.get("ENSEMBLEDATA_TOKEN", ""),
     "reddit_bearer_token": os.environ.get("REDDIT_BEARER_TOKEN", ""),
     "reddit_user_agent": os.environ.get("REDDIT_USER_AGENT", USER_AGENT),
     "discord_bot_token": os.environ.get("DISCORD_BOT_TOKEN", ""),
@@ -44,8 +43,8 @@ def has_credential(name: str) -> bool:
 def apply_credential_overrides(values: dict) -> None:
     """Merge settings-table credential values into the runtime CREDENTIALS map.
 
-    Lets the user supply tier-2 credentials (YouTube key, Ensemble Data token,
-    SellerSprite secret) from the in-app settings dialog instead of env vars, and
+    Lets the user supply tier-2 credentials (YouTube key, SellerSprite secret)
+    from the in-app settings dialog instead of env vars, and
     keeps env + settings consistent for everything that reads ``has_credential``
     (connector status, run_collector, scheduler). Only non-empty values override.
     """

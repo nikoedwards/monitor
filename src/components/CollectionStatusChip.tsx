@@ -14,8 +14,8 @@ const STATUS_MAP: Record<string, StatusMeta> = {
   blocked: {
     label: "被限流/拦截",
     tone: "var(--warning)",
-    reason: "来源返回 403 或触发了反爬限流。",
-    fix: "系统已自动回退到公开 RSS；配置对应 Token（如 REDDIT_BEARER_TOKEN）可显著提升成功率。",
+    reason: "来源返回 403/429、账号为私密状态，或触发了平台访问限制。",
+    fix: "系统不会绕过登录、验证码或私密权限；请确认账号公开并稍后重试。",
   },
   needs_credential: {
     label: "需配置凭证",
@@ -27,7 +27,7 @@ const STATUS_MAP: Record<string, StatusMeta> = {
     label: "暂未支持",
     tone: "var(--mute)",
     reason: "该平台的官方账号采集适配器尚未接入，当前链接只会保留为监控配置。",
-    fix: "可先使用已支持的 YouTube；Instagram / TikTok / X 配置第三方 Token 后可采集。",
+    fix: "当前可直接使用 YouTube、Instagram 和 TikTok 公开账号自采；X、Facebook、LinkedIn 尚待适配。",
   },
   network: {
     label: "网络异常",

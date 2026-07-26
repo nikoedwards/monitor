@@ -9,6 +9,7 @@ from server.connectors.social import (
     _youtube_web_video_metrics,
     collect_social_accounts,
 )
+from server.connectors.creators.base import CreatorPost
 from server.fetchers import FetchError
 from server.util import today
 
@@ -171,15 +172,62 @@ class SocialAccountCollectorTests(unittest.TestCase):
         self.assertEqual(status["last_status"], "ok")
         self.assertEqual(status["last_error"], "")
 
-    def test_paid_platform_without_token_is_explained(self):
+    @patch("server.connectors.social.collect_instagram_public")
+    def test_instagram_public_account_is_collected_without_paid_token(self, collect_instagram):
+        collect_instagram.return_value = [CreatorPost(
+            platform="instagram",
+            external_id="ig-post-1",
+            url="https://www.instagram.com/p/ig-post-1/",
+            title="Launch reel",
+            body="Launch reel",
+            author="Example",
+            author_handle="example",
+            author_url="https://www.instagram.com/example/",
+            occurred_at="2026-07-25T10:00:00+00:00",
+            views=1200,
+            likes=100,
+            comments=8,
+            follower_count=5000,
+            raw={"collection_method": "instagram_public_web"},
+        )]
         self.add_link("instagram", "https://www.instagram.com/example/")
-        with patch("server.connectors.creators.CREDENTIALS", {"ensembledata_token": ""}):
-            records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
 
-        self.assertEqual(records, [])
+        records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["platform"], "instagram")
+        self.assertEqual(records[0]["metrics"]["views"], 1200)
+        self.assertEqual(records[0]["metrics"]["likes"], 100)
+        collect_instagram.assert_called_once_with("https://www.instagram.com/example/", "example")
         status = self.conn.execute("SELECT last_status, last_error FROM links WHERE id = 'link-instagram'").fetchone()
-        self.assertEqual(status["last_status"], "needs_credential")
-        self.assertIn("ensembledata_token", status["last_error"])
+        self.assertEqual(status["last_status"], "ok")
+        self.assertEqual(status["last_error"], "")
+
+    @patch("server.connectors.social.collect_tiktok_public")
+    def test_tiktok_public_account_is_collected_without_paid_token(self, collect_tiktok):
+        collect_tiktok.return_value = [CreatorPost(
+            platform="tiktok",
+            external_id="tt-video-1",
+            url="https://www.tiktok.com/@example/video/tt-video-1",
+            title="Product demo",
+            body="Product demo",
+            author="Example",
+            author_handle="example",
+            occurred_at="2026-07-25T10:00:00+00:00",
+            views=2500,
+            likes=220,
+            comments=14,
+            shares=6,
+            raw={"collection_method": "tiktok_public_web_ytdlp"},
+        )]
+        self.add_link("tiktok", "https://www.tiktok.com/@example")
+
+        records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["platform"], "tiktok")
+        self.assertEqual(records[0]["metrics"]["engagement"], 240)
+        collect_tiktok.assert_called_once_with("https://www.tiktok.com/@example", "example")
 
     def test_localized_youtube_view_count_is_parsed(self):
         self.assertEqual(_compact_count("收看次數：3.5K 次"), 3500)
