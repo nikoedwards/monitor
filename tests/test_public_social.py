@@ -3,6 +3,8 @@ import unittest
 
 from server.connectors.public_social import (
     _json_script,
+    instagram_posts_from_feed,
+    instagram_posts_from_responses,
     instagram_posts_from_user,
     tiktok_posts_from_data,
 )
@@ -75,6 +77,85 @@ class PublicSocialNormalizerTests(unittest.TestCase):
         post = instagram_posts_from_user(user, "https://www.instagram.com/example/")[0]
 
         self.assertIsNone(post.views)
+
+    def test_instagram_rest_timeline_becomes_posts_with_metrics(self):
+        feed = {
+            "user": {
+                "username": "example",
+                "full_name": "Example Brand",
+                "is_private": False,
+                "is_verified": True,
+                "profile_pic_url": "https://cdn.example/avatar.jpg",
+            },
+            "items": [{
+                "pk": "3939",
+                "code": "REST123",
+                "product_type": "clips",
+                "media_type": 2,
+                "taken_at": 1784956800,
+                "like_count": 456,
+                "comment_count": 23,
+                "play_count": 9876,
+                "reshare_count": 11,
+                "caption": {"text": "New product launch"},
+                "image_versions2": {
+                    "candidates": [{"url": "https://cdn.example/post.jpg"}]
+                },
+            }],
+        }
+
+        posts = instagram_posts_from_feed(
+            feed,
+            "https://www.instagram.com/example/",
+            follower_count=12345,
+        )
+
+        self.assertEqual(len(posts), 1)
+        post = posts[0]
+        self.assertEqual(post.url, "https://www.instagram.com/reel/REST123/")
+        self.assertEqual(post.views, 9876)
+        self.assertEqual(post.likes, 456)
+        self.assertEqual(post.comments, 23)
+        self.assertEqual(post.shares, 11)
+        self.assertEqual(post.follower_count, 12345)
+        self.assertEqual(post.raw["collection_method"], "instagram_public_timeline")
+
+    def test_instagram_profile_400_uses_timeline_fallback(self):
+        result = {
+            "profile_status": 400,
+            "profile_data": {"message": "schema unavailable", "status": "fail"},
+            "feed_status": 200,
+            "feed_data": {
+                "user": {
+                    "username": "example",
+                    "full_name": "Example Brand",
+                    "is_private": False,
+                },
+                "items": [{
+                    "pk": "1",
+                    "code": "FALLBACK1",
+                    "media_type": 1,
+                    "taken_at": 1784956800,
+                    "like_count": 12,
+                    "comment_count": 3,
+                    "caption": {"text": "Fallback works"},
+                }],
+            },
+            "og_description": (
+                "141K Followers, 30 Following, 39 Posts - See Instagram photos "
+                "and videos from Example Brand (@example)"
+            ),
+        }
+
+        posts = instagram_posts_from_responses(
+            result,
+            "https://www.instagram.com/example/",
+            "example",
+        )
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].follower_count, 141000)
+        self.assertEqual(posts[0].raw["collection_method"], "instagram_public_timeline")
 
     def test_tiktok_playlist_entries_become_posts_with_metrics(self):
         profile = {

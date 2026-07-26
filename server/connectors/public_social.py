@@ -65,6 +65,34 @@ def _instagram_caption(node: dict) -> str:
     return str(node.get("accessibility_caption") or "").strip()
 
 
+def _instagram_feed_caption(item: dict) -> str:
+    caption = item.get("caption")
+    if isinstance(caption, dict):
+        return str(caption.get("text") or "").strip()
+    return str(caption or "").strip()
+
+
+def _instagram_feed_thumbnail(item: dict) -> str:
+    versions = item.get("image_versions2")
+    candidates = versions.get("candidates") if isinstance(versions, dict) else []
+    for candidate in candidates or []:
+        if isinstance(candidate, dict) and candidate.get("url"):
+            return str(candidate["url"])
+    return str(item.get("display_uri") or "").strip()
+
+
+def _instagram_followers_from_og(description: str) -> int | None:
+    match = re.search(r"([\d,.]+)\s*([KMB]?)\s+Followers\b", description or "", flags=re.I)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+    return int(value * multiplier[match.group(2).upper()])
+
+
 def instagram_posts_from_user(user: dict, account_url: str, *, limit: int = _MAX_POSTS) -> list[CreatorPost]:
     """Normalize Instagram's logged-out web profile response."""
     if not isinstance(user, dict) or not user.get("username"):
@@ -131,6 +159,120 @@ def instagram_posts_from_user(user: dict, account_url: str, *, limit: int = _MAX
     return posts
 
 
+def instagram_posts_from_feed(
+    feed: dict,
+    account_url: str,
+    *,
+    handle: str = "",
+    follower_count: int | None = None,
+    limit: int = _MAX_POSTS,
+) -> list[CreatorPost]:
+    """Normalize Instagram's public REST timeline fallback response."""
+    if not isinstance(feed, dict):
+        raise FetchError("Instagram 公开时间线未返回有效数据。")
+
+    items = feed.get("items") or []
+    user = feed.get("user") if isinstance(feed.get("user"), dict) else {}
+    if not user and items and isinstance(items[0], dict):
+        first_item_user = items[0].get("user")
+        user = first_item_user if isinstance(first_item_user, dict) else {}
+    if user.get("is_private"):
+        raise FetchError("Instagram 账号为私密账号；自采仅支持公开账号。")
+
+    username = str(user.get("username") or handle).strip().lstrip("@").lower()
+    if not username:
+        raise FetchError("Instagram 公开时间线未返回账号资料。")
+    display_name = str(user.get("full_name") or username).strip()
+    profile_pic = str(user.get("profile_pic_url") or "")
+    if follower_count is None:
+        follower_count = _number(user.get("follower_count"))
+    posts: list[CreatorPost] = []
+
+    for item in items[: max(1, limit)]:
+        if not isinstance(item, dict):
+            continue
+        shortcode = str(item.get("code") or "").strip()
+        external_id = str(item.get("pk") or item.get("id") or shortcode).strip()
+        if not shortcode or not external_id:
+            continue
+        caption = _instagram_feed_caption(item)
+        media_type = _number(item.get("media_type"))
+        product_type = str(item.get("product_type") or "")
+        is_video = media_type == 2 or product_type == "clips"
+        path = "reel" if product_type == "clips" else "p"
+        likes = _number(item.get("like_count"))
+        comments = _number(item.get("comment_count"))
+        shares = _number(item.get("reshare_count"))
+        if shares is None:
+            shares = _number(item.get("share_count"))
+        views = None
+        if is_video:
+            for key in ("play_count", "view_count", "video_view_count"):
+                views = _number(item.get(key))
+                if views is not None:
+                    break
+        if views == 0 and ((likes or 0) > 0 or (comments or 0) > 0):
+            views = None
+        posts.append(CreatorPost(
+            platform="instagram",
+            external_id=external_id,
+            url=f"https://www.instagram.com/{path}/{shortcode}/",
+            title=(caption or f"Instagram post by @{username}")[:200],
+            body=caption or f"Instagram post by @{username}",
+            author=display_name,
+            author_handle=username,
+            author_url=account_url,
+            avatar_url=_instagram_feed_thumbnail(item) or profile_pic,
+            occurred_at=_timestamp(item.get("taken_at")),
+            views=views,
+            likes=likes,
+            comments=comments,
+            shares=shares,
+            follower_count=follower_count,
+            raw={
+                "collection_method": "instagram_public_timeline",
+                "shortcode": shortcode,
+                "post_type": product_type or str(media_type or "unknown"),
+                "is_video": is_video,
+                "is_verified": bool(user.get("is_verified")),
+                "profile_pic_url": profile_pic,
+            },
+        ))
+    return posts
+
+
+def instagram_posts_from_responses(
+    result: dict,
+    account_url: str,
+    handle: str,
+    *,
+    limit: int = _MAX_POSTS,
+) -> list[CreatorPost]:
+    """Prefer the profile response and fall back to the public timeline."""
+    profile_status = _number((result or {}).get("profile_status")) or 0
+    user = (((result or {}).get("profile_data") or {}).get("data") or {}).get("user")
+    if profile_status == 200 and isinstance(user, dict) and user.get("username"):
+        return instagram_posts_from_user(user, account_url, limit=limit)
+
+    feed_status = _number((result or {}).get("feed_status")) or 0
+    feed = (result or {}).get("feed_data")
+    if feed_status == 200 and isinstance(feed, dict):
+        follower_count = _instagram_followers_from_og(str((result or {}).get("og_description") or ""))
+        return instagram_posts_from_feed(
+            feed,
+            account_url,
+            handle=handle,
+            follower_count=follower_count,
+            limit=limit,
+        )
+
+    raise FetchError(
+        "Instagram 公开接口采集失败："
+        f"profile HTTP {profile_status or 'unknown'}，"
+        f"timeline HTTP {feed_status or 'unknown'}。"
+    )
+
+
 def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX_POSTS) -> list[CreatorPost]:
     """Load one public Instagram profile through the logged-out web client."""
     try:
@@ -151,29 +293,59 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
                 page = context.new_page()
                 page.goto(
                     f"https://www.instagram.com/{handle}/",
-                    wait_until="commit",
+                    wait_until="domcontentloaded",
                     timeout=45_000,
                 )
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(800)
                 result = page.evaluate(
                     """
-                    async ({handle, appId}) => {
-                      const response = await fetch(
+                    async ({handle, appId, limit}) => {
+                      const headers = {
+                        "X-IG-App-ID": appId,
+                        "X-Requested-With": "XMLHttpRequest"
+                      };
+                      const parseJson = async (response) => {
+                        try { return await response.json(); } catch (_) { return null; }
+                      };
+                      const profileResponse = await fetch(
                         `/api/v1/users/web_profile_info/?username=${encodeURIComponent(handle)}`,
                         {
                           credentials: "same-origin",
-                          headers: {
-                            "X-IG-App-ID": appId,
-                            "X-Requested-With": "XMLHttpRequest"
-                          }
+                          headers
                         }
                       );
-                      let data = null;
-                      try { data = await response.json(); } catch (_) {}
-                      return {status: response.status, data};
+                      const profileData = await parseJson(profileResponse);
+                      const profileUser = profileData?.data?.user;
+                      let feedResponse = null;
+                      let feedData = null;
+                      if (profileResponse.status !== 200 || !profileUser?.username) {
+                        feedResponse = await fetch(
+                          `/api/v1/feed/user/${encodeURIComponent(handle)}/username/?count=${limit}`,
+                          {credentials: "same-origin", headers}
+                        );
+                        feedData = await parseJson(feedResponse);
+                        if (feedResponse.status !== 200) {
+                          const html = document.documentElement?.innerHTML || "";
+                          const profileId = html.match(/"profile_id":"?(\\d+)"?/)?.[1];
+                          if (profileId) {
+                            feedResponse = await fetch(
+                              `/api/v1/feed/user/${profileId}/?count=${limit}`,
+                              {credentials: "same-origin", headers}
+                            );
+                            feedData = await parseJson(feedResponse);
+                          }
+                        }
+                      }
+                      return {
+                        profile_status: profileResponse.status,
+                        profile_data: profileData,
+                        feed_status: feedResponse?.status || 0,
+                        feed_data: feedData,
+                        og_description: document.querySelector('meta[property="og:description"]')?.content || ""
+                      };
                     }
                     """,
-                    {"handle": handle, "appId": _INSTAGRAM_APP_ID},
+                    {"handle": handle, "appId": _INSTAGRAM_APP_ID, "limit": max(1, limit)},
                 )
             finally:
                 try:
@@ -192,11 +364,7 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
     except Exception as exc:
         raise FetchError(f"Instagram 公开主页采集失败：{exc}") from exc
 
-    status = _number((result or {}).get("status")) or 0
-    if status != 200:
-        raise FetchError(f"Instagram 公开接口返回 HTTP {status or 'unknown'}。")
-    user = (((result or {}).get("data") or {}).get("data") or {}).get("user")
-    return instagram_posts_from_user(user, account_url, limit=limit)
+    return instagram_posts_from_responses(result, account_url, handle, limit=limit)
 
 
 def _json_script(html: str, script_id: str) -> dict:
