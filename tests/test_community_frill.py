@@ -80,7 +80,7 @@ class FrillCollectorTests(unittest.TestCase):
         newest = payloads[0]
         self.assertEqual(newest["title"], "Plaud should turn on when you open your app")
         self.assertEqual(newest["author"], "Jordan W")
-        self.assertEqual(newest["platform"], "frill")
+        self.assertEqual(newest["platform"], "feedback.plaud.ai")
         self.assertEqual(newest["metrics"]["vote_count"], 1)
         self.assertEqual(newest["raw"]["collection_method"], "frill_latest_ideas")
         self.assertEqual(
@@ -91,18 +91,26 @@ class FrillCollectorTests(unittest.TestCase):
     def test_recognized_frill_parse_failure_does_not_create_generic_snapshot(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        conn.execute(
+        conn.executescript(
             """
             CREATE TABLE links (
               id TEXT PRIMARY KEY, brand_id TEXT, channel TEXT, platform TEXT, url TEXT,
               status TEXT, last_collect_at TEXT, last_status TEXT, last_error TEXT, updated_at TEXT
-            )
+            );
+            CREATE TABLE records (
+              source_id TEXT, brand_id TEXT, link_id TEXT, platform TEXT, external_id TEXT
+            );
             """
         )
         conn.execute(
             "INSERT INTO links (id, brand_id, channel, platform, url, status, updated_at) "
             "VALUES ('link-1', 'brand-1', 'community', 'self_hosted', "
             "'https://feedback.plaud.ai/', 'active', '2026-07-26')"
+        )
+        conn.execute(
+            "INSERT INTO records (source_id, brand_id, link_id, platform, external_id) "
+            "VALUES ('community_site', 'brand-1', 'link-1', 'frill', "
+            "'brand-1:frill:feedback.plaud.ai:idea_existing')"
         )
 
         with (
@@ -121,6 +129,8 @@ class FrillCollectorTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(status["last_status"], "empty")
         self.assertIn("Latest Ideas", status["last_error"])
+        migrated = conn.execute("SELECT platform FROM records").fetchone()
+        self.assertEqual(migrated["platform"], "feedback.plaud.ai")
         conn.close()
 
 

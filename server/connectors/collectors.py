@@ -834,7 +834,7 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
             "data_type": "community_post",
             "dimension": "marketing",
             "channel": "community",
-            "platform": "frill",
+            "platform": host or "frill",
             "title": title,
             "author": resolve_name(idea),
             "body": body,
@@ -869,7 +869,7 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
             "data_type": "community_reply",
             "dimension": "marketing",
             "channel": "community",
-            "platform": "frill",
+            "platform": host or "frill",
             "title": "回复",
             "author": resolve_name(comment),
             "body": body,
@@ -937,6 +937,18 @@ def collect_community_sites(conn: sqlite3.Connection, brand: dict) -> list[dict]
                 frill_recognized = frill_items is not None
                 if frill_recognized:
                     items = frill_items
+                    site_platform = host_key(url) or "frill"
+                    conn.execute(
+                        "UPDATE records SET platform = ? "
+                        "WHERE source_id = 'community_site' AND brand_id = ? AND link_id = ? "
+                        "AND platform = 'frill' AND external_id LIKE ?",
+                        (
+                            site_platform,
+                            brand.get("id"),
+                            link_id,
+                            f"{brand.get('id')}:frill:{site_platform}:%",
+                        ),
+                    )
                 else:
                     items = _rss_payloads(url, brand, link_id) or _generic_site_payload(url, brand, link_id)
             payloads.extend(items)
