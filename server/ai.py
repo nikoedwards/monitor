@@ -388,3 +388,63 @@ def automap_listings(
             "applied": applied,
         })
     return results
+
+
+# ---------------------------------------------------------- hiring / JD analysis
+JD_SYSTEM = (
+    "你是商业竞争情报分析师。基于目标公司近期的招聘职位与 JD（职位描述），"
+    "推导对方内部正在推进的业务方向、团队扩张重点与潜在战略动作。"
+    "只依据给定数据，不要编造事实。仅返回一个 JSON 对象，不要任何解释或 markdown 围栏。"
+)
+
+JD_PROMPT_TEMPLATE = """以下是目标公司「{brand}」在 {start} 至 {end} 期间的 {count} 条真实招聘职位（含 JD 摘要）：
+
+{postings}
+
+请仅返回严格符合以下结构的 JSON：
+
+{{
+  "summary": "3-5 句话总结该公司近期在招聘上投入的重点，以及由此推导的业务动向",
+  "business_directions": [{{"direction": "业务/技术方向", "evidence": "支撑该判断的岗位或JD要点", "job_count": 0}}],
+  "team_focus": [{{"team": "扩张的团队/职能", "signal": "扩张力度或紧迫度说明"}}],
+  "hot_roles": [{{"title": "高频/重点岗位", "count": 0}}],
+  "strategic_signals": ["从招聘节奏/岗位变化推导的战略信号1", "信号2"],
+  "risks": ["数据局限或需谨慎解读之处"]
+}}
+
+要求：
+- 完全基于给定职位数据，evidence 必须能对应到上面的岗位或 JD 内容。
+- business_directions 取 3-6 项，strategic_signals 2-5 条。
+- 若数据稀少也要如实说明，不要夸大。"""
+
+
+def analyze_jd(conn: sqlite3.Connection, postings: list[dict], context: dict) -> dict:
+    """Infer a target company's business direction from its recent job postings."""
+    cfg = get_config(conn)
+    items = []
+    for p in postings[:80]:
+        items.append({
+            "title": (p.get("title") or "")[:120],
+            "department": (p.get("department") or "")[:60],
+            "city": (p.get("city") or "")[:40],
+            "platform": p.get("platform"),
+            "status": p.get("status"),
+            "posted": (p.get("first_seen") or "")[:10],
+            "jd": (p.get("jd_text") or "")[:600],
+        })
+    prompt = JD_PROMPT_TEMPLATE.format(
+        brand=context.get("brand") or "目标公司",
+        start=context.get("start") or "",
+        end=context.get("end") or "",
+        count=len(items),
+        postings=json.dumps(items, ensure_ascii=False),
+    )
+    text = call_llm(cfg, JD_SYSTEM, prompt)
+    parsed = _extract_json(text)
+    if not isinstance(parsed, dict):
+        raise LlmError("大模型未返回有效的分析对象")
+    parsed.setdefault("summary", "")
+    for key in ("business_directions", "team_focus", "hot_roles", "strategic_signals", "risks"):
+        if not isinstance(parsed.get(key), list):
+            parsed[key] = []
+    return parsed

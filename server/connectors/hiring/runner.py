@@ -1,0 +1,411 @@
+"""Hiring collection runner: expand sources -> postings -> daily snapshots.
+
+Mirrors the sales runner. For each active hiring source link it expands the
+company/search page into the ``job_postings`` registry, then captures a daily
+``job_snapshots`` row for every monitored open posting, detecting JD content
+changes and open/closed transitions. A posting that disappears from a source
+that expanded successfully is marked ``closed`` (the "招到人 -> 岗位下线" signal).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+
+from ...util import canonical_url, clean_text, new_id, today, utc_now
+from . import pick_people_provider, pick_provider
+from .base import JobRef, JobSnapshot, ProfileRef
+
+
+def _jd_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _link_platform(link: dict) -> str:
+    return (link.get("platform") or link.get("channel") or "").lower()
+
+
+def _upsert_posting(conn: sqlite3.Connection, link: dict, ref: JobRef) -> str:
+    now = utc_now()
+    canon = canonical_url(ref.url)
+    ext = (ref.external_id or "").strip()
+    existing = conn.execute(
+        """
+        SELECT * FROM job_postings
+        WHERE link_id = ? AND ((external_id != '' AND external_id = ?) OR canonical_url = ?)
+        LIMIT 1
+        """,
+        (link["id"], ext, canon),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE job_postings
+            SET url = ?, canonical_url = ?,
+                external_id = COALESCE(NULLIF(?, ''), external_id),
+                title = COALESCE(NULLIF(?, ''), title),
+                department = COALESCE(NULLIF(?, ''), department),
+                city = COALESCE(NULLIF(?, ''), city),
+                status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,
+                closed_at = CASE WHEN status = 'closed' THEN NULL ELSE closed_at END,
+                last_seen = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (ref.url, canon, ext, clean_text(ref.title), clean_text(ref.department),
+             clean_text(ref.city), now, now, existing["id"]),
+        )
+        return existing["id"]
+
+    posting_id = new_id()
+    conn.execute(
+        """
+        INSERT INTO job_postings (id, brand_id, link_id, platform, external_id, url, canonical_url,
+            title, department, city, jd_text, jd_hash, status, posted_at, first_seen, last_seen,
+            config_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, '{}', ?, ?)
+        """,
+        (
+            posting_id, link["brand_id"], link["id"], _link_platform(link), ext, ref.url, canon,
+            clean_text(ref.title), clean_text(ref.department), clean_text(ref.city),
+            ref.jd_text or "", _jd_hash(ref.jd_text or ""), ref.posted_at or None, now, now, now, now,
+        ),
+    )
+    return posting_id
+
+
+def _diff_fingerprint(old_fp: dict, new_fp: dict) -> list[dict]:
+    changes: list[dict] = []
+    for key, new_val in new_fp.items():
+        old_val = old_fp.get(key)
+        if old_val == new_val:
+            continue
+        if old_val in (None, "") and new_val in (None, ""):
+            continue
+        changes.append({"field": key, "from": old_val, "to": new_val})
+    return changes
+
+
+def _record_snapshot(conn: sqlite3.Connection, posting: dict, snap: JobSnapshot) -> dict:
+    now = utc_now()
+    day = today()
+    config = json.loads(posting.get("config_json") or "{}")
+    old_fp = config.get("fingerprint") or {}
+    new_fp = snap.fingerprint_fields()
+
+    changes: list[dict] = []
+    change_score = 0.0
+    if old_fp:
+        changes = _diff_fingerprint(old_fp, new_fp)
+        change_score = round(len(changes) / max(1, len(new_fp)), 4)
+
+    status = "closed" if snap.is_open is False else "open"
+    conn.execute(
+        "DELETE FROM job_snapshots WHERE posting_id = ? AND snapshot_date = ?",
+        (posting["id"], day),
+    )
+    conn.execute(
+        """
+        INSERT INTO job_snapshots (id, posting_id, brand_id, link_id, snapshot_date, platform,
+            status, is_open, title, department, city, posted_at, refreshed_at, applicant_signal,
+            change_score, changes_json, raw_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            new_id(), posting["id"], posting["brand_id"], posting.get("link_id"), day,
+            posting.get("platform"), status,
+            None if snap.is_open is None else int(snap.is_open),
+            clean_text(snap.title) or posting.get("title"), clean_text(snap.department),
+            clean_text(snap.city), snap.posted_at or None, snap.refreshed_at or None,
+            snap.applicant_signal, change_score, json.dumps(changes, ensure_ascii=False),
+            json.dumps(snap.raw, ensure_ascii=False), now,
+        ),
+    )
+
+    config["fingerprint"] = new_fp
+    last_change_at = now if changes else posting.get("last_change_at")
+    closed_at = now if snap.is_open is False else posting.get("closed_at")
+    conn.execute(
+        """
+        UPDATE job_postings
+        SET title = COALESCE(NULLIF(?, ''), title),
+            department = COALESCE(NULLIF(?, ''), department),
+            city = COALESCE(NULLIF(?, ''), city),
+            jd_text = COALESCE(NULLIF(?, ''), jd_text),
+            jd_hash = CASE WHEN ? != '' THEN ? ELSE jd_hash END,
+            status = ?, closed_at = ?, refreshed_at = ?, last_seen = ?,
+            last_status = ?, last_error = ?, last_change_at = ?, config_json = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            clean_text(snap.title), clean_text(snap.department), clean_text(snap.city),
+            snap.jd_text or "", snap.jd_text or "", _jd_hash(snap.jd_text or ""),
+            status, closed_at, snap.refreshed_at or None, now, snap.status, snap.error,
+            last_change_at, json.dumps(config, ensure_ascii=False), now, posting["id"],
+        ),
+    )
+    return {"changed": bool(changes), "status": snap.status, "job_status": status}
+
+
+def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
+    """Expand configured hiring links into postings and capture monitored postings."""
+    summary = {"links": 0, "postings": 0, "captured": 0, "changed": 0, "closed": 0, "errors": 0}
+
+    link_clause = "AND id = ?" if link_id else ""
+    link_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
+    links = conn.execute(
+        f"""
+        SELECT * FROM links
+        WHERE brand_id = ? AND dimension = 'hiring' AND status = 'active'
+              AND url IS NOT NULL AND url != '' {link_clause}
+        """,
+        link_params,
+    ).fetchall()
+
+    for row in links:
+        link = dict(row)
+        platform = _link_platform(link)
+        provider = pick_provider(platform, conn)
+        if provider is None:
+            continue
+        summary["links"] += 1
+        try:
+            refs = provider.expand(conn, link)
+        except Exception as exc:  # noqa: BLE001
+            conn.execute(
+                "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
+                ("error", str(exc)[:300], utc_now(), utc_now(), link["id"]),
+            )
+            summary["errors"] += 1
+            continue
+
+        seen_ids: list[str] = []
+        real_expansion = any((r.external_id or "").strip() for r in refs)
+        for ref in refs:
+            pid = _upsert_posting(conn, link, ref)
+            seen_ids.append(pid)
+            summary["postings"] += 1
+
+        # Disappearance = "招到人/岗位下线": close open postings not seen this run.
+        if real_expansion and seen_ids:
+            placeholders = ",".join("?" for _ in seen_ids)
+            stale = conn.execute(
+                f"""
+                SELECT * FROM job_postings
+                WHERE link_id = ? AND status = 'open' AND id NOT IN ({placeholders})
+                """,
+                (link["id"], *seen_ids),
+            ).fetchall()
+            for post_row in stale:
+                _close_posting(conn, dict(post_row))
+                summary["closed"] += 1
+
+        conn.execute(
+            "UPDATE links SET last_status = ?, last_error = '', last_collect_at = ?, updated_at = ? WHERE id = ?",
+            ("ok", utc_now(), utc_now(), link["id"]),
+        )
+
+    # Capture monitored open postings (fetch full JD + status).
+    listing_clause = "AND link_id = ?" if link_id else ""
+    listing_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
+    postings = conn.execute(
+        f"""
+        SELECT * FROM job_postings
+        WHERE brand_id = ? AND status = 'open' {listing_clause}
+        ORDER BY last_seen DESC LIMIT 200
+        """,
+        listing_params,
+    ).fetchall()
+
+    for row in postings:
+        posting = dict(row)
+        provider = pick_provider(posting.get("platform"), conn)
+        if provider is None:
+            continue
+        try:
+            snap = provider.fetch(conn, posting)
+        except Exception as exc:  # noqa: BLE001
+            conn.execute(
+                "UPDATE job_postings SET last_status = 'error', last_error = ?, last_seen = ?, updated_at = ? WHERE id = ?",
+                (str(exc)[:300], utc_now(), utc_now(), posting["id"]),
+            )
+            summary["errors"] += 1
+            continue
+        result = _record_snapshot(conn, posting, snap)
+        summary["captured"] += 1
+        if result["changed"]:
+            summary["changed"] += 1
+        if result["job_status"] == "closed":
+            summary["closed"] += 1
+        if snap.status in ("error", "blocked"):
+            summary["errors"] += 1
+
+    return summary
+
+
+def _close_posting(conn: sqlite3.Connection, posting: dict) -> None:
+    now = utc_now()
+    day = today()
+    conn.execute(
+        "DELETE FROM job_snapshots WHERE posting_id = ? AND snapshot_date = ?",
+        (posting["id"], day),
+    )
+    conn.execute(
+        """
+        INSERT INTO job_snapshots (id, posting_id, brand_id, link_id, snapshot_date, platform,
+            status, is_open, title, department, city, change_score, changes_json, raw_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'closed', 0, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            new_id(), posting["id"], posting["brand_id"], posting.get("link_id"), day,
+            posting.get("platform"), posting.get("title"), posting.get("department"),
+            posting.get("city"), 1.0,
+            json.dumps([{"field": "status", "from": "open", "to": "closed"}], ensure_ascii=False),
+            json.dumps({"reason": "disappeared_from_source"}, ensure_ascii=False), now,
+        ),
+    )
+    conn.execute(
+        "UPDATE job_postings SET status = 'closed', closed_at = ?, last_change_at = ?, updated_at = ? WHERE id = ?",
+        (now, now, now, posting["id"]),
+    )
+
+
+# ----------------------------------------------------------------- linkedin people
+def _upsert_profile(conn: sqlite3.Connection, link: dict, ref: ProfileRef) -> str:
+    now = utc_now()
+    canon = canonical_url(ref.profile_url)
+    ext = (ref.external_id or "").strip()
+    existing = conn.execute(
+        """
+        SELECT * FROM linkedin_profiles
+        WHERE brand_id = ? AND ((external_id != '' AND external_id = ?) OR canonical_url = ?)
+        LIMIT 1
+        """,
+        (link["brand_id"], ext, canon),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE linkedin_profiles
+            SET name = COALESCE(NULLIF(?, ''), name),
+                headline = COALESCE(NULLIF(?, ''), headline),
+                title = COALESCE(NULLIF(?, ''), title),
+                last_seen = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (clean_text(ref.name), clean_text(ref.headline), clean_text(ref.title), now, now, existing["id"]),
+        )
+        return existing["id"]
+    profile_id = new_id()
+    conn.execute(
+        """
+        INSERT INTO linkedin_profiles (id, brand_id, link_id, external_id, name, headline, title,
+            profile_url, canonical_url, avatar_url, status, monitor, first_seen, last_seen,
+            created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?)
+        """,
+        (
+            profile_id, link["brand_id"], link["id"], ext, clean_text(ref.name),
+            clean_text(ref.headline), clean_text(ref.title), ref.profile_url, canon,
+            ref.avatar_url, now, now, now, now,
+        ),
+    )
+    return profile_id
+
+
+def _record_activities(conn: sqlite3.Connection, profile: dict, activities: list) -> int:
+    now = utc_now()
+    added = 0
+    for act in activities:
+        text = clean_text(act.text)
+        if not text:
+            continue
+        ext = (act.external_id or "").strip() or _jd_hash(text)[:32]
+        dup = conn.execute(
+            "SELECT 1 FROM linkedin_activities WHERE profile_id = ? AND external_id = ? LIMIT 1",
+            (profile["id"], ext),
+        ).fetchone()
+        if dup:
+            continue
+        conn.execute(
+            """
+            INSERT INTO linkedin_activities (id, profile_id, brand_id, external_id, activity_type,
+                text, url, posted_at, raw_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id(), profile["id"], profile["brand_id"], ext, act.activity_type or "post",
+                text[:2000], act.url, act.posted_at or None,
+                json.dumps(act.raw, ensure_ascii=False), now,
+            ),
+        )
+        added += 1
+    if activities:
+        conn.execute(
+            "UPDATE linkedin_profiles SET last_activity_at = ?, last_seen = ?, updated_at = ? WHERE id = ?",
+            (now, now, now, profile["id"]),
+        )
+    return added
+
+
+def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
+    """Expand LinkedIn company people links into an employee roster + activity feed."""
+    summary = {"links": 0, "profiles": 0, "activities": 0, "errors": 0}
+
+    link_clause = "AND id = ?" if link_id else ""
+    link_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
+    links = conn.execute(
+        f"""
+        SELECT * FROM links
+        WHERE brand_id = ? AND dimension = 'hiring' AND status = 'active'
+              AND platform = 'linkedin_people' AND url IS NOT NULL AND url != '' {link_clause}
+        """,
+        link_params,
+    ).fetchall()
+
+    for row in links:
+        link = dict(row)
+        provider = pick_people_provider("linkedin", conn)
+        if provider is None:
+            continue
+        summary["links"] += 1
+        try:
+            refs = provider.expand_profiles(conn, link)
+        except Exception as exc:  # noqa: BLE001
+            conn.execute(
+                "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
+                ("error", str(exc)[:300], utc_now(), utc_now(), link["id"]),
+            )
+            summary["errors"] += 1
+            continue
+        for ref in refs:
+            _upsert_profile(conn, link, ref)
+            summary["profiles"] += 1
+        conn.execute(
+            "UPDATE links SET last_status = ?, last_error = '', last_collect_at = ?, updated_at = ? WHERE id = ?",
+            ("ok", utc_now(), utc_now(), link["id"]),
+        )
+
+    provider = pick_people_provider("linkedin", conn)
+    if provider is not None:
+        profiles = conn.execute(
+            f"""
+            SELECT * FROM linkedin_profiles
+            WHERE brand_id = ? AND status = 'active' AND monitor = 1
+            ORDER BY last_activity_at IS NULL, last_seen DESC LIMIT 60
+            """,
+            (brand["id"],),
+        ).fetchall()
+        for row in profiles:
+            profile = dict(row)
+            try:
+                activities = provider.fetch_activities(conn, profile)
+            except Exception as exc:  # noqa: BLE001
+                conn.execute(
+                    "UPDATE linkedin_profiles SET last_status = 'error', last_error = ?, updated_at = ? WHERE id = ?",
+                    (str(exc)[:300], utc_now(), profile["id"]),
+                )
+                summary["errors"] += 1
+                continue
+            summary["activities"] += _record_activities(conn, profile, activities)
+
+    return summary

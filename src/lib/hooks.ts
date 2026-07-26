@@ -136,11 +136,23 @@ export function useCompare(range?: TimeRange) {
 }
 
 // ---------------------------------------------------------------- voc
-export function useVocSummary(brandId?: string, range?: TimeRange) {
+export function useVocSummary(brandId?: string, range?: TimeRange, sources?: string[]) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["voc-summary", brandId, rp],
-    queryFn: () => api.get<any>(`/api/voc/summary${qs({ brand_id: brandId, ...rp })}`),
+    queryKey: ["voc-summary", brandId, rp, sources],
+    queryFn: () => api.get<any>(`/api/voc/summary${qs({ brand_id: brandId, sources: sources?.join(","), ...rp })}`),
+    enabled: !!brandId,
+  });
+}
+
+export function useVocRecords(brandId?: string, range?: TimeRange, sources?: string[], limit = 40) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["voc-records", brandId, rp, sources, limit],
+    queryFn: () =>
+      api
+        .get<{ records: RecordItem[] }>(`/api/voc/records${qs({ brand_id: brandId, sources: sources?.join(","), limit, ...rp })}`)
+        .then((data) => data.records),
     enabled: !!brandId,
   });
 }
@@ -164,6 +176,7 @@ export function useVocMutations() {
       mutationFn: (r: Record<string, unknown>) => api.post("/api/records", r),
       onSuccess: () => {
         qc.invalidateQueries({ queryKey: ["records"] });
+        qc.invalidateQueries({ queryKey: ["voc-records"] });
         qc.invalidateQueries({ queryKey: ["voc-summary"] });
       },
     }),
@@ -171,6 +184,7 @@ export function useVocMutations() {
       mutationFn: (payload: Record<string, unknown>) => api.post("/api/import", payload),
       onSuccess: () => {
         qc.invalidateQueries({ queryKey: ["records"] });
+        qc.invalidateQueries({ queryKey: ["voc-records"] });
         qc.invalidateQueries({ queryKey: ["voc-summary"] });
       },
     }),
@@ -327,6 +341,93 @@ export function useListingAutomap() {
     mutationFn: ({ brandId, channel }: { brandId: string; channel?: string }) =>
       api.post<AutomapResult>(`/api/sales/listings/automap${qs({ brand_id: brandId, channel: channel === "all" ? undefined : channel })}`),
     onSuccess: () => invalidateSales(qc),
+  });
+}
+
+// ---------------------------------------------------------------- hiring
+export function useHiringSummary(brandId?: string, platform?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["hiring-summary", brandId, platform, rp],
+    queryFn: () => api.get<any>(`/api/hiring/summary${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
+    enabled: !!brandId,
+  });
+}
+
+export function useJobPostings(brandId?: string, platform?: string, status?: string) {
+  return useQuery({
+    queryKey: ["job-postings", brandId, platform, status],
+    queryFn: () =>
+      api
+        .get<{ postings: import("./api").JobPosting[] }>(
+          `/api/hiring/postings${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, status: status === "all" ? undefined : status })}`,
+        )
+        .then((d) => d.postings),
+    enabled: !!brandId,
+  });
+}
+
+export function usePostingHistory(postingId?: string) {
+  return useQuery({
+    queryKey: ["job-posting-history", postingId],
+    queryFn: () => api.get<any>(`/api/hiring/postings/${postingId}/history`),
+    enabled: !!postingId,
+  });
+}
+
+function invalidateHiring(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["hiring-summary"] });
+  qc.invalidateQueries({ queryKey: ["job-postings"] });
+}
+
+export function useHiringSync() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ brandId, linkId }: { brandId: string; linkId?: string }) =>
+      api.post<any>(`/api/hiring/sync${qs({ brand_id: brandId, link_id: linkId })}`),
+    onSuccess: () => invalidateHiring(qc),
+  });
+}
+
+export function usePostingMutations() {
+  const qc = useQueryClient();
+  return {
+    remove: useMutation({ mutationFn: (id: string) => api.del(`/api/hiring/postings/${id}`), onSuccess: () => invalidateHiring(qc) }),
+  };
+}
+
+export function useEmployees(brandId?: string) {
+  return useQuery({
+    queryKey: ["li-employees", brandId],
+    queryFn: () => api.get<{ employees: import("./api").LinkedInEmployee[] }>(`/api/hiring/employees${qs({ brand_id: brandId })}`).then((d) => d.employees),
+    enabled: !!brandId,
+  });
+}
+
+export function useEmployeesSync() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ brandId, linkId }: { brandId: string; linkId?: string }) =>
+      api.post<any>(`/api/hiring/employees/sync${qs({ brand_id: brandId, link_id: linkId })}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["li-employees"] });
+      qc.invalidateQueries({ queryKey: ["li-activities"] });
+    },
+  });
+}
+
+export function useActivities(brandId?: string, profileId?: string) {
+  return useQuery({
+    queryKey: ["li-activities", brandId, profileId],
+    queryFn: () => api.get<{ activities: import("./api").LinkedInActivity[] }>(`/api/hiring/activities${qs({ brand_id: brandId, profile_id: profileId })}`).then((d) => d.activities),
+    enabled: !!brandId,
+  });
+}
+
+export function useAnalyzeJd() {
+  return useMutation({
+    mutationFn: ({ brandId, range }: { brandId: string; range?: TimeRange }) =>
+      api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, ...rangeParams(range) })}`),
   });
 }
 

@@ -1,5 +1,6 @@
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import {
+  Briefcase,
   ChevronDown,
   Globe,
   LayoutDashboard,
@@ -14,11 +15,12 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useBrands, useSaveSettings, useSettings, useTheme } from "../lib/hooks";
-import { Badge, Button, Field, Input, Modal } from "./ui";
+import { Badge, Button, Field, Input, Modal, Textarea } from "./ui";
 
 const NAV = [
   { to: "overview", label: "经营总览", icon: LayoutDashboard },
   { to: "sales", label: "销售监控", icon: ShoppingCart },
+  { to: "hiring", label: "招聘监控", icon: Briefcase },
   { to: "marketing", label: "营销监控", icon: Megaphone },
   { to: "voice", label: "用户之声", icon: MessageSquare },
   { to: "web", label: "网页快照", icon: Globe },
@@ -89,7 +91,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState("");
   useEffect(() => {
     if (open && data) {
-      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "" });
+      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" });
       setSaved(false);
       setError("");
     }
@@ -141,6 +143,26 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
             <Input type="password" value={form.ensembledata_token || ""} onChange={(e) => set("ensembledata_token", e.target.value)} placeholder="配置后 Instagram / TikTok / X 红人内容经第三方采集" />
           </Field>
         </div>
+
+        <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
+            Boss 直聘 Cookie：{data?.boss_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（招聘监控将被反爬拦截）</Badge>}
+            {data?.boss_configured && data?.boss_key_hint && <span>当前：{data.boss_key_hint}</span>}
+          </div>
+          <Field label={data?.boss_configured ? "Cookie（已保存，留空表示不修改）" : "Cookie（登录 zhipin.com 后从浏览器复制）"}>
+            <Textarea rows={2} value={form.boss_cookie || ""} onChange={(e) => set("boss_cookie", e.target.value)} placeholder="name=value; name2=value2 …（会话失效需重新粘贴）" />
+          </Field>
+        </div>
+
+        <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
+            LinkedIn Cookie：{data?.linkedin_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（职位/员工动态不可采）</Badge>}
+            {data?.linkedin_configured && data?.linkedin_key_hint && <span>当前：{data.linkedin_key_hint}</span>}
+          </div>
+          <Field label={data?.linkedin_configured ? "Cookie（已保存，留空表示不修改）" : "Cookie（登录 linkedin.com 后从浏览器复制）"} hint="抓取 LinkedIn 个人/员工动态可能违反其服务条款，请自行评估合规与账号风险，仅作最佳努力采集。">
+            <Textarea rows={2} value={form.linkedin_cookie || ""} onChange={(e) => set("linkedin_cookie", e.target.value)} placeholder="li_at=…; JSESSIONID=… （会话失效需重新粘贴）" />
+          </Field>
+        </div>
         {error && <div className="text-[13px] p-2 rounded-md" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>{error}</div>}
         <div className="flex justify-end items-center gap-2 pt-1">
           {saved && <span className="text-[13px]" style={{ color: "var(--accent)" }}>已保存 ✓</span>}
@@ -155,9 +177,11 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               if (!payload.sellersprite_secret_key) delete payload.sellersprite_secret_key;
               if (!payload.ensembledata_token) delete payload.ensembledata_token;
               if (!payload.youtube_api_key) delete payload.youtube_api_key;
+              if (!payload.boss_cookie) delete payload.boss_cookie;
+              if (!payload.linkedin_cookie) delete payload.linkedin_cookie;
               try {
                 await save.mutateAsync(payload);
-                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "" }));
+                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", ensembledata_token: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" }));
                 setSaved(true);
               } catch (e: any) {
                 setError(e?.message || "保存失败");

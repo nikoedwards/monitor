@@ -4,6 +4,7 @@ import { Spinner } from "./components/ui";
 import { useBrands } from "./lib/hooks";
 import Overview from "./features/Overview";
 import Sales from "./features/Sales";
+import Hiring from "./features/Hiring";
 import Marketing from "./features/Marketing";
 import Creators from "./features/Creators";
 import Voice from "./features/Voice";
@@ -27,6 +28,7 @@ export default function App() {
       <Route path="/compare" element={<Shell><Compare /></Shell>} />
       <Route path="/brand/:brandId/overview" element={<Shell><Overview /></Shell>} />
       <Route path="/brand/:brandId/sales" element={<Shell><Sales /></Shell>} />
+      <Route path="/brand/:brandId/hiring" element={<Shell><Hiring /></Shell>} />
       <Route path="/brand/:brandId/marketing" element={<Shell><Marketing /></Shell>} />
       <Route path="/brand/:brandId/creators" element={<Shell><Creators /></Shell>} />
       <Route path="/brand/:brandId/voice" element={<Shell><Voice /></Shell>} />

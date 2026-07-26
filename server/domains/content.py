@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
-from ..nlp import VOC_ACTION_STATUSES, priority_for_records, team_for_records
+from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict
 from ..schemas import ImportIn, RecordIn, VocActionIn, VocActionUpdate
 from ..util import compact_key, new_id, utc_now
@@ -17,6 +18,26 @@ from .common import build_trend, get_conn, query_records, resolve_window
 router = APIRouter(prefix="/api", tags=["content"])
 
 _LEGACY_FIXED_PUBLICATION_TRAFFIC = {25_000, 80_000, 220_000, 500_000, 1_500_000, 5_000_000}
+
+VOC_SOURCE_CATALOG = (
+    {"key": "sales_reviews", "label": "销售渠道评论", "description": "Amazon、独立站等销售平台的商品评论"},
+    {"key": "marketing_videos", "label": "营销视频", "description": "品牌官方账号发布的 YouTube、TikTok 等视频内容"},
+    {"key": "social_posts_comments", "label": "社交帖子与评论", "description": "社交媒体、社区和论坛中的帖子、回复与评论"},
+    {"key": "creator_comments", "label": "红人视频与评论", "description": "红人达人发布的视频、帖子及其评论反馈"},
+    {"key": "app_reviews", "label": "应用商店评论", "description": "App Store 等应用市场的用户评价"},
+    {"key": "manual_feedback", "label": "手动反馈", "description": "人工录入或 CSV 导入的客服、访谈与线下反馈"},
+)
+VOC_SOURCE_KEYS = {item["key"] for item in VOC_SOURCE_CATALOG}
+_VIDEO_PLATFORMS = {"youtube", "tiktok", "douyin", "bilibili", "vimeo", "kuaishou"}
+_SALES_REVIEW_CHANNELS = {"amazon", "dtc", "other_ecom", "ecommerce", "sales", "retail"}
+
+_P0_RULES = (
+    ("safety", "设备或人身安全风险", "product_team", ("起火", "爆炸", "触电", "人身安全", "caught fire", "exploded", "electric shock", "burn hazard")),
+    ("privacy_security", "隐私或账号安全风险", "experience_team", ("隐私泄露", "信息泄露", "账号被盗", "数据泄露", "privacy breach", "data breach", "account hacked")),
+    ("data_loss", "用户数据不可逆丢失", "product_team", ("数据丢失", "录音丢失", "文件全部丢失", "data loss", "lost all recordings", "lost all my data")),
+    ("billing", "未授权或重复扣款", "support_team", ("未授权扣款", "重复扣款", "恶意扣费", "unauthorized charge", "charged twice", "double charged")),
+    ("outage", "大范围服务不可用", "experience_team", ("全局故障", "服务全面中断", "所有人都无法使用", "global outage", "service down for everyone", "system-wide outage")),
+)
 
 
 # ------------------------------------------------------------------- records
@@ -74,6 +95,128 @@ def import_records(payload: ImportIn, conn: sqlite3.Connection = Depends(get_con
 
 
 # --------------------------------------------------------------- VoC summary
+def _voice_source_key(record: dict) -> str | None:
+    dimension = (record.get("dimension") or "").lower()
+    channel = (record.get("channel") or "").lower()
+    source_id = (record.get("source_id") or "").lower()
+    platform = (record.get("platform") or "").lower()
+
+    if dimension == "voc":
+        if source_id in {"manual", "manual_csv"}:
+            return "manual_feedback"
+        if channel == "app" or "app_store" in source_id or platform in {"app_store", "google_play"}:
+            return "app_reviews"
+        if channel in _SALES_REVIEW_CHANNELS or source_id in {"amazon_reviews", "shopify_reviews", "sales_reviews"}:
+            return "sales_reviews"
+        return "manual_feedback"
+    if dimension != "marketing":
+        return None
+    if channel == "creators":
+        return "creator_comments"
+    if channel == "community":
+        return "social_posts_comments"
+    if channel == "social":
+        metrics = record.get("metrics") or {}
+        content_type = str(metrics.get("content_type") or metrics.get("media_type") or "").lower()
+        if platform in _VIDEO_PLATFORMS or content_type in {"video", "short_video", "reel"}:
+            return "marketing_videos"
+        return "social_posts_comments"
+    return None
+
+
+def _parse_voc_sources(value: str | None) -> set[str]:
+    if not value:
+        return set(VOC_SOURCE_KEYS)
+    selected = {part.strip() for part in value.split(",") if part.strip()} & VOC_SOURCE_KEYS
+    return selected or set(VOC_SOURCE_KEYS)
+
+
+def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: str, end: str, q: str | None = None) -> list[dict]:
+    base = {"brand_id": brand_id, "start_date": start, "end_date": end, "q": q}
+    candidates: list[dict] = []
+    for filters in (
+        {**base, "dimension": "voc"},
+        {**base, "dimension": "marketing", "channel": "social"},
+        {**base, "dimension": "marketing", "channel": "community"},
+        {**base, "dimension": "marketing", "channel": "creators"},
+    ):
+        candidates.extend(query_records(conn, filters, limit=1000))
+
+    records: list[dict] = []
+    seen: set[str] = set()
+    for record in candidates:
+        source_key = _voice_source_key(record)
+        record_id = str(record.get("id") or "")
+        if not source_key or (record_id and record_id in seen):
+            continue
+        if record_id:
+            seen.add(record_id)
+        records.append({**record, "voice_source": source_key})
+    return sorted(records, key=lambda item: item.get("occurred_at") or "", reverse=True)
+
+
+def _source_catalog(records: list[dict]) -> list[dict]:
+    counts = Counter(record.get("voice_source") for record in records)
+    return [{**item, "count": counts.get(item["key"], 0)} for item in VOC_SOURCE_CATALOG]
+
+
+def _representative_feedback(records: list[dict]) -> str:
+    record = next((item for item in records if item.get("sentiment") == "negative"), records[0] if records else {})
+    text = (record.get("body") or record.get("title") or "").strip()
+    return text if len(text) <= 160 else f"{text[:157]}..."
+
+
+def _p0_match(record: dict) -> tuple[str, str, str] | None:
+    if record.get("sentiment") != "negative":
+        return None
+    text = f"{record.get('title') or ''} {record.get('body') or ''}".lower()
+    for key, label, team, terms in _P0_RULES:
+        for term in terms:
+            lowered = term.lower()
+            matched = bool(re.search(rf"\b{re.escape(lowered)}\b", text)) if lowered.isascii() else lowered in text
+            if matched:
+                return key, label, team
+    return None
+
+
+def _p0_summary(records: list[dict]) -> dict:
+    grouped: dict[str, dict] = {}
+    for record in records:
+        matched = _p0_match(record)
+        if not matched:
+            continue
+        key, label, team = matched
+        grouped.setdefault(key, {"key": key, "label": label, "owner_team": team, "records": []})["records"].append(record)
+    issues = []
+    for group in grouped.values():
+        items = group.pop("records")
+        first = items[0]
+        issues.append({
+            **group,
+            "count": len(items),
+            "representative": _representative_feedback(items),
+            "record_id": first.get("id"),
+            "url": first.get("url"),
+            "latest_at": first.get("occurred_at"),
+            "source_keys": list(dict.fromkeys(item.get("voice_source") for item in items if item.get("voice_source"))),
+        })
+    issues.sort(key=lambda item: (item["count"], item.get("latest_at") or ""), reverse=True)
+    return {"total": sum(item["count"] for item in issues), "issue_count": len(issues), "issues": issues}
+
+
+def _issue_priority(records: list[dict]) -> str:
+    if any(_p0_match(record) for record in records):
+        return "urgent"
+    negative = sum(1 for record in records if record.get("sentiment") == "negative")
+    complaints = sum(1 for record in records if record.get("intent") == "complaint")
+    rate = negative / len(records) if records else 0.0
+    if negative >= 5 or complaints >= 5 or (negative >= 3 and rate >= 0.5):
+        return "high"
+    if negative >= 2 or complaints >= 2:
+        return "medium"
+    return "low"
+
+
 def _topic_breakdown(records: list[dict]) -> list[dict]:
     topic_records: dict[str, list[dict]] = {}
     for record in records:
@@ -82,24 +225,31 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
     out = []
     for topic, items in topic_records.items():
         negative = sum(1 for r in items if r.get("sentiment") == "negative")
+        if not negative:
+            continue
+        source_counts = Counter(item.get("voice_source") for item in items if item.get("voice_source"))
         out.append({
             "topic": topic,
             "total": len(items),
             "negative": negative,
             "negative_rate": round(negative / len(items), 4) if items else 0.0,
             "suggested_team": team_for_records(items, topic),
+            "priority": _issue_priority(items),
+            "representative": _representative_feedback(items),
+            "source_keys": [key for key, _ in source_counts.most_common(3)],
+            "latest_at": max((item.get("occurred_at") or "" for item in items), default=""),
         })
-    return sorted(out, key=lambda item: item["total"], reverse=True)[:10]
+    return sorted(out, key=lambda item: (item["negative"], item["negative_rate"], item["total"]), reverse=True)[:10]
 
 
 def _channel_breakdown(records: list[dict]) -> list[dict]:
-    counts = Counter(r.get("source_id") or "unknown" for r in records)
-    negatives = Counter(r.get("source_id") or "unknown" for r in records if r.get("sentiment") == "negative")
+    counts = Counter(r.get("voice_source") or "unknown" for r in records)
+    negatives = Counter(r.get("voice_source") or "unknown" for r in records if r.get("sentiment") == "negative")
     out = []
-    for source_id, total in counts.items():
-        negative = negatives.get(source_id, 0)
+    for source_key, total in counts.items():
+        negative = negatives.get(source_key, 0)
         out.append({
-            "source_id": source_id,
+            "source_key": source_key,
             "total": total,
             "negative": negative,
             "negative_rate": round(negative / total, 4) if total else 0.0,
@@ -116,6 +266,7 @@ def _build_alerts(records: list[dict]) -> list[dict]:
                 "type": "topic",
                 "label": f"主题「{topic['topic']}」负向声量 {topic['negative']} 条",
                 "severity": "high" if topic["negative_rate"] >= 0.4 else "medium",
+                "priority": topic["priority"],
                 "suggested_team": topic["suggested_team"],
             })
     products = Counter(r.get("product_id") for r in records if r.get("sentiment") == "negative" and r.get("product_id"))
@@ -138,10 +289,13 @@ def voc_summary(
     start_date: str | None = None,
     end_date: str | None = None,
     q: str | None = None,
+    sources: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     start, end = resolve_window(days, start_date, end_date)
-    records = query_records(conn, {"brand_id": brand_id, "dimension": "voc", "start_date": start, "end_date": end, "q": q}, limit=1000)
+    all_records = _load_voice_records(conn, brand_id, start, end, q)
+    selected_sources = _parse_voc_sources(sources)
+    records = [record for record in all_records if record.get("voice_source") in selected_sources]
     total = len(records)
     negative = sum(1 for r in records if r.get("sentiment") == "negative")
     positive = sum(1 for r in records if r.get("sentiment") == "positive")
@@ -160,8 +314,11 @@ def voc_summary(
         },
         "trend": build_trend(records, start, end),
         "channels": _channel_breakdown(records),
+        "source_catalog": _source_catalog(all_records),
+        "selected_sources": sorted(selected_sources),
         "topics": _topic_breakdown(records),
         "alerts": _build_alerts(records),
+        "p0": _p0_summary(records),
         "actions": {
             "total": len(actions),
             "open": len(actions) - closed,
@@ -169,6 +326,27 @@ def voc_summary(
             "closure_rate": round(closed / len(actions), 4) if actions else 0.0,
         },
     }
+
+
+@router.get("/voc/records")
+def voc_records(
+    brand_id: str | None = None,
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    q: str | None = None,
+    sources: str | None = None,
+    limit: int = 40,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    start, end = resolve_window(days, start_date, end_date)
+    selected_sources = _parse_voc_sources(sources)
+    records = [
+        record
+        for record in _load_voice_records(conn, brand_id, start, end, q)
+        if record.get("voice_source") in selected_sources
+    ]
+    return {"records": records[:max(1, min(limit, 200))]}
 
 
 # --------------------------------------------------------------- VoC actions

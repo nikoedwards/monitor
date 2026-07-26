@@ -4,7 +4,7 @@ import { SimpleLine, Bars } from "../components/charts";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { MonitorStatus } from "../components/MonitorStatus";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { useListingAutomap, useListingHistory, useListingMutations, useProducts, useSalesListings, useSalesMetrics, useSalesMutations, useSalesSummary, useSalesSync, useSettings } from "../lib/hooks";
+import { useListingAutomap, useListingHistory, useListingMutations, useProducts, useSalesListings, useSalesMetrics, useSalesMutations, useSalesSummary, useSettings } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
 import type { Product, SalesListing } from "../lib/api";
 import { CHANNEL_LABEL, fmtDate, fmtNum } from "../lib/format";
@@ -28,7 +28,6 @@ export default function Sales() {
   const [range] = useTimeRange();
   const { data: products = [] } = useProducts(brandId);
   const { data: summary, isLoading } = useSalesSummary(brandId, productId || undefined, range);
-  const sync = useSalesSync();
 
   if (isLoading || !summary) return <Spinner />;
 
@@ -41,7 +40,6 @@ export default function Sales() {
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
             <MonitorStatus brandId={brandId} dimension="sales" />
-            <Button onClick={() => brandId && sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "同步中…" : "立即同步"}</Button>
             <Button variant="primary" onClick={() => setEntryOpen(true)}>+ 录入销售数据</Button>
           </div>
         }

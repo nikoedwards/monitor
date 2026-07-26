@@ -6,3 +6,10 @@ Pillow>=10.0
 #   pip install playwright && python -m playwright install chromium
 # Without Playwright the snapshot engine falls back to an installed
 # Edge/Chrome browser, then to an SVG text snapshot.
+#
+# Hiring monitor (招聘监控) — Boss 直聘 / LinkedIn scraping requires Playwright
+# to render logged-in, JS-heavy pages with a session cookie:
+#   pip install playwright && python -m playwright install chromium
+# Configure the Boss/LinkedIn session cookies in the in-app 设置 dialog.
+# Without Playwright (or without valid cookies) the hiring collectors degrade
+# to a best-effort HTTP fetch and will usually be blocked by anti-bot controls.

@@ -326,6 +326,95 @@ CREATE TABLE IF NOT EXISTS capture_jobs (
   finished_at TEXT
 );
 
+-- Hiring intelligence: job posting registry (one row per discovered JD).
+CREATE TABLE IF NOT EXISTS job_postings (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT NOT NULL,
+  link_id TEXT,                       -- parent hiring source in `links` (dimension='hiring')
+  platform TEXT NOT NULL,            -- boss | linkedin
+  external_id TEXT,                  -- platform job id when known
+  url TEXT,
+  canonical_url TEXT,
+  title TEXT,
+  department TEXT,
+  city TEXT,
+  jd_text TEXT,
+  jd_hash TEXT,
+  business_tags_json TEXT,           -- LLM-derived business direction tags
+  status TEXT NOT NULL DEFAULT 'open',  -- open | closed
+  posted_at TEXT,
+  refreshed_at TEXT,
+  first_seen TEXT,
+  last_seen TEXT,
+  closed_at TEXT,
+  last_change_at TEXT,
+  last_status TEXT,
+  last_error TEXT,
+  config_json TEXT,                  -- holds fingerprint for change detection
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Hiring time-series: one snapshot per posting per day (open/closed + JD change).
+CREATE TABLE IF NOT EXISTS job_snapshots (
+  id TEXT PRIMARY KEY,
+  posting_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  link_id TEXT,
+  snapshot_date TEXT NOT NULL,
+  platform TEXT,
+  status TEXT,                       -- open | closed
+  is_open INTEGER,
+  title TEXT,
+  department TEXT,
+  city TEXT,
+  posted_at TEXT,
+  refreshed_at TEXT,
+  applicant_signal TEXT,
+  change_score REAL,
+  changes_json TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- LinkedIn employee roster for a target company (brand).
+CREATE TABLE IF NOT EXISTS linkedin_profiles (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT NOT NULL,
+  link_id TEXT,
+  external_id TEXT,
+  name TEXT,
+  headline TEXT,
+  title TEXT,
+  profile_url TEXT,
+  canonical_url TEXT,
+  avatar_url TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  monitor INTEGER NOT NULL DEFAULT 1,
+  last_activity_at TEXT,
+  first_seen TEXT,
+  last_seen TEXT,
+  last_status TEXT,
+  last_error TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- LinkedIn employee activity feed (posts / comments / job changes).
+CREATE TABLE IF NOT EXISTS linkedin_activities (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  external_id TEXT,
+  activity_type TEXT NOT NULL DEFAULT 'post',  -- post | comment | reaction | job_change
+  text TEXT,
+  url TEXT,
+  posted_at TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+
 """
 
 # Indexes are created after additive migrations so they can reference
@@ -346,6 +435,13 @@ CREATE INDEX IF NOT EXISTS idx_web_snapshots_monitor ON web_snapshots(monitor_id
 CREATE INDEX IF NOT EXISTS idx_web_snapshot_analyses_range ON web_snapshot_analyses(brand_id, monitor_id, start_date, end_date);
 CREATE INDEX IF NOT EXISTS idx_voc_actions_status ON voc_actions(status, brand_id);
 CREATE INDEX IF NOT EXISTS idx_creators_brand ON creators(brand_id, platform);
+CREATE INDEX IF NOT EXISTS idx_job_postings_brand ON job_postings(brand_id, platform);
+CREATE INDEX IF NOT EXISTS idx_job_postings_link ON job_postings(link_id);
+CREATE INDEX IF NOT EXISTS idx_job_snapshots_brand ON job_snapshots(brand_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_job_snapshots_posting ON job_snapshots(posting_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_li_profiles_brand ON linkedin_profiles(brand_id);
+CREATE INDEX IF NOT EXISTS idx_li_activities_brand ON linkedin_activities(brand_id, posted_at);
+CREATE INDEX IF NOT EXISTS idx_li_activities_profile ON linkedin_activities(profile_id, posted_at);
 """
 
 
