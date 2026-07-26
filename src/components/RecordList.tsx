@@ -20,7 +20,20 @@ const COLLECTION_SOURCE_LABEL: Record<string, string> = {
   meta_ads: "Meta 广告采集",
   youtube_search: "YouTube 搜索采集",
   social_accounts: "官方社媒账号采集",
+  app_store_reviews: "App Store 评论采集",
+  instagram_listening: "Instagram 红人采集",
+  tiktok_listening: "TikTok 红人采集",
+  x_search: "X 红人采集",
   manual_csv: "手动导入",
+};
+
+const VOICE_SOURCE_LABEL: Record<string, string> = {
+  sales_reviews: "销售渠道评论",
+  marketing_videos: "营销视频",
+  social_posts_comments: "社交帖子与评论",
+  creator_comments: "红人视频与评论",
+  app_reviews: "应用商店评论",
+  manual_feedback: "手动反馈",
 };
 
 function collectionSourceLabel(sourceId?: string): string | undefined {
@@ -200,6 +213,7 @@ export function RecordList({ records, emptyHint }: { records: RecordItem[]; empt
               <div className="flex items-center gap-2 flex-wrap mb-1">
                 {isReply && <Badge tone="accent">回复</Badge>}
                 <SentimentBadge record={r} />
+                {r.voice_source && <Badge tone="accent">来源：{VOICE_SOURCE_LABEL[r.voice_source] || r.voice_source}</Badge>}
                 {r.platform && <Badge tone="neutral">{r.platform}</Badge>}
                 {r.channel && <Badge tone="neutral">{CHANNEL_LABEL[r.channel] || r.channel}</Badge>}
                 {collectionSourceLabel(r.source_id) && (

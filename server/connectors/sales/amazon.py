@@ -7,6 +7,7 @@ best-effort and a listing may come back ``partial`` / ``blocked`` rather than fa
 """
 from __future__ import annotations
 
+import html as html_lib
 import re
 import sqlite3
 from urllib.parse import parse_qs, urlparse
@@ -17,10 +18,29 @@ from .base import ListingRef, ListingSnapshot, SalesProvider
 
 _ASIN_RE = re.compile(r'data-asin="([A-Z0-9]{10})"')
 _DP_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
-_PRICE_RE = re.compile(r"\$\s?([0-9][0-9,]*\.?[0-9]{0,2})")
 _RATING_RE = re.compile(r"([0-5](?:\.[0-9])?)\s+out of\s+5", re.I)
 _REVIEWS_RE = re.compile(r"([0-9][0-9,]*)\s+(?:global ratings|ratings|reviews)", re.I)
-_BSR_RE = re.compile(r"Best Sellers Rank[^#]*#\s?([0-9][0-9,]*)", re.I)
+_BSR_RE = re.compile(r"(?:Best Sellers Rank|Best Seller Rank)[\s\S]{0,500}?#\s*([0-9][0-9,]*)", re.I)
+_PRODUCT_TITLE_RE = re.compile(r'id=["\']productTitle["\'][^>]*>([\s\S]*?)</', re.I)
+_ACR_RATING_RE = re.compile(r'id=["\']acrPopover["\'][^>]*(?:title|aria-label)=["\']([^"\']+)', re.I)
+_ACR_REVIEWS_RE = re.compile(r'id=["\']acrCustomerReviewText["\'][^>]*>([\s\S]*?)</', re.I)
+_ACR_REVIEWS_LABEL_RE = re.compile(r'id=["\']acrCustomerReviewText["\'][^>]*aria-label=["\']([^"\']+)', re.I)
+_PRICE_BLOCK_RE = re.compile(
+    r'id=["\'](?:corePrice[^"\']*|apex_desktop|price_inside_buybox|newBuyBoxPrice)["\'][\s\S]{0,2500}',
+    re.I,
+)
+_PRICE_VALUE_RE = re.compile(r'(?:a-offscreen[^>]*>|priceToPay[^>]*>[\s\S]{0,300}?)(?:US)?\$\s*([0-9][0-9,]*\.?[0-9]{0,2})', re.I)
+_JSON_PRICE_RE = re.compile(r'"price"\s*:\s*"?([0-9][0-9,]*\.?[0-9]{0,2})"?', re.I)
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Cookie": "lc-main=en_US; i18n-prefs=USD",
+}
 
 # Main-image extraction from a /dp/ page (several layouts / fallbacks).
 _IMG_DYNAMIC_RE = re.compile(r'id="landingImage"[^>]*\bdata-a-dynamic-image="([^"]+)"')
@@ -96,6 +116,29 @@ def _to_float(value: str | None) -> float | None:
         return None
 
 
+def _strip_html(value: str | None) -> str:
+    if not value:
+        return ""
+    return clean_text(html_lib.unescape(re.sub(r"<[^>]+>", " ", value)))
+
+
+def _extract_price(html: str) -> float | None:
+    """Read a product offer price, never an arbitrary dollar amount on the page.
+
+    Amazon pages contain coupons, gift-card promotions and accessory prices.  The
+    old page-wide ``$...`` regex commonly turned those into a fake USD 10 price.
+    """
+    for block in _PRICE_BLOCK_RE.findall(html):
+        match = _PRICE_VALUE_RE.search(block)
+        if match:
+            return _to_float(match.group(1))
+    for script in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>', html, re.I):
+        match = _JSON_PRICE_RE.search(script)
+        if match:
+            return _to_float(match.group(1))
+    return None
+
+
 class ScrapeAmazonProvider(SalesProvider):
     name = "amazon_scrape"
 
@@ -122,7 +165,7 @@ class ScrapeAmazonProvider(SalesProvider):
         for page in range(1, self.max_pages + 1):
             page_url = url if page == 1 else self._with_page(url, page)
             try:
-                fetched = fetch_page(page_url)
+                fetched = fetch_page(page_url, headers=_BROWSER_HEADERS)
             except FetchError:
                 break
             html = fetched.get("html") or ""
@@ -153,7 +196,7 @@ class ScrapeAmazonProvider(SalesProvider):
         url = listing.get("url") or ""
         snap = ListingSnapshot(currency="USD")
         try:
-            page = fetch_page(url)
+            page = fetch_page(url, headers=_BROWSER_HEADERS)
         except FetchError as exc:
             snap.status = "error"
             snap.error = str(exc)[:300]
@@ -162,7 +205,10 @@ class ScrapeAmazonProvider(SalesProvider):
         text = page.get("text") or ""
         html = page.get("html") or ""
         meta = page.get("meta") or {}
-        title = clean_text(meta.get("og:title") or page.get("title"))
+        product_title = _PRODUCT_TITLE_RE.search(html)
+        title = _strip_html(product_title.group(1)) if product_title else clean_text(meta.get("og:title") or page.get("title"))
+        if title.lower() in {"amazon.com", "amazon.co.uk", "amazon.ca"}:
+            title = ""
         snap.title = title
         snap.sku = listing.get("asin") or extract_asin(url)
         # Real main image from the page; when blocked/empty the runner keeps the
@@ -175,19 +221,21 @@ class ScrapeAmazonProvider(SalesProvider):
             snap.error = "Amazon anti-bot page returned (scrape blocked)."
             return snap
 
-        rating = _RATING_RE.search(text)
+        rating_attr = _ACR_RATING_RE.search(html)
+        rating = _RATING_RE.search(rating_attr.group(1) if rating_attr else text)
         if rating:
             snap.rating = _to_float(rating.group(1))
-        reviews = _REVIEWS_RE.search(text)
+        reviews_label = _ACR_REVIEWS_LABEL_RE.search(html)
+        reviews_node = _ACR_REVIEWS_RE.search(html)
+        reviews_source = reviews_label.group(1) if reviews_label else (_strip_html(reviews_node.group(1)) if reviews_node else text)
+        reviews = _REVIEWS_RE.search(reviews_source)
         if reviews:
             snap.review_count = _to_int(reviews.group(1))
         bsr = _BSR_RE.search(text)
         if bsr:
             snap.bsr = _to_int(bsr.group(1))
             snap.rank = snap.bsr
-        price = _PRICE_RE.search(text)
-        if price:
-            snap.price = _to_float(price.group(1))
+        snap.price = _extract_price(html)
         if "currently unavailable" in low or "out of stock" in low:
             snap.in_stock = False
         elif "in stock" in low or snap.price is not None:

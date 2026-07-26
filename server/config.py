@@ -32,6 +32,8 @@ CREDENTIALS = {
     or os.environ.get("META_ACCESS_TOKEN", ""),
     "keepa_api_key": os.environ.get("KEEPA_API_KEY", ""),
     "sellersprite_secret_key": os.environ.get("SELLERSPRITE_SECRET_KEY", ""),
+    "boss_cookie": os.environ.get("BOSS_COOKIE", ""),
+    "linkedin_cookie": os.environ.get("LINKEDIN_COOKIE", ""),
 }
 
 

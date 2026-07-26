@@ -88,6 +88,39 @@ def _run_due_sales() -> None:
             continue
 
 
+def _run_due_hiring() -> None:
+    from .connectors.hiring.runner import run_hiring_collection, run_linkedin_people_collection
+
+    with db() as conn:
+        brands = [dict(r) for r in conn.execute("SELECT * FROM brands").fetchall()]
+    for brand in brands:
+        with db() as conn:
+            due = conn.execute(
+                """
+                SELECT platform FROM links
+                WHERE brand_id = ? AND dimension = 'hiring' AND status = 'active'
+                      AND url IS NOT NULL AND url != ''
+                      AND (last_collect_at IS NULL OR substr(last_collect_at, 1, 10) < ?)
+                """,
+                (brand["id"], today()),
+            ).fetchall()
+        if not due:
+            continue
+        platforms = {row["platform"] for row in due}
+        if platforms - {"linkedin_people"}:
+            try:
+                with db() as conn:
+                    run_hiring_collection(conn, brand)
+            except Exception:
+                logger.exception("Hiring collection failed for %s", brand.get("id"))
+        if "linkedin_people" in platforms:
+            try:
+                with db() as conn:
+                    run_linkedin_people_collection(conn, brand)
+            except Exception:
+                logger.exception("LinkedIn people collection failed for %s", brand.get("id"))
+
+
 def _run_due_web_snapshots() -> None:
     from datetime import datetime, timezone
 
@@ -118,6 +151,7 @@ def _collection_loop() -> None:
         try:
             _run_due_collections()
             _run_due_sales()
+            _run_due_hiring()
         except Exception:
             logger.exception("Collection scheduler cycle failed")
         time.sleep(max(60, SCHEDULER_SECONDS))

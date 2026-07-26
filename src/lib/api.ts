@@ -109,6 +109,7 @@ export interface RecordItem {
   topics: string[];
   metrics: Record<string, unknown>;
   raw?: Record<string, unknown>;
+  voice_source?: string;
 }
 
 export interface Source {
@@ -176,6 +177,77 @@ export interface SalesListing {
   has_change: boolean;
   data_points: number;
   latest?: SalesMetric | null;
+}
+
+export interface JobSnapshotItem {
+  id: string;
+  posting_id: string;
+  snapshot_date: string;
+  platform?: string;
+  status?: string;
+  is_open?: boolean | null;
+  title?: string;
+  department?: string;
+  city?: string;
+  posted_at?: string;
+  applicant_signal?: string;
+  change_score?: number;
+  changes?: { field: string; from?: unknown; to?: unknown }[];
+}
+
+export interface JobPosting {
+  id: string;
+  brand_id: string;
+  link_id?: string;
+  platform: string;
+  external_id?: string;
+  url?: string;
+  title?: string;
+  department?: string;
+  city?: string;
+  jd_text?: string;
+  status: string;
+  posted_at?: string;
+  refreshed_at?: string;
+  first_seen?: string;
+  last_seen?: string;
+  closed_at?: string;
+  last_change_at?: string;
+  last_status?: string;
+  last_error?: string;
+  business_tags: string[];
+  has_change: boolean;
+  data_points: number;
+  latest?: JobSnapshotItem | null;
+}
+
+export interface LinkedInEmployee {
+  id: string;
+  brand_id: string;
+  name?: string;
+  headline?: string;
+  title?: string;
+  profile_url?: string;
+  avatar_url?: string;
+  status: string;
+  monitor: boolean;
+  last_activity_at?: string;
+  last_seen?: string;
+  activity_count: number;
+}
+
+export interface LinkedInActivity {
+  id: string;
+  profile_id: string;
+  brand_id: string;
+  activity_type: string;
+  text?: string;
+  url?: string;
+  posted_at?: string;
+  created_at: string;
+  profile_name?: string;
+  profile_title?: string;
+  profile_url?: string;
 }
 
 export interface VocAction {
@@ -307,6 +379,10 @@ export interface LlmSettings {
   ensembledata_key_hint?: string;
   youtube_configured?: boolean;
   youtube_key_hint?: string;
+  boss_configured?: boolean;
+  boss_key_hint?: string;
+  linkedin_configured?: boolean;
+  linkedin_key_hint?: string;
 }
 
 export interface CreatorRosterItem {

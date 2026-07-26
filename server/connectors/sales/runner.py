@@ -93,6 +93,26 @@ def _record_snapshot(conn: sqlite3.Connection, listing: dict, snap: ListingSnaps
         changes = _diff_fingerprint(old_fp, new_fp)
         change_score = round(len(changes) / max(1, len(new_fp)), 4)
 
+    # A blocked retry must not erase a useful snapshot captured earlier today.
+    existing_today = conn.execute(
+        "SELECT * FROM sales_metrics WHERE link_id = ? AND snapshot_date = ? LIMIT 1",
+        (listing["id"], day),
+    ).fetchone()
+    has_existing_data = existing_today and any(
+        existing_today[key] is not None
+        for key in ("price", "rating", "review_count", "rank", "bsr", "units_est")
+    )
+    if snap.status in ("blocked", "error") and has_existing_data:
+        conn.execute(
+            """
+            UPDATE sales_listings
+            SET last_seen = ?, last_status = ?, last_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, snap.status, snap.error, now, listing["id"]),
+        )
+        return {"changed": False, "status": snap.status, "preserved": True}
+
     # Dedupe: one metric row per listing per day.
     conn.execute(
         "DELETE FROM sales_metrics WHERE link_id = ? AND snapshot_date = ?",
