@@ -7,6 +7,7 @@
   "deploy": {
     "startCommand": "python -m server.app",
     "healthcheckPath": "/api/health",
+    "ipv6EgressEnabled": true,
     "restartPolicyType": "ON_FAILURE"
   }
 }
