@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean
@@ -41,6 +42,18 @@ VISUAL_CHANGE_THRESHOLD = 0.025
 TEXT_CHANGE_THRESHOLD = 0.15
 SNAPSHOT_RETRY_DELAYS_MINUTES = (10, 30, 60, 180)
 SNAPSHOT_RECOVERY_RETRY_MINUTES = 360
+SNAPSHOT_CIRCUIT_BREAKER_AFTER = 8
+SNAPSHOT_CIRCUIT_BREAKER_MINUTES = 1440
+_BROWSER_FALLBACK_NETWORK_ERRORS = (
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "remote end closed",
+    "temporarily unavailable",
+    "temporary failure in name resolution",
+    "name or service not known",
+)
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -152,11 +165,22 @@ def monitor_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
 
 
 def _snapshot_retry_at(failure_count: int, now: datetime | None = None) -> datetime:
-    if failure_count <= len(SNAPSHOT_RETRY_DELAYS_MINUTES):
+    if failure_count > SNAPSHOT_CIRCUIT_BREAKER_AFTER:
+        delay = SNAPSHOT_CIRCUIT_BREAKER_MINUTES
+    elif failure_count <= len(SNAPSHOT_RETRY_DELAYS_MINUTES):
         delay = SNAPSHOT_RETRY_DELAYS_MINUTES[max(0, failure_count - 1)]
     else:
         delay = SNAPSHOT_RECOVERY_RETRY_MINUTES
     return (now or datetime.now(timezone.utc)) + timedelta(minutes=delay)
+
+
+def _should_use_browser_after_fetch_error(error: str) -> bool:
+    normalized = (error or "").casefold()
+    match = re.search(r"http error\s+(\d{3})", normalized)
+    if match:
+        status = int(match.group(1))
+        return status in {401, 403, 407, 408, 425, 429} or status >= 500
+    return any(token in normalized for token in _BROWSER_FALLBACK_NETWORK_ERRORS)
 
 
 def _discover_pages(start_url: str, limit: int) -> list[str]:
@@ -186,7 +210,32 @@ def _discover_pages(start_url: str, limit: int) -> list[str]:
 
 
 def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
-    page = fetch_page(url)
+    prefetch_error = ""
+    try:
+        page = fetch_page(url)
+    except FetchError as exc:
+        prefetch_error = str(exc)
+        if not _should_use_browser_after_fetch_error(prefetch_error):
+            raise
+        page = {
+            "final_url": url,
+            "title": host_key(url) or url,
+            "text": "",
+            "html": "",
+        }
+    base_name = f"{monitor['id']}_{new_id()[:8]}"
+    screenshot, archive, capture_meta = capture_artifacts(
+        page.get("final_url") or url,
+        page.get("title", ""),
+        page.get("text", ""),
+        page.get("html", ""),
+        base_name,
+        prefetch_error=prefetch_error,
+    )
+    rendered_page = capture_meta.pop("page", {}) or {}
+    page["final_url"] = rendered_page.get("final_url") or page.get("final_url") or url
+    page["title"] = rendered_page.get("title") or page.get("title") or host_key(url) or url
+    page["text"] = (rendered_page.get("text") or page.get("text") or "").strip()
     key = canonical_url(page.get("final_url") or url)
     previous_row = conn.execute(
         "SELECT * FROM web_snapshots WHERE monitor_id = ? AND page_key = ? ORDER BY created_at DESC LIMIT 1",
@@ -199,14 +248,6 @@ def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
         "text_hash": text_hash(page.get("text", "")),
     }
     text_score, summary, changes = analyze_change(current, previous)
-    base_name = f"{monitor['id']}_{new_id()[:8]}"
-    screenshot, archive, capture_meta = capture_artifacts(
-        page.get("final_url") or url,
-        page.get("title", ""),
-        page.get("text", ""),
-        page.get("html", ""),
-        base_name,
-    )
     visual = compare_visuals(screenshot, previous.get("screenshot_path") if previous else None)
     if visual.get("available"):
         if visual.get("score", 0) >= VISUAL_CHANGE_THRESHOLD:

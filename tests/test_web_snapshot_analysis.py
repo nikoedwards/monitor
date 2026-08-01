@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import sqlite3
 import tempfile
@@ -16,13 +17,16 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw
 
 from server.domains.web import (
+    _capture_one,
     _period_stats,
+    _should_use_browser_after_fetch_error,
+    _snapshot_retry_at,
     capture_monitor,
     delete_snapshot,
     next_run_at,
-    _snapshot_retry_at,
     snapshot_to_dict,
 )
+from server.fetchers import FetchError
 from server.snapshot import (
     SnapshotCaptureError,
     _capture_error_reason,
@@ -193,6 +197,66 @@ class ArchiveFallbackTests(unittest.TestCase):
             subprocess_capture.assert_not_called()
             self.assertEqual(list(root.iterdir()), [])
 
+    def test_prefetch_failure_requires_a_validated_playwright_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch("server.snapshot._playwright_capture", return_value=None),
+                patch("server.snapshot._subprocess_capture") as subprocess_capture,
+            ):
+                with self.assertRaisesRegex(
+                    SnapshotCaptureError,
+                    "HTML 预抓失败.*HTTP Error 429.*Chromium 直接访问也失败",
+                ):
+                    capture_artifacts(
+                        "https://example.com",
+                        "Example",
+                        "",
+                        "",
+                        "capture",
+                        prefetch_error="HTTP Error 429: Too Many Requests",
+                    )
+            subprocess_capture.assert_not_called()
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_prefetch_failure_accepts_validated_playwright_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def rendered_capture(_url, png_path, html_path, _source_html):
+                Image.new("RGB", (100, 100), "white").save(png_path)
+                html_path.write_text("<html><body>Rendered page</body></html>", encoding="utf-8")
+                return {
+                    "method": "playwright",
+                    "archive": {"self_contained": True, "archive_size": html_path.stat().st_size},
+                    "page": {
+                        "final_url": "https://www.example.com/",
+                        "title": "Rendered title",
+                        "text": "Rendered page",
+                        "html": "<html><body>Rendered page</body></html>",
+                    },
+                }
+
+            with (
+                patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch("server.snapshot._playwright_capture", side_effect=rendered_capture),
+                patch("server.snapshot._subprocess_capture") as subprocess_capture,
+            ):
+                screenshot, archive, meta = capture_artifacts(
+                    "https://example.com",
+                    "Example",
+                    "",
+                    "",
+                    "capture",
+                    prefetch_error="HTTP Error 429: Too Many Requests",
+                )
+            self.assertEqual(screenshot, "capture.png")
+            self.assertEqual(archive, "capture.html")
+            self.assertTrue(meta["browser_prefetch_fallback"])
+            self.assertIn("HTTP Error 429", meta["prefetch_error"])
+            subprocess_capture.assert_not_called()
+
     def test_playwright_rejects_local_rate_limit_page_before_writing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -307,6 +371,9 @@ class ArchiveFallbackTests(unittest.TestCase):
             if not result or result.get("error"):
                 self.skipTest(f"Playwright Chromium unavailable: {result}")
             self.assertTrue((root / "page.png").stat().st_size > 0)
+            self.assertTrue(result["page"]["final_url"].startswith("data:text/html;charset=utf-8,"))
+            self.assertEqual(result["page"]["title"], "")
+            self.assertIn("Tall archived page", result["page"]["text"])
             content = (root / "page.html").read_text(encoding="utf-8")
             self.assertIn("data-monitor-archive-url", content)
             self.assertIn('data-monitor-archive-guard="5"', content)
@@ -367,6 +434,72 @@ class ArchiveFallbackTests(unittest.TestCase):
 
 
 class SnapshotSchedulingTests(unittest.TestCase):
+    def test_browser_fallback_only_handles_transient_or_blocking_http_errors(self):
+        self.assertTrue(_should_use_browser_after_fetch_error("HTTP Error 429: Too Many Requests"))
+        self.assertTrue(_should_use_browser_after_fetch_error("HTTP Error 503: Service Unavailable"))
+        self.assertTrue(_should_use_browser_after_fetch_error("The read operation timed out"))
+        self.assertFalse(_should_use_browser_after_fetch_error("HTTP Error 404: Not Found"))
+        self.assertFalse(_should_use_browser_after_fetch_error("Blocked or unresolvable host: 127.0.0.1"))
+
+    def test_http_429_prefetch_falls_back_to_rendered_browser_content(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE web_snapshots (
+              id TEXT PRIMARY KEY,
+              monitor_id TEXT NOT NULL,
+              brand_id TEXT,
+              snapshot_date TEXT NOT NULL,
+              url TEXT NOT NULL,
+              page_key TEXT,
+              final_url TEXT,
+              title TEXT,
+              screenshot_path TEXT,
+              html_path TEXT,
+              archive_size INTEGER,
+              text_hash TEXT,
+              text_excerpt TEXT,
+              change_score REAL,
+              visual_change_score REAL,
+              visual_change_ratio REAL,
+              visual_regions_json TEXT,
+              summary TEXT,
+              changes_json TEXT,
+              raw_json TEXT,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        monitor = {"id": "monitor-1", "brand_id": "brand-1"}
+        rendered = {
+            "method": "playwright",
+            "archive": {"self_contained": True, "archive_size": 1234},
+            "page": {
+                "final_url": "https://www.example.com/",
+                "title": "Rendered title",
+                "text": "Rendered browser content",
+                "html": "<main>Rendered browser content</main>",
+            },
+        }
+        with (
+            patch("server.domains.web.fetch_page", side_effect=FetchError("HTTP Error 429: Too Many Requests")),
+            patch("server.domains.web.capture_artifacts", return_value=("capture.png", "capture.html", rendered)) as capture,
+            patch(
+                "server.domains.web.compare_visuals",
+                return_value={"available": False, "score": 0.0, "ratio": 0.0, "regions": []},
+            ),
+        ):
+            result = _capture_one(conn, monitor, "https://example.com/")
+        self.assertEqual(result["title"], "Rendered title")
+        self.assertEqual(result["final_url"], "https://www.example.com/")
+        row = conn.execute("SELECT * FROM web_snapshots").fetchone()
+        self.assertEqual(row["text_excerpt"], "Rendered browser content")
+        raw = json.loads(row["raw_json"])
+        self.assertNotIn("page", raw)
+        self.assertEqual(capture.call_args.kwargs["prefetch_error"], "HTTP Error 429: Too Many Requests")
+        conn.close()
+
     def test_failed_capture_keeps_last_success_time_so_scheduler_can_retry(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -432,7 +565,7 @@ class SnapshotSchedulingTests(unittest.TestCase):
 
     def test_snapshot_retry_uses_bounded_backoff_then_recovery_interval(self):
         now = datetime.fromisoformat("2026-07-25T00:00:00+00:00")
-        expected_minutes = (10, 30, 60, 180, 360, 360)
+        expected_minutes = (10, 30, 60, 180, 360, 360, 360, 360, 1440, 1440)
         for failure_count, minutes in enumerate(expected_minutes, start=1):
             self.assertEqual(_snapshot_retry_at(failure_count, now) - now, timedelta(minutes=minutes))
 

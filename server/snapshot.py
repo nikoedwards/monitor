@@ -965,6 +965,15 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 archive_meta["archive_size"] = html_path.stat().st_size
             except Exception as exc:
                 archive_error = str(exc)[:300]
+            try:
+                page_data = {
+                    "final_url": page.url or url,
+                    "title": page.title(),
+                    "text": page.locator("body").inner_text(timeout=5_000)[:200_000],
+                    "html": page.content()[:3_000_000],
+                }
+            except Exception:
+                page_data = {"final_url": page.url or url, "title": "", "text": "", "html": ""}
             browser.close()
         _PLAYWRIGHT_AVAILABLE = True
         if png_path.exists() and png_path.stat().st_size > 0:
@@ -974,6 +983,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 "archive": archive_meta,
                 "attempts": attempt_count,
                 "source_html_fallback": source_html_fallback,
+                "page": page_data,
             }
             if navigation_error:
                 result["navigation_warning"] = navigation_error
@@ -1056,7 +1066,15 @@ def _write_svg(filename: str, url: str, title: str, text: str, error: str = "") 
     return filename
 
 
-def capture_artifacts(url: str, title: str, text: str, html: str, base_name: str) -> tuple[str, str, dict]:
+def capture_artifacts(
+    url: str,
+    title: str,
+    text: str,
+    html: str,
+    base_name: str,
+    *,
+    prefetch_error: str = "",
+) -> tuple[str, str, dict]:
     """Return ``(screenshot filename, archive filename, metadata)``."""
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     png_filename = f"{base_name}.png"
@@ -1066,15 +1084,42 @@ def capture_artifacts(url: str, title: str, text: str, html: str, base_name: str
 
     try:
         pw_result = _playwright_capture(url, png_path, html_path, html)
-    except SnapshotCaptureError:
+    except SnapshotCaptureError as exc:
         png_path.unlink(missing_ok=True)
         html_path.unlink(missing_ok=True)
+        if prefetch_error:
+            raise SnapshotCaptureError(
+                f"HTML 预抓失败：{prefetch_error}；Chromium 直接访问也失败：{exc}"
+            ) from exc
         raise
     if pw_result and "error" not in pw_result:
+        rendered = pw_result.get("page") or {}
+        fallback_url = rendered.get("final_url") or url
+        fallback_title = rendered.get("title") or title
+        fallback_text = rendered.get("text") or text
+        fallback_html = rendered.get("html") or html
         if not html_path.exists() or html_path.stat().st_size == 0:
-            _write_fallback_archive(html_filename, url, title, html, text, pw_result.get("archive_error", ""))
+            _write_fallback_archive(
+                html_filename,
+                fallback_url,
+                fallback_title,
+                fallback_html,
+                fallback_text,
+                pw_result.get("archive_error", ""),
+            )
             pw_result.setdefault("archive", {}).update({"self_contained": False, "archive_size": html_path.stat().st_size})
+        if prefetch_error:
+            pw_result["prefetch_error"] = prefetch_error
+            pw_result["browser_prefetch_fallback"] = True
         return png_filename, html_filename, pw_result
+
+    if prefetch_error:
+        png_path.unlink(missing_ok=True)
+        html_path.unlink(missing_ok=True)
+        error = (pw_result or {}).get("error", "") or "Playwright Chromium unavailable"
+        raise SnapshotCaptureError(
+            f"HTML 预抓失败：{prefetch_error}；Chromium 直接访问也失败：{error}"
+        )
 
     sub_result = _subprocess_capture(url, png_path)
     if sub_result and "error" not in sub_result:

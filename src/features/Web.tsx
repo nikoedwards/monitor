@@ -177,7 +177,9 @@ export default function Web() {
                         <div className="line-clamp-2">最近一次截图失败：{monitor.last_error}</div>
                         {monitor.next_snapshot_retry_at ? (
                           <div className="mt-1" style={{ color: "var(--warning, #b45309)" }}>
-                            自动重试已启用 · 连续失败 {monitor.snapshot_retry_count || 1} 次，成功后恢复原频率
+                            {(monitor.snapshot_retry_count || 0) > 8 && /429|too many requests|rate.?limit/i.test(monitor.last_error || "")
+                              ? "目标网站持续限制服务器访问 · 已进入 24 小时保护等待，之后自动重试"
+                              : `自动重试已启用 · 连续失败 ${monitor.snapshot_retry_count || 1} 次，成功后恢复原频率`}
                           </div>
                         ) : null}
                       </div>
