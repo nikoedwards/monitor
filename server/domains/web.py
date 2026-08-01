@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from statistics import mean
 from urllib.parse import urlparse
 
@@ -44,6 +46,7 @@ SNAPSHOT_RETRY_DELAYS_MINUTES = (10, 30, 60, 180)
 SNAPSHOT_RECOVERY_RETRY_MINUTES = 360
 SNAPSHOT_CIRCUIT_BREAKER_AFTER = 8
 SNAPSHOT_CIRCUIT_BREAKER_MINUTES = 1440
+SHARED_CAPTURE_REUSE_MINUTES = 30
 _BROWSER_FALLBACK_NETWORK_ERRORS = (
     "timed out",
     "timeout",
@@ -209,33 +212,107 @@ def _discover_pages(start_url: str, limit: int) -> list[str]:
     return discovered[:limit]
 
 
-def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
-    prefetch_error = ""
-    try:
-        page = fetch_page(url)
-    except FetchError as exc:
-        prefetch_error = str(exc)
-        if not _should_use_browser_after_fetch_error(prefetch_error):
-            raise
+def _reuse_recent_shared_capture(
+    conn: sqlite3.Connection,
+    monitor: dict,
+    url: str,
+    base_name: str,
+) -> tuple[str, str, dict, dict, str] | None:
+    """Clone a very recent capture of the same URL from another monitor.
+
+    Duplicate monitors commonly run together and otherwise make the same site
+    receive several expensive browser visits from one Railway egress address.
+    Copying the files keeps snapshot deletion independent while coalescing the
+    external request that can trigger per-IP rate limits.
+    """
+    page_key = canonical_url(url)
+    if not page_key:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=SHARED_CAPTURE_REUSE_MINUTES)).isoformat()
+    candidates = conn.execute(
+        """
+        SELECT * FROM web_snapshots
+        WHERE monitor_id != ? AND page_key = ? AND created_at >= ?
+          AND screenshot_path IS NOT NULL AND screenshot_path != ''
+          AND html_path IS NOT NULL AND html_path != ''
+        ORDER BY created_at DESC
+        LIMIT 5
+        """,
+        (monitor["id"], page_key, cutoff),
+    ).fetchall()
+    root = SNAPSHOT_DIR.resolve()
+    for candidate_row in candidates:
+        candidate = dict(candidate_row)
+        screenshot_source = (SNAPSHOT_DIR / Path(candidate["screenshot_path"]).name).resolve()
+        archive_source = (SNAPSHOT_DIR / Path(candidate["html_path"]).name).resolve()
+        if (
+            screenshot_source.parent != root
+            or archive_source.parent != root
+            or not screenshot_source.is_file()
+            or not archive_source.is_file()
+        ):
+            continue
+        screenshot_name = f"{base_name}{screenshot_source.suffix or '.png'}"
+        archive_name = f"{base_name}{archive_source.suffix or '.html'}"
+        screenshot_target = SNAPSHOT_DIR / screenshot_name
+        archive_target = SNAPSHOT_DIR / archive_name
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(screenshot_source, screenshot_target)
+            shutil.copy2(archive_source, archive_target)
+        except OSError:
+            screenshot_target.unlink(missing_ok=True)
+            archive_target.unlink(missing_ok=True)
+            continue
+        try:
+            capture_meta = json.loads(candidate.get("raw_json") or "{}")
+        except (TypeError, ValueError):
+            capture_meta = {}
+        capture_meta["method"] = "shared_recent_capture"
+        capture_meta["shared_source_snapshot_id"] = candidate["id"]
+        archive_meta = capture_meta.setdefault("archive", {})
+        archive_meta["archive_size"] = archive_target.stat().st_size
         page = {
-            "final_url": url,
-            "title": host_key(url) or url,
-            "text": "",
-            "html": "",
+            "final_url": candidate.get("final_url") or candidate.get("url") or url,
+            "title": candidate.get("title") or host_key(url) or url,
+            "text": candidate.get("text_excerpt") or "",
         }
+        return screenshot_name, archive_name, capture_meta, page, candidate.get("text_hash") or ""
+    return None
+
+
+def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
     base_name = f"{monitor['id']}_{new_id()[:8]}"
-    screenshot, archive, capture_meta = capture_artifacts(
-        page.get("final_url") or url,
-        page.get("title", ""),
-        page.get("text", ""),
-        page.get("html", ""),
-        base_name,
-        prefetch_error=prefetch_error,
-    )
-    rendered_page = capture_meta.pop("page", {}) or {}
-    page["final_url"] = rendered_page.get("final_url") or page.get("final_url") or url
-    page["title"] = rendered_page.get("title") or page.get("title") or host_key(url) or url
-    page["text"] = (rendered_page.get("text") or page.get("text") or "").strip()
+    shared = _reuse_recent_shared_capture(conn, monitor, url, base_name)
+    shared_text_hash = ""
+    if shared:
+        screenshot, archive, capture_meta, page, shared_text_hash = shared
+    else:
+        prefetch_error = ""
+        try:
+            page = fetch_page(url)
+        except FetchError as exc:
+            prefetch_error = str(exc)
+            if not _should_use_browser_after_fetch_error(prefetch_error):
+                raise
+            page = {
+                "final_url": url,
+                "title": host_key(url) or url,
+                "text": "",
+                "html": "",
+            }
+        screenshot, archive, capture_meta = capture_artifacts(
+            page.get("final_url") or url,
+            page.get("title", ""),
+            page.get("text", ""),
+            page.get("html", ""),
+            base_name,
+            prefetch_error=prefetch_error,
+        )
+        rendered_page = capture_meta.pop("page", {}) or {}
+        page["final_url"] = rendered_page.get("final_url") or page.get("final_url") or url
+        page["title"] = rendered_page.get("title") or page.get("title") or host_key(url) or url
+        page["text"] = (rendered_page.get("text") or page.get("text") or "").strip()
     key = canonical_url(page.get("final_url") or url)
     previous_row = conn.execute(
         "SELECT * FROM web_snapshots WHERE monitor_id = ? AND page_key = ? ORDER BY created_at DESC LIMIT 1",
@@ -245,7 +322,7 @@ def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
     current = {
         "title": page.get("title"),
         "text": page.get("text"),
-        "text_hash": text_hash(page.get("text", "")),
+        "text_hash": shared_text_hash or text_hash(page.get("text", "")),
     }
     text_score, summary, changes = analyze_change(current, previous)
     visual = compare_visuals(screenshot, previous.get("screenshot_path") if previous else None)

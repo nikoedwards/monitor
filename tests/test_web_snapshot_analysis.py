@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -498,6 +498,81 @@ class SnapshotSchedulingTests(unittest.TestCase):
         raw = json.loads(row["raw_json"])
         self.assertNotIn("page", raw)
         self.assertEqual(capture.call_args.kwargs["prefetch_error"], "HTTP Error 429: Too Many Requests")
+        conn.close()
+
+    def test_duplicate_monitor_reuses_recent_capture_without_second_site_request(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE web_snapshots (
+              id TEXT PRIMARY KEY,
+              monitor_id TEXT NOT NULL,
+              brand_id TEXT,
+              snapshot_date TEXT NOT NULL,
+              url TEXT NOT NULL,
+              page_key TEXT,
+              final_url TEXT,
+              title TEXT,
+              screenshot_path TEXT,
+              html_path TEXT,
+              archive_size INTEGER,
+              text_hash TEXT,
+              text_excerpt TEXT,
+              change_score REAL,
+              visual_change_score REAL,
+              visual_change_ratio REAL,
+              visual_regions_json TEXT,
+              summary TEXT,
+              changes_json TEXT,
+              raw_json TEXT,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "source.png").write_bytes(b"png-data")
+            (root / "source.html").write_text("<main>Plaud page</main>", encoding="utf-8")
+            conn.execute(
+                """
+                INSERT INTO web_snapshots (
+                  id, monitor_id, brand_id, snapshot_date, url, page_key, final_url, title,
+                  screenshot_path, html_path, archive_size, text_hash, text_excerpt,
+                  change_score, visual_change_score, visual_change_ratio, visual_regions_json,
+                  summary, changes_json, raw_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source-snapshot", "monitor-1", "brand-1", "2026-08-01",
+                    "https://www.plaud.ai/", "https://plaud.ai", "https://www.plaud.ai/",
+                    "Plaud", "source.png", "source.html", 23, "source-hash", "Plaud page",
+                    0, 0, 0, "[]", "Initial snapshot", "[]",
+                    json.dumps({"method": "playwright", "archive": {"self_contained": True}}),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            monitor = {"id": "monitor-2", "brand_id": "brand-2"}
+            with (
+                patch("server.domains.web.SNAPSHOT_DIR", root),
+                patch("server.domains.web.fetch_page") as fetch,
+                patch("server.domains.web.capture_artifacts") as capture,
+                patch(
+                    "server.domains.web.compare_visuals",
+                    return_value={"available": False, "score": 0.0, "ratio": 0.0, "regions": []},
+                ),
+            ):
+                result = _capture_one(conn, monitor, "https://www.plaud.ai/")
+            fetch.assert_not_called()
+            capture.assert_not_called()
+            self.assertEqual(result["capture_method"], "shared_recent_capture")
+            self.assertNotEqual(result["screenshot_path"], "source.png")
+            self.assertNotEqual(result["html_path"], "source.html")
+            self.assertEqual((root / result["screenshot_path"]).read_bytes(), b"png-data")
+            self.assertEqual((root / result["html_path"]).read_text(encoding="utf-8"), "<main>Plaud page</main>")
+            row = conn.execute("SELECT * FROM web_snapshots WHERE id != 'source-snapshot'").fetchone()
+            self.assertEqual(row["text_hash"], "source-hash")
+            self.assertEqual(json.loads(row["raw_json"])["shared_source_snapshot_id"], "source-snapshot")
         conn.close()
 
     def test_failed_capture_keeps_last_success_time_so_scheduler_can_retry(self):
