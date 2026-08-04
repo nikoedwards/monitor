@@ -224,7 +224,7 @@ export default function Web() {
   );
 }
 
-type SnapshotMode = "screenshot" | "archive";
+type SnapshotMode = "screenshot" | "comparison" | "archive";
 
 function snapshotMonth(snapshot: WebSnapshot) {
   return snapshot.snapshot_date.slice(0, 7);
@@ -248,16 +248,34 @@ function SnapshotViewer({
   onDelete?: () => void;
 }) {
   const [archiveReady, setArchiveReady] = useState(false);
+  const [comparisonRegion, setComparisonRegion] = useState(0);
+  const [comparisonFailed, setComparisonFailed] = useState(false);
+  const regionCount = snapshot.visual_regions?.length || 0;
+  const comparisonSrc = snapshot.comparison_url
+    ? `${snapshot.comparison_url}${regionCount ? `?region=${comparisonRegion}` : ""}`
+    : "";
 
   useEffect(() => {
     setArchiveReady(false);
   }, [snapshot.id, snapshot.archive_url]);
+
+  useEffect(() => {
+    setComparisonRegion(0);
+    setComparisonFailed(false);
+  }, [snapshot.id, snapshot.comparison_url]);
+
+  useEffect(() => {
+    setComparisonFailed(false);
+  }, [comparisonSrc]);
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2">
           <Button size="sm" variant={mode === "screenshot" ? "primary" : "secondary"} onClick={() => onModeChange("screenshot")}>截图</Button>
+          <Button size="sm" variant={mode === "comparison" ? "primary" : "secondary"} disabled={!snapshot.comparison_url} onClick={() => onModeChange("comparison")}>
+            {regionCount ? `变化对比 · ${regionCount} 处` : "前后对比"}
+          </Button>
           <Button size="sm" variant={mode === "archive" ? "primary" : "secondary"} disabled={!snapshot.archive_url} onClick={() => onModeChange("archive")}>
             {archiveReady ? "交互归档" : "交互归档 · 预载中"}
           </Button>
@@ -281,6 +299,61 @@ function SnapshotViewer({
       )}
       {mode === "screenshot" && (
         <img src={snapshot.screenshot_url} alt={snapshot.title} className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
+      )}
+      {mode === "comparison" && snapshot.comparison_url && (
+        <div className="rounded-lg p-3 space-y-3" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="text-[14px] font-medium" style={{ color: "var(--ink)" }}>变化区域前后对比</div>
+              <div className="text-[12px] mt-0.5" style={{ color: "var(--mute)" }}>
+                {regionCount
+                  ? "系统按视觉差异自动裁出重点区域；左侧是上一张，右侧是当前快照。"
+                  : "没有定位到独立变化区域，下面展示整页前后对比。"}
+              </div>
+            </div>
+            {snapshot.previous_created_at && (
+              <Badge tone="neutral">上一张 {fmtDateTime(snapshot.previous_created_at)}</Badge>
+            )}
+          </div>
+
+          {regionCount > 1 && (
+            <div className="flex flex-wrap gap-1.5">
+              {snapshot.visual_regions.map((region, index) => (
+                <button
+                  key={`${snapshot.id}-region-${index}`}
+                  type="button"
+                  onClick={() => setComparisonRegion(index)}
+                  className="h-8 px-3 rounded-md text-[12px] font-medium cursor-pointer"
+                  style={index === comparisonRegion
+                    ? { background: "var(--ink)", color: "var(--bg)" }
+                    : { background: "var(--panel)", color: "var(--body)", border: "1px solid var(--hairline-strong)" }}
+                >
+                  区域 {index + 1} · {percent(region.change_ratio)}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-md overflow-hidden" style={{ minHeight: 240, background: "var(--panel)", border: "1px solid var(--hairline)" }}>
+            {comparisonFailed ? (
+              <div className="min-h-[240px] flex items-center justify-center px-6 text-center text-[13px]" style={{ color: "var(--mute)" }}>
+                这组局部对比暂时无法生成，仍可切回「截图」查看完整页面。
+              </div>
+            ) : (
+              <img
+                key={comparisonSrc}
+                src={comparisonSrc}
+                alt={`${snapshot.title || "网页"}变化区域前后对比`}
+                onError={() => setComparisonFailed(true)}
+                className="w-full h-auto"
+              />
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-center text-[11px] font-medium" style={{ color: "var(--mute)" }}>
+            <span>BEFORE · 上一张快照</span>
+            <span>AFTER · 当前快照</span>
+          </div>
+        </div>
       )}
       {snapshot.archive_url && (
         <div style={{ display: mode === "archive" ? "block" : "none" }}>

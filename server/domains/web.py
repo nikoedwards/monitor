@@ -1,6 +1,7 @@
 """Web snapshot monitoring: capture, offline archives, and visual analysis."""
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
@@ -10,7 +11,7 @@ from pathlib import Path
 from statistics import mean
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import ai
 from ..config import DEFAULT_CRAWL_LIMIT, SNAPSHOT_DIR
@@ -129,6 +130,48 @@ def snapshot_to_dict(row: sqlite3.Row | dict) -> dict:
     item["page_path"] = urlparse(item.get("final_url") or item.get("url") or "").path or "/"
     item["effective_change_score"] = _effective_score(item)
     item["has_meaningful_change"] = _has_meaningful_change(item)
+    return item
+
+
+def _refresh_snapshot_text_analysis(item: dict) -> dict:
+    """Re-evaluate stored evidence so old snapshots benefit from diff fixes."""
+    previous_id = item.pop("_previous_snapshot_id", None)
+    previous_title = item.pop("_previous_title", None)
+    previous_text = item.pop("_previous_text_excerpt", None)
+    previous_hash = item.pop("_previous_text_hash", None)
+    previous_screenshot = item.pop("_previous_screenshot_path", None)
+    previous_created_at = item.pop("_previous_created_at", None)
+
+    item["previous_snapshot_id"] = previous_id
+    item["previous_created_at"] = previous_created_at
+    item["comparison_url"] = (
+        f"/api/web/snapshots/{item['id']}/comparison"
+        if previous_id and previous_screenshot and item.get("screenshot_path")
+        else ""
+    )
+    if previous_id:
+        text_score, summary, changes = analyze_change(
+            {
+                "title": item.get("title") or "",
+                "text": item.get("text_excerpt") or "",
+                "text_hash": item.get("text_hash") or "",
+            },
+            {
+                "title": previous_title or "",
+                "text_excerpt": previous_text or "",
+                "text_hash": previous_hash or "",
+            },
+        )
+        visual_score = float(item.get("visual_change_score") or 0)
+        if visual_score >= VISUAL_CHANGE_THRESHOLD:
+            summary += f" 视觉变化约 {visual_score * 100:.0f}%。"
+        elif text_score >= TEXT_CHANGE_THRESHOLD:
+            summary += " 截图视觉变化较小，主要差异来自文本。"
+        item["change_score"] = text_score
+        item["summary"] = summary
+        item["changes"] = changes
+        item["effective_change_score"] = _effective_score(item)
+        item["has_meaningful_change"] = _has_meaningful_change(item)
     return item
 
 
@@ -456,20 +499,41 @@ def _query_snapshots(
     descending: bool = True,
     limit: int = 1000,
 ) -> list[dict]:
-    clauses = ["snapshot_date >= ?", "snapshot_date <= ?"]
-    params: list = [start, end]
+    source_clauses = []
+    source_params: list = []
     if brand_id:
-        clauses.append("brand_id = ?")
-        params.append(brand_id)
+        source_clauses.append("ws.brand_id = ?")
+        source_params.append(brand_id)
     if monitor_id:
-        clauses.append("monitor_id = ?")
-        params.append(monitor_id)
+        source_clauses.append("ws.monitor_id = ?")
+        source_params.append(monitor_id)
+    source_where = f"WHERE {' AND '.join(source_clauses)}" if source_clauses else ""
     order = "DESC" if descending else "ASC"
     rows = conn.execute(
-        f"SELECT * FROM web_snapshots WHERE {' AND '.join(clauses)} ORDER BY snapshot_date {order}, created_at {order} LIMIT ?",
-        [*params, limit],
+        f"""
+        WITH ordered AS (
+            SELECT ws.*,
+                LAG(ws.id) OVER snapshot_order AS _previous_snapshot_id,
+                LAG(ws.title) OVER snapshot_order AS _previous_title,
+                LAG(ws.text_excerpt) OVER snapshot_order AS _previous_text_excerpt,
+                LAG(ws.text_hash) OVER snapshot_order AS _previous_text_hash,
+                LAG(ws.screenshot_path) OVER snapshot_order AS _previous_screenshot_path,
+                LAG(ws.created_at) OVER snapshot_order AS _previous_created_at
+            FROM web_snapshots AS ws
+            {source_where}
+            WINDOW snapshot_order AS (
+                PARTITION BY ws.monitor_id, ws.page_key
+                ORDER BY ws.created_at ASC, ws.id ASC
+            )
+        )
+        SELECT * FROM ordered
+        WHERE snapshot_date >= ? AND snapshot_date <= ?
+        ORDER BY snapshot_date {order}, created_at {order}
+        LIMIT ?
+        """,
+        [*source_params, start, end, limit],
     ).fetchall()
-    return [snapshot_to_dict(row) for row in rows]
+    return [_refresh_snapshot_text_analysis(snapshot_to_dict(row)) for row in rows]
 
 
 def _period_stats(snapshots: list[dict], start: str, end: str) -> dict:
@@ -663,6 +727,49 @@ def capture(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
         raise HTTPException(status_code=404, detail="Monitor not found")
     snapshots = capture_monitor(conn, dict(row))
     return {"snapshots": snapshots, "captured": len(snapshots)}
+
+
+@router.get("/snapshots/{snapshot_id}/comparison")
+def snapshot_comparison(snapshot_id: str, region: int = 0, conn: sqlite3.Connection = Depends(get_conn)):
+    """Render a focused before/after image for one stored visual-change region."""
+    row = conn.execute("SELECT * FROM web_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    current = dict(row)
+    if not current.get("screenshot_path"):
+        raise HTTPException(status_code=404, detail="当前快照没有截图")
+    previous = conn.execute(
+        """
+        SELECT * FROM web_snapshots
+        WHERE monitor_id = ? AND page_key = ? AND created_at < ? AND screenshot_path IS NOT NULL
+        ORDER BY created_at DESC, id DESC LIMIT 1
+        """,
+        (current.get("monitor_id"), current.get("page_key"), current.get("created_at")),
+    ).fetchone()
+    if not previous:
+        raise HTTPException(status_code=404, detail="没有可用于对比的上一张截图")
+
+    regions = json.loads(current.get("visual_regions_json") or "[]")
+    selected_regions = None
+    if regions:
+        if region < 0 or region >= len(regions):
+            raise HTTPException(status_code=404, detail="变化区域不存在")
+        selected_regions = [regions[region]]
+    elif region != 0:
+        raise HTTPException(status_code=404, detail="变化区域不存在")
+
+    comparison = visual_comparison_image(
+        previous["screenshot_path"],
+        current["screenshot_path"],
+        selected_regions,
+    )
+    if not comparison:
+        raise HTTPException(status_code=404, detail="无法生成截图对比")
+    return Response(
+        content=base64.b64decode(comparison["data"]),
+        media_type=comparison["media_type"],
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.delete("/snapshots/{snapshot_id}")

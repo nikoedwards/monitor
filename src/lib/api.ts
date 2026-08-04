@@ -310,6 +310,9 @@ export interface WebSnapshot {
   effective_change_score?: number;
   has_meaningful_change?: boolean;
   visual_regions: { x: number; y: number; width: number; height: number; change_ratio: number }[];
+  previous_snapshot_id?: string;
+  previous_created_at?: string;
+  comparison_url?: string;
   summary?: string;
   changes: { type: string; text?: string; from?: string; to?: string }[];
   page_path: string;

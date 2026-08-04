@@ -19,11 +19,13 @@ from PIL import Image, ImageDraw
 from server.domains.web import (
     _capture_one,
     _period_stats,
+    _query_snapshots,
     _should_use_browser_after_fetch_error,
     _snapshot_retry_at,
     capture_monitor,
     delete_snapshot,
     next_run_at,
+    snapshot_comparison,
     snapshot_to_dict,
 )
 from server.fetchers import FetchError
@@ -32,11 +34,38 @@ from server.snapshot import (
     _capture_error_reason,
     _optimize_archive_image,
     _playwright_capture,
+    analyze_change,
     _write_fallback_archive,
     capture_artifacts,
     compare_visuals,
     upgrade_snapshot_archives,
 )
+
+
+class TextDiffTests(unittest.TestCase):
+    def test_existing_copy_split_into_a_new_line_is_not_reported_as_added(self):
+        phrase = "Trusted by over 2 million professionals globally"
+        previous_text = f"Plaud IntelligenceTM {phrase}"
+        current_text = f"Plaud IntelligenceTM\n{phrase}"
+
+        score, summary, changes = analyze_change(
+            {"title": "Plaud", "text": current_text, "text_hash": "current"},
+            {"title": "Plaud", "text_excerpt": previous_text, "text_hash": "previous"},
+        )
+
+        self.assertEqual(score, 0.0)
+        self.assertNotIn(phrase, [change.get("text") for change in changes])
+        self.assertIn("没有变化", summary)
+
+    def test_genuinely_new_copy_is_still_reported(self):
+        phrase = "Trusted by over 2 million professionals globally"
+        score, _summary, changes = analyze_change(
+            {"title": "Plaud", "text": f"Plaud IntelligenceTM\n{phrase}", "text_hash": "current"},
+            {"title": "Plaud", "text_excerpt": "Plaud IntelligenceTM", "text_hash": "previous"},
+        )
+
+        self.assertGreater(score, 0)
+        self.assertIn({"type": "added", "text": phrase}, changes)
 
 
 class VisualDiffTests(unittest.TestCase):
@@ -97,6 +126,99 @@ class PeriodStatsTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["archive_url"], "/snapshots/snapshot.html?v=5")
+
+    def test_snapshot_comparison_returns_a_focused_jpeg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = root / "before.png"
+            after = root / "after.png"
+            Image.new("RGB", (800, 600), "white").save(before)
+            changed = Image.new("RGB", (800, 600), "white")
+            ImageDraw.Draw(changed).rectangle((80, 80, 520, 320), fill="black")
+            changed.save(after)
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """
+                CREATE TABLE web_snapshots (
+                  id TEXT PRIMARY KEY,
+                  monitor_id TEXT,
+                  page_key TEXT,
+                  created_at TEXT,
+                  screenshot_path TEXT,
+                  visual_regions_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+                ("before", "monitor-1", "page-1", "2026-08-01T00:00:00+00:00", str(before), "[]"),
+            )
+            conn.execute(
+                "INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "after",
+                    "monitor-1",
+                    "page-1",
+                    "2026-08-02T00:00:00+00:00",
+                    str(after),
+                    '[{"x":0.1,"y":0.1,"width":0.55,"height":0.4,"change_ratio":0.8}]',
+                ),
+            )
+
+            response = snapshot_comparison("after", region=0, conn=conn)
+
+            self.assertEqual(response.media_type, "image/jpeg")
+            self.assertTrue(response.body.startswith(b"\xff\xd8"))
+            conn.close()
+
+    def test_snapshot_query_recalculates_old_false_positive_evidence(self):
+        phrase = "Trusted by over 2 million professionals globally"
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE web_snapshots (
+              id TEXT PRIMARY KEY,
+              monitor_id TEXT,
+              brand_id TEXT,
+              snapshot_date TEXT,
+              url TEXT,
+              page_key TEXT,
+              title TEXT,
+              screenshot_path TEXT,
+              text_hash TEXT,
+              text_excerpt TEXT,
+              change_score REAL,
+              summary TEXT,
+              changes_json TEXT,
+              raw_json TEXT,
+              created_at TEXT
+            )
+            """
+        )
+        rows = [
+            (
+                "before", "monitor-1", "brand-1", "2026-08-01", "https://plaud.ai", "https://plaud.ai",
+                "Plaud", "before.png", "before-hash", f"Plaud IntelligenceTM {phrase}", 0, "基线", "[]", "{}",
+                "2026-08-01T00:00:00+00:00",
+            ),
+            (
+                "after", "monitor-1", "brand-1", "2026-08-02", "https://plaud.ai", "https://plaud.ai",
+                "Plaud", "after.png", "after-hash", f"Plaud IntelligenceTM\n{phrase}", 0.2, "旧误报",
+                f'[{json.dumps({"type": "added", "text": phrase})}]', "{}", "2026-08-02T00:00:00+00:00",
+            ),
+        ]
+        conn.executemany("INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+        snapshots = _query_snapshots(conn, "2026-08-01", "2026-08-02", brand_id="brand-1")
+        latest = snapshots[0]
+
+        self.assertEqual(latest["id"], "after")
+        self.assertEqual(latest["change_score"], 0.0)
+        self.assertNotIn(phrase, [change.get("text") for change in latest["changes"]])
+        self.assertEqual(latest["comparison_url"], "/api/web/snapshots/after/comparison")
+        conn.close()
 
 
 class SnapshotDeletionTests(unittest.TestCase):

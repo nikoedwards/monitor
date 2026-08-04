@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import unicodedata
 from difflib import SequenceMatcher
 from html import escape as html_escape
 from pathlib import Path
@@ -1261,12 +1262,23 @@ def visual_comparison_image(previous_filename: str, current_filename: str, regio
         return None
 
 
+def _normalized_comparison_text(text: str) -> str:
+    """Normalize presentation-only differences without hiding real copy edits."""
+    return clean_text(unicodedata.normalize("NFKC", text or "")).casefold()
+
+
+def _comparison_key(text: str) -> str:
+    """Return a compact key so line wrapping and punctuation do not create false changes."""
+    return re.sub(r"[\W_]+", "", _normalized_comparison_text(text), flags=re.UNICODE)
+
+
 def _meaningful_lines(text: str) -> list[str]:
     result, seen = [], set()
     for line in (text or "").splitlines():
         normalized = clean_text(line)
-        if 18 <= len(normalized) <= 260 and normalized.lower() not in seen:
-            seen.add(normalized.lower())
+        key = _comparison_key(normalized)
+        if 18 <= len(normalized) <= 260 and key and key not in seen:
+            seen.add(key)
             result.append(normalized)
     return result
 
@@ -1285,18 +1297,25 @@ def analyze_change(current: dict, previous: dict | None) -> tuple[float, str, li
 
     old_lines = _meaningful_lines(previous_text)
     new_lines = _meaningful_lines(current_text)
-    old_set = {line.lower() for line in old_lines}
-    new_set = {line.lower() for line in new_lines}
-    added = [line for line in new_lines if line.lower() not in old_set][:6]
-    removed = [line for line in old_lines if line.lower() not in new_set][:6]
+    old_text_key = _comparison_key(previous_text)
+    new_text_key = _comparison_key(current_text)
+    # Compare each candidate against the whole opposing document, not only an
+    # exact line set. Sites frequently split one existing sentence into
+    # several DOM nodes (or merge nodes together), which must not be reported
+    # as user-visible copy being added or removed.
+    added = [line for line in new_lines if _comparison_key(line) not in old_text_key][:6]
+    removed = [line for line in old_lines if _comparison_key(line) not in new_text_key][:6]
     changes.extend({"type": "added", "text": line} for line in added)
     changes.extend({"type": "removed", "text": line} for line in removed)
 
-    if previous.get("text_hash") and previous["text_hash"] == current.get("text_hash"):
+    old_sample = _normalized_comparison_text(previous_text[:20_000])
+    new_sample = _normalized_comparison_text(current_text[:20_000])
+    if (
+        previous.get("text_hash")
+        and previous["text_hash"] == current.get("text_hash")
+    ) or old_sample == new_sample:
         return 0.0, "与上一张快照相比，可见文本没有变化。", changes
 
-    old_sample = previous_text[:20_000]
-    new_sample = current_text[:20_000]
     if not old_sample and not new_sample:
         score = 0.0
     elif not old_sample or not new_sample:
