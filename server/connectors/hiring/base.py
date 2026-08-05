@@ -95,6 +95,13 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResu
                 ) or []
             except Exception:
                 result.anchors = []
+            try:
+                result.meta = page.eval_on_selector_all(
+                    "meta[name], meta[property]",
+                    "els => Object.fromEntries(els.map(e => [e.getAttribute('property') || e.getAttribute('name'), e.getAttribute('content') || '']).filter(([k]) => k))",
+                ) or {}
+            except Exception:
+                result.meta = {}
             browser.close()
         _PLAYWRIGHT_AVAILABLE = True
         result.text = extract_visible_text(result.html)
@@ -216,12 +223,33 @@ class ActivityRef:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass
+class ProfileSnapshot:
+    name: str = ""
+    headline: str = ""
+    title: str = ""
+    is_active: Optional[bool] = None
+    status: str = "ok"          # ok | partial | blocked | error
+    error: str = ""
+    raw: dict = field(default_factory=dict)
+
+    def fingerprint_fields(self) -> dict:
+        return {
+            "name": self.name or "",
+            "headline": self.headline or "",
+            "title": self.title or "",
+        }
+
+
 class PeopleProvider:
     """Base LinkedIn people provider (roster + activity feed)."""
 
     name = "base_people"
 
     def expand_profiles(self, conn: sqlite3.Connection, link: dict) -> list[ProfileRef]:
+        raise NotImplementedError
+
+    def fetch_profile(self, conn: sqlite3.Connection, profile: dict) -> ProfileSnapshot:
         raise NotImplementedError
 
     def fetch_activities(self, conn: sqlite3.Connection, profile: dict) -> list[ActivityRef]:

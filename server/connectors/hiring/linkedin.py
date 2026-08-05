@@ -20,6 +20,7 @@ from .base import (
     JobSnapshot,
     PeopleProvider,
     ProfileRef,
+    ProfileSnapshot,
     render,
 )
 
@@ -123,6 +124,38 @@ class LinkedInPeopleProvider(PeopleProvider):
             if len(found) >= self.max_profiles:
                 break
         return found
+
+    def fetch_profile(self, conn: sqlite3.Connection, profile: dict) -> ProfileSnapshot:
+        url = profile.get("profile_url") or ""
+        snap = ProfileSnapshot()
+        page = render(url, self.cookie)
+        if page.status != "ok":
+            snap.status = "blocked" if not page.html else "partial"
+            snap.error = page.error or "无法读取 LinkedIn 个人页（需登录 Cookie 或被反爬拦截）。"
+            return snap
+
+        raw_title = clean_text(page.meta.get("og:title") or page.title)
+        raw_title = re.sub(r"\s*\|\s*LinkedIn\s*$", "", raw_title, flags=re.I)
+        if " - " in raw_title:
+            snap.name, snap.headline = [clean_text(part) for part in raw_title.split(" - ", 1)]
+        else:
+            snap.name = raw_title
+
+        description = clean_text(page.meta.get("og:description") or page.meta.get("description"))
+        if not snap.headline and description and not description.lower().startswith("view "):
+            snap.headline = description[:300]
+        snap.title = snap.headline
+
+        lowered = (page.text or "").lower()
+        inactive_markers = ("profile not found", "this profile is not available", "找不到该会员", "此个人资料不可用")
+        snap.is_active = not any(marker in lowered for marker in inactive_markers)
+        if not snap.name and not snap.headline:
+            snap.status = "blocked"
+            snap.error = "个人页无有效身份信息，可能被 LinkedIn 风控拦截。"
+        elif not snap.headline:
+            snap.status = "partial"
+        snap.raw = {"final_url": page.final_url, "method": page.method, "provider": self.name}
+        return snap
 
     def fetch_activities(self, conn: sqlite3.Connection, profile: dict) -> list[ActivityRef]:
         base = (profile.get("profile_url") or "").rstrip("/")

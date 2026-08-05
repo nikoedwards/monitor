@@ -95,7 +95,7 @@ def _run_due_hiring() -> None:
         brands = [dict(r) for r in conn.execute("SELECT * FROM brands").fetchall()]
     for brand in brands:
         with db() as conn:
-            due = conn.execute(
+            due_links = conn.execute(
                 """
                 SELECT platform FROM links
                 WHERE brand_id = ? AND dimension = 'hiring' AND status = 'active'
@@ -104,16 +104,25 @@ def _run_due_hiring() -> None:
                 """,
                 (brand["id"], today()),
             ).fetchall()
-        if not due:
+            due_profile = conn.execute(
+                """
+                SELECT 1 FROM linkedin_profiles
+                WHERE brand_id = ? AND monitor = 1 AND status = 'active'
+                  AND (last_seen IS NULL OR substr(last_seen, 1, 10) < ?)
+                LIMIT 1
+                """,
+                (brand["id"], today()),
+            ).fetchone()
+        if not due_links and not due_profile:
             continue
-        platforms = {row["platform"] for row in due}
+        platforms = {row["platform"] for row in due_links}
         if platforms - {"linkedin_people"}:
             try:
                 with db() as conn:
                     run_hiring_collection(conn, brand)
             except Exception:
                 logger.exception("Hiring collection failed for %s", brand.get("id"))
-        if "linkedin_people" in platforms:
+        if "linkedin_people" in platforms or due_profile:
             try:
                 with db() as conn:
                     run_linkedin_people_collection(conn, brand)
