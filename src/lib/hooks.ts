@@ -227,21 +227,21 @@ export function useInsightsSummary() {
 }
 
 // ---------------------------------------------------------------- creators
-export function useCreatorsSummary(brandId?: string, platform?: string, range?: TimeRange) {
+export function useCreatorsSummary(brandId?: string, platform?: string, productId?: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["creators-summary", brandId, platform, rp],
-    queryFn: () => api.get<any>(`/api/creators/summary${qs({ brand_id: brandId, platform, ...rp })}`),
+    queryKey: ["creators-summary", brandId, platform, productId, rp],
+    queryFn: () => api.get<any>(`/api/creators/summary${qs({ brand_id: brandId, platform, product_id: productId, ...rp })}`),
     enabled: !!brandId,
   });
 }
 
-export function useCreatorsRoster(brandId?: string, platform?: string) {
+export function useCreatorsRoster(brandId?: string, platform?: string, productId?: string) {
   return useQuery({
-    queryKey: ["creators-roster", brandId, platform],
+    queryKey: ["creators-roster", brandId, platform, productId],
     queryFn: () =>
       api
-        .get<{ roster: import("./api").CreatorRosterItem[] }>(`/api/creators/roster${qs({ brand_id: brandId, platform })}`)
+        .get<{ roster: import("./api").CreatorRosterItem[] }>(`/api/creators/roster${qs({ brand_id: brandId, platform, product_id: productId })}`)
         .then((d) => d.roster),
     enabled: !!brandId,
   });
@@ -262,7 +262,8 @@ export function useCreatorsSync() {
 
 export function useCreatorsReport() {
   return useMutation({
-    mutationFn: (brandId: string) => api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId })}`).then((d) => d.report),
+    mutationFn: ({ brandId, productId }: { brandId: string; productId?: string }) =>
+      api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId })}`).then((d) => d.report),
   });
 }
 

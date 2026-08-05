@@ -98,6 +98,8 @@ function BrandDetail({ brand }: { brand: Brand }) {
   const [name, setName] = useState(brand.name);
   const [keywords, setKeywords] = useState(brand.monitoring_keywords.join(", "));
   const [productName, setProductName] = useState("");
+  const [productSku, setProductSku] = useState("");
+  const [productAliases, setProductAliases] = useState("");
 
   const saveName = () => {
     const nextName = name.trim();
@@ -144,16 +146,26 @@ function BrandDetail({ brand }: { brand: Brand }) {
       </Card>
 
       <Card>
-        <SectionTitle title="产品" />
-        <div className="flex gap-2 mb-3">
+        <SectionTitle title="产品" subtitle="SKU 和别名会用于红人内容的单品自动归因；多个别名用逗号分隔" />
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_150px_1fr_auto] gap-2 mb-3">
           <Input value={productName} onChange={(e) => setProductName(e.target.value)} placeholder="产品名称" />
-          <Button onClick={() => { if (productName) { addProduct.mutate({ brand_id: brand.id, name: productName }); setProductName(""); } }}>添加</Button>
+          <Input value={productSku} onChange={(e) => setProductSku(e.target.value)} placeholder="SKU / 型号" />
+          <Input value={productAliases} onChange={(e) => setProductAliases(e.target.value)} placeholder="别名 / Hashtag" />
+          <Button onClick={() => {
+            if (!productName.trim()) return;
+            addProduct.mutate({ brand_id: brand.id, name: productName.trim(), sku: productSku.trim() || undefined, notes: productAliases.trim() || undefined });
+            setProductName("");
+            setProductSku("");
+            setProductAliases("");
+          }}>添加</Button>
         </div>
         {products.length ? (
           <div className="flex flex-wrap gap-2">
             {products.map((p) => (
               <span key={p.id} className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-[13px]" style={{ background: "var(--bg-soft-2)", color: "var(--body)" }}>
                 {p.name}
+                {p.sku && <span className="text-[11px]" style={{ color: "var(--mute)" }}>{p.sku}</span>}
+                {p.notes && <span className="text-[11px] max-w-[180px] truncate" title={p.notes} style={{ color: "var(--mute)" }}>{p.notes}</span>}
                 <button onClick={() => delProduct.mutate(p.id)} className="cursor-pointer" style={{ color: "var(--mute)" }}>×</button>
               </span>
             ))}

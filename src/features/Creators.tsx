@@ -3,11 +3,11 @@ import { useParams } from "react-router-dom";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
-import { Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { useBrands, useCreatorsReport, useCreatorsRoster, useCreatorsSummary, useCreatorsSync, useRecords } from "../lib/hooks";
+import { useBrands, useCreatorsReport, useCreatorsRoster, useCreatorsSummary, useCreatorsSync, useProducts, useRecords } from "../lib/hooks";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
-import type { CreatorRosterItem } from "../lib/api";
+import type { CreatorMapPoint, CreatorRosterItem } from "../lib/api";
 import { fmtDateTime, fmtNum } from "../lib/format";
 
 const PLATFORMS = [
@@ -81,20 +81,87 @@ function RosterTable({ roster }: { roster: CreatorRosterItem[] }) {
   );
 }
 
+const QUADRANT_META = {
+  core: { label: "核心伙伴", color: "var(--accent)" },
+  potential: { label: "潜力黑马", color: "var(--violet)" },
+  scale: { label: "铺量达人", color: "var(--warning)" },
+  observe: { label: "观察池", color: "var(--mute)" },
+} as const;
+
+function CreatorQuadrantMap({ points, quadrants }: { points: CreatorMapPoint[]; quadrants: { key: keyof typeof QUADRANT_META; label: string; total: number }[] }) {
+  if (!points.length) {
+    return <EmptyState title="暂无可绘制达人" hint="当前范围内有红人内容后，会按合作深度和内容效果自动生成四象限。" />;
+  }
+  return (
+    <div>
+      <div className="relative h-[420px] ml-8 mb-8 rounded-lg" style={{ border: "1px solid var(--hairline-strong)", background: "var(--bg-soft)" }}>
+        <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 pointer-events-none">
+          <div className="p-3 text-[12px] font-medium" style={{ color: "var(--violet)", borderRight: "1px dashed var(--hairline-strong)", borderBottom: "1px dashed var(--hairline-strong)" }}>潜力黑马</div>
+          <div className="p-3 text-right text-[12px] font-medium" style={{ color: "var(--accent)", borderBottom: "1px dashed var(--hairline-strong)" }}>核心伙伴</div>
+          <div className="p-3 self-end text-[12px] font-medium" style={{ color: "var(--mute)", borderRight: "1px dashed var(--hairline-strong)" }}>观察池</div>
+          <div className="p-3 self-end text-right text-[12px] font-medium" style={{ color: "var(--warning)" }}>铺量达人</div>
+        </div>
+        {points.map((point) => {
+          const meta = QUADRANT_META[point.quadrant];
+          const bubbleStyle = {
+            width: point.size,
+            height: point.size,
+            background: meta.color,
+            color: "white",
+            boxShadow: "0 0 0 3px var(--panel)",
+          };
+          const title = `${point.name} · ${point.platform}\n合作 ${point.collab_count}/${point.post_count} · 互动 ${fmtNum(point.total_engagement)} · 触达 ${fmtNum(point.total_views)}`;
+          const node = (
+            <span className="grid h-full w-full place-items-center rounded-full text-[10px] font-semibold" style={bubbleStyle}>
+              {point.size >= 18 ? point.name.slice(0, 1).toUpperCase() : ""}
+            </span>
+          );
+          return point.url ? (
+            <a key={point.id} href={point.url} target="_blank" rel="noreferrer" aria-label={point.name} title={title} className="absolute -translate-x-1/2 translate-y-1/2 transition-transform hover:scale-125 focus:scale-125" style={{ left: `${point.x}%`, bottom: `${point.y}%` }}>
+              {node}
+            </a>
+          ) : (
+            <span key={point.id} title={title} className="absolute -translate-x-1/2 translate-y-1/2" style={{ left: `${point.x}%`, bottom: `${point.y}%` }}>
+              <span className="grid place-items-center rounded-full text-[10px] font-semibold" style={bubbleStyle}>
+                {point.size >= 18 ? point.name.slice(0, 1).toUpperCase() : ""}
+              </span>
+            </span>
+          );
+        })}
+        <div className="absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap text-[12px]" style={{ color: "var(--mute)" }}>合作深度 →</div>
+        <div className="absolute top-1/2 -left-16 -translate-y-1/2 -rotate-90 whitespace-nowrap text-[12px]" style={{ color: "var(--mute)" }}>内容效果 →</div>
+      </div>
+      <div className="flex flex-wrap gap-3 text-[12px]" style={{ color: "var(--body)" }}>
+        {quadrants.map((item) => (
+          <div key={item.key} className="flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-full" style={{ background: QUADRANT_META[item.key].color }} />
+            {item.label} {item.total}
+          </div>
+        ))}
+        <span style={{ color: "var(--mute)" }}>气泡越大，达人累计触达越高；悬停查看明细。</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Creators() {
   const { brandId } = useParams();
   const [platform, setPlatform] = useState("all");
+  const [productId, setProductId] = useState("all");
   const [query, setQuery] = useState("");
   const [report, setReport] = useState("");
   const [reportError, setReportError] = useState("");
   const plat = platform === "all" ? undefined : platform;
+  const selectedProductId = productId === "all" ? undefined : productId;
 
   const [range] = useTimeRange();
   const { data: brands = [] } = useBrands();
+  const { data: products = [] } = useProducts(brandId);
   const brand = brands.find((b) => b.id === brandId);
-  const { data: summary, isLoading } = useCreatorsSummary(brandId, plat, range);
-  const { data: roster = [] } = useCreatorsRoster(brandId, plat);
-  const { data: records = [] } = useRecords({ brand_id: brandId, dimension: "marketing", channel: "creators", platform: plat, q: query || undefined, ...rangeParams(range), limit: 60 });
+  const selectedProduct = products.find((product) => product.id === selectedProductId);
+  const { data: summary, isLoading } = useCreatorsSummary(brandId, plat, selectedProductId, range);
+  const { data: roster = [] } = useCreatorsRoster(brandId, plat, selectedProductId);
+  const { data: records = [] } = useRecords({ brand_id: brandId, product_id: selectedProductId, dimension: "marketing", channel: "creators", platform: plat, q: query || undefined, ...rangeParams(range), limit: 60 });
   const sync = useCreatorsSync();
   const reportMut = useCreatorsReport();
 
@@ -111,7 +178,7 @@ export default function Creators() {
     if (!brandId) return;
     setReportError("");
     try {
-      setReport(await reportMut.mutateAsync(brandId));
+      setReport(await reportMut.mutateAsync({ brandId, productId: selectedProductId }));
     } catch (e: any) {
       setReportError(e?.message || "生成失败");
     }
@@ -121,10 +188,23 @@ export default function Creators() {
     <div className="space-y-6">
       <SectionTitle
         title="红人达人监控"
-        subtitle="跨 Instagram / YouTube / TikTok / X 的合作红人监控、达人库与分析报告"
+        subtitle={selectedProduct ? `当前查看：${brand?.name || "品牌"} / ${selectedProduct.name}` : "品牌整体红人盘点，并可下钻到单个产品"}
         action={
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
+            <Select
+              value={productId}
+              onChange={(event) => {
+                setProductId(event.target.value);
+                setReport("");
+                setReportError("");
+              }}
+              className="max-w-[190px]"
+              aria-label="红人数据范围"
+            >
+              <option value="all">品牌整体</option>
+              {products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
+            </Select>
             <SegmentGroup value={platform} options={PLATFORMS} onChange={setPlatform} />
             <Button size="sm" onClick={runSync} disabled={sync.isPending}>
               <RefreshCw size={14} className={sync.isPending ? "animate-spin" : ""} /> {sync.isPending ? "采集中…" : "立即同步"}
@@ -139,23 +219,24 @@ export default function Creators() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <StatCard label="合作达人" value={fmtNum(t.creators)} tone="accent" />
         <StatCard label="合作内容" value={`${fmtNum(t.collab_posts)}/${fmtNum(t.posts)}`} hint="合作/总采集" />
         <StatCard label="付费内容" value={fmtNum(t.sponsored_posts)} />
         <StatCard label="总触达" value={fmtNum(t.total_views)} />
         <StatCard label="互动总量" value={fmtNum(t.total_engagement)} />
+        <StatCard label="产品归因" value={`${Math.round(Number(t.product_match_coverage || 0) * 100)}%`} hint={selectedProduct ? "当前内容均命中该产品" : `未归因 ${fmtNum(t.unmapped_posts)}`} />
       </div>
 
       {empty ? (
         <EmptyState
-          title="红人达人板块暂无数据"
-          hint="YouTube 配置免费 Data API key 后可做全站关键词发现；Instagram / TikTok 的免费自采目前用于品牌管理中已配置的公开官方账号，全站红人关键词发现暂无稳定免费接口。"
+          title={selectedProduct ? `${selectedProduct.name} 暂无红人数据` : "红人达人板块暂无数据"}
+          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "YouTube 配置免费 Data API key 后可做全站关键词发现；Instagram / TikTok 的免费自采目前用于品牌管理中已配置的公开官方账号。"}
           action={<Button variant="primary" onClick={runSync} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即同步"}</Button>}
         />
       ) : (
         <>
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
             <Card className="lg:col-span-2">
               <SectionTitle title="声量趋势" />
               <TrendChart data={summary.trend} keys={[{ key: "total", name: "内容数", color: "var(--accent)" }, { key: "negative", name: "负向", color: "var(--danger)" }]} />
@@ -168,12 +249,28 @@ export default function Creators() {
                 <p className="text-[13px]" style={{ color: "var(--mute)" }}>暂无平台数据</p>
               )}
             </Card>
+            <Card>
+              <SectionTitle title="产品分布" subtitle={selectedProduct ? "同一内容可能同时命中多个产品" : "品牌红人内容的产品归因"} />
+              {summary.by_product?.length ? (
+                <Bars data={summary.by_product.slice(0, 8)} dataKey="total" nameKey="name" name="内容数" color="var(--accent)" />
+              ) : (
+                <p className="text-[13px]" style={{ color: "var(--mute)" }}>暂无产品归因；可在品牌管理中补充产品、SKU 和别名。</p>
+              )}
+            </Card>
           </div>
 
           <Card>
             <SectionTitle
-              title={brand?.is_competitor ? "竞品红人库" : "红人库"}
-              subtitle="按合作内容聚合的达人；「重叠品牌」标记同时合作过其他品牌的达人"
+              title={selectedProduct ? `${selectedProduct.name} 红人四象限` : "品牌红人四象限"}
+              subtitle="横轴为合作深度，纵轴为内容效果；按当前时间范围和平台实时计算"
+            />
+            <CreatorQuadrantMap points={summary.creator_map?.points || []} quadrants={summary.creator_map?.quadrants || []} />
+          </Card>
+
+          <Card>
+            <SectionTitle
+              title={selectedProduct ? `${selectedProduct.name} 红人库` : brand?.is_competitor ? "竞品红人库" : "红人库"}
+              subtitle={selectedProduct ? "仅聚合明确归因到该产品的内容；「重叠品牌」标记达人也合作过其他品牌" : "按合作内容聚合的达人；「重叠品牌」标记同时合作过其他品牌的达人"}
               action={
                 <Button size="sm" variant="primary" onClick={runReport} disabled={reportMut.isPending}>
                   <Sparkles size={14} /> {reportMut.isPending ? "分析中…" : "生成分析报告"}
@@ -191,8 +288,8 @@ export default function Creators() {
 
           <Card>
             <SectionTitle
-              title="内容流"
-              subtitle="按时间倒序的真实采集内容"
+              title={selectedProduct ? `${selectedProduct.name} 内容流` : "内容流"}
+              subtitle={selectedProduct ? "按产品归因筛选后的真实采集内容" : "按时间倒序的真实采集内容"}
               action={<Input placeholder="搜索关键词 / 达人…" value={query} onChange={(e) => setQuery(e.target.value)} className="w-56" />}
             />
             <RecordList records={records} emptyHint="调整平台 / 关键词，或先发起一次采集。" />

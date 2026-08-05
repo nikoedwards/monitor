@@ -56,6 +56,14 @@ def build_record_query(filters: dict) -> tuple[str, list]:
             clauses.append(f"{column} = ?")
             params.append(value)
 
+    matched_product_id = filters.get("matched_product_id")
+    if matched_product_id:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM record_product_matches rpm "
+            "WHERE rpm.record_id = records.id AND rpm.product_id = ?)"
+        )
+        params.append(matched_product_id)
+
     days = filters.get("days")
     start_date = filters.get("start_date")
     end_date = filters.get("end_date")

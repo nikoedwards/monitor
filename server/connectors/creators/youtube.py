@@ -37,7 +37,14 @@ class YouTubeProvider(CreatorProvider):
         posts: dict[str, CreatorPost] = {}
         for query in queries:
             for post in self._search(query):
-                posts.setdefault(post.external_id, post)
+                existing = posts.get(post.external_id)
+                if existing is None:
+                    post.raw["matched_queries"] = [query]
+                    posts[post.external_id] = post
+                else:
+                    matched = existing.raw.setdefault("matched_queries", [])
+                    if query not in matched:
+                        matched.append(query)
         if posts:
             self._enrich_videos(posts)
             self._enrich_channels(posts)

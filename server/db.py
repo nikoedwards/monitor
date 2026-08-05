@@ -203,6 +203,21 @@ CREATE TABLE IF NOT EXISTS creators (
   updated_at TEXT NOT NULL
 );
 
+-- A creator post can mention or feature more than one product.  Keep the
+-- many-to-many attribution separate from records.product_id, which remains the
+-- convenient "primary product" pointer used by older screens and imports.
+CREATE TABLE IF NOT EXISTS record_product_matches (
+  record_id TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  match_type TEXT NOT NULL DEFAULT 'auto',
+  evidence_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (record_id, product_id)
+);
+
 CREATE TABLE IF NOT EXISTS web_monitors (
   id TEXT PRIMARY KEY,
   brand_id TEXT,
@@ -435,6 +450,8 @@ CREATE INDEX IF NOT EXISTS idx_web_snapshots_monitor ON web_snapshots(monitor_id
 CREATE INDEX IF NOT EXISTS idx_web_snapshot_analyses_range ON web_snapshot_analyses(brand_id, monitor_id, start_date, end_date);
 CREATE INDEX IF NOT EXISTS idx_voc_actions_status ON voc_actions(status, brand_id);
 CREATE INDEX IF NOT EXISTS idx_creators_brand ON creators(brand_id, platform);
+CREATE INDEX IF NOT EXISTS idx_record_product_matches_brand ON record_product_matches(brand_id, product_id);
+CREATE INDEX IF NOT EXISTS idx_record_product_matches_record ON record_product_matches(record_id);
 CREATE INDEX IF NOT EXISTS idx_job_postings_brand ON job_postings(brand_id, platform);
 CREATE INDEX IF NOT EXISTS idx_job_postings_link ON job_postings(link_id);
 CREATE INDEX IF NOT EXISTS idx_job_snapshots_brand ON job_snapshots(brand_id, snapshot_date);

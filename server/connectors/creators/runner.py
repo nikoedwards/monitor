@@ -14,6 +14,7 @@ from ...util import clean_text, new_id, utc_now
 from ..collectors import brand_queries
 from . import pick_provider
 from .base import CreatorPost, brand_signals, detect_collaboration
+from .products import creator_product_queries, load_product_signals, match_record_to_products
 
 # platform -> connector source_id (registry).
 PLATFORM_SOURCE = {
@@ -62,15 +63,41 @@ def _collect_platform(conn: sqlite3.Connection, brand: dict, platform: str) -> l
     provider = pick_provider(platform, conn)
     if provider is None:
         return []
-    queries = brand_queries(brand)
+    # YouTube search is quota-expensive. Reserve half the small query budget for
+    # catalog products instead of letting a long brand-keyword list crowd them out.
+    queries = brand_queries(brand)[:6]
+    product_queries = creator_product_queries(conn, brand.get("id") or "", limit=6)
+    seen = {query.strip().lower() for query in queries}
+    for query in product_queries:
+        key = query.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            queries.append(query)
+        if len(queries) >= 12:
+            break
     if not queries:
         return []
     posts = provider.collect(conn, brand, queries) or []
     signals = brand_signals(brand)
+    products = load_product_signals(conn, brand.get("id") or "")
     source_id = PLATFORM_SOURCE.get(platform, platform)
     payloads: list[dict] = []
     for post in posts:
         collab = detect_collaboration(f"{post.title} {post.body}", brand, signals)
+        product_matches = match_record_to_products(
+            {
+                "title": post.title,
+                "body": post.body,
+                "url": post.url,
+                "author": post.author,
+                "raw": post.raw,
+            },
+            products,
+        )
+        # Search APIs are relevance-ranked rather than exact-match. Persist a
+        # result only when the visible content contains brand or product proof.
+        if not collab["mentions"] and not product_matches:
+            continue
         # TODO(multimodal): soft placements (product shown on-screen, no caption
         # mention) are invisible to text detection. A future vision pass over the
         # thumbnail/video frames should upgrade collab_type from "none" here.

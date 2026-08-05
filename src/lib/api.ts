@@ -462,6 +462,23 @@ export interface CreatorRosterItem {
   shared_brands?: string[];
 }
 
+export interface CreatorMapPoint {
+  id: string;
+  name: string;
+  handle?: string;
+  platform: string;
+  url?: string;
+  x: number;
+  y: number;
+  size: number;
+  quadrant: "core" | "potential" | "scale" | "observe";
+  collab_count: number;
+  post_count: number;
+  total_views: number;
+  total_engagement: number;
+  engagement_rate?: number | null;
+}
+
 export interface BrandDraft {
   name: string;
   category?: string;

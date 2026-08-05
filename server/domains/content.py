@@ -63,6 +63,9 @@ def list_records(
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     filters = {k: v for k, v in locals().items() if k not in {"conn", "limit"}}
+    if product_id and channel == "creators":
+        filters["product_id"] = None
+        filters["matched_product_id"] = product_id
     return {"records": query_records(conn, filters, limit=limit)}
 
 
