@@ -75,6 +75,7 @@ export default function Marketing() {
   const [publicationDetailOpen, setPublicationDetailOpen] = useState(false);
   const [selectedPublication, setSelectedPublication] = useState<PublicationStat | null>(null);
   const [trendMetric, setTrendMetric] = useState<"volume" | "reach">("volume");
+  const [socialPlatform, setSocialPlatform] = useState("all");
   const contentStreamRef = useRef<HTMLDivElement>(null);
   const activeChannel = view === "channel" ? channel : undefined;
   const { data: summary, isLoading } = useMarketingSummary(brandId, activeChannel, range);
@@ -89,6 +90,7 @@ export default function Marketing() {
     brand_id: brandId,
     dimension: "marketing",
     channel: selectedPublication ? "media" : activeChannel,
+    platform: activeChannel === "social" && socialPlatform !== "all" ? socialPlatform : undefined,
     publication_domain: selectedPublication?.domain || undefined,
     publication_name: selectedPublication?.name || undefined,
     ...rangeParams(range),
@@ -106,6 +108,19 @@ export default function Marketing() {
   useEffect(() => {
     if (view !== "channel" || channel !== "media") setSelectedPublication(null);
   }, [view, channel]);
+  useEffect(() => {
+    if (activeChannel !== "social") {
+      if (socialPlatform !== "all") setSocialPlatform("all");
+      return;
+    }
+    if (
+      summary
+      && socialPlatform !== "all"
+      && !(summary.by_platform || []).some((item: { platform: string }) => item.platform === socialPlatform)
+    ) {
+      setSocialPlatform("all");
+    }
+  }, [activeChannel, socialPlatform, summary]);
   useEffect(() => {
     if (!selectedPublication) return;
     const frame = requestAnimationFrame(() => {
@@ -129,6 +144,14 @@ export default function Marketing() {
   const isCommunity = view === "channel" && channel === "community";
   const isSocial = view === "channel" && channel === "social";
   const selectedSection = view === "overview" ? "overview" : channel;
+  const socialPlatformOptions = [
+    { value: "all", label: "全部" },
+    ...(summary.by_platform || []).map((item: { platform: string }) => ({
+      value: item.platform,
+      label: PLATFORM_LABEL[item.platform] || item.platform,
+    })),
+  ];
+  const selectedSocialPlatformLabel = PLATFORM_LABEL[socialPlatform] || socialPlatform;
   const subchannelCount = (summary.by_subchannel || []).reduce((acc: number, g: any) => acc + (g.subchannels?.length || 0), 0);
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
 
@@ -294,15 +317,27 @@ export default function Marketing() {
             title={selectedPublication ? `${selectedPublication.name} 收录文章` : view === "channel" ? `${channelName}内容流` : "营销内容流"}
             subtitle={selectedPublication
               ? `当前时间范围内共收录 ${fmtNum(selectedPublicationTotal)} 篇文章`
-              : isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"}
-            action={selectedPublication ? <Button size="sm" onClick={() => setSelectedPublication(null)}>清除筛选</Button> : undefined}
+              : isCommunity
+                ? "勾选上方来源可在此显示/隐藏对应内容"
+                : isSocial && socialPlatform !== "all"
+                  ? `当前仅显示 ${selectedSocialPlatformLabel} 的真实采集内容`
+                  : "按渠道筛选的真实采集内容"}
+            action={selectedPublication
+              ? <Button size="sm" onClick={() => setSelectedPublication(null)}>清除筛选</Button>
+              : isSocial
+                ? <SegmentGroup value={socialPlatform} options={socialPlatformOptions} onChange={setSocialPlatform} />
+                : undefined}
           />
           {recordsLoading ? (
             <Spinner />
           ) : (
             <RecordList
               records={shownRecords}
-              emptyHint={selectedPublication ? "当前时间范围内暂无该媒体的收录文章。" : "在数据源页发起媒体 / 广告 / 红人 / 社群 / 社媒账号采集后查看。"}
+              emptyHint={selectedPublication
+                ? "当前时间范围内暂无该媒体的收录文章。"
+                : isSocial && socialPlatform !== "all"
+                  ? `当前时间范围内暂无 ${selectedSocialPlatformLabel} 内容。`
+                  : "在数据源页发起媒体 / 广告 / 红人 / 社群 / 社媒账号采集后查看。"}
             />
           )}
         </Card>
