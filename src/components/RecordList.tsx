@@ -220,9 +220,16 @@ function SocialThumbnail({ record }: { record: RecordItem }) {
   const thumbnail = textValue(record.metrics?.thumbnail_url);
   const platform = record.platform || "social";
   const platformLabel = SOCIAL_PLATFORM_LABEL[platform] || platform;
+  const instagramReel = platform === "instagram"
+    && (record.raw?.is_video === true || record.raw?.post_type === "clips");
+  const aspectClass = platform === "tiktok" || instagramReel
+    ? "aspect-[9/16]"
+    : platform === "instagram"
+      ? "aspect-[4/5]"
+      : "aspect-video";
   const media = (
     <div
-      className="relative aspect-video overflow-hidden"
+      className={`relative overflow-hidden ${aspectClass}`}
       style={{ background: SOCIAL_PLATFORM_BACKGROUND[platform] || "linear-gradient(135deg, #475569, #0f172a)" }}
     >
       {thumbnail && !failed ? (
@@ -261,7 +268,7 @@ function SocialRecordCard({ record }: { record: RecordItem }) {
   const body = (record.body || "").trim();
   const showBody = body && body !== title;
   return (
-    <article className="panel overflow-hidden flex min-h-full flex-col">
+    <article className="panel mb-4 break-inside-avoid overflow-hidden flex flex-col">
       <SocialThumbnail record={record} />
       <div className="flex flex-1 flex-col p-4">
         <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -305,7 +312,7 @@ export function RecordList({
   }
   if (variant === "social-cards") {
     return (
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="columns-1 gap-4 md:columns-2 xl:columns-3">
         {records.map((record) => <SocialRecordCard key={record.id} record={record} />)}
       </div>
     );
