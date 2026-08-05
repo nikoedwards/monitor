@@ -21,19 +21,19 @@ router = APIRouter(prefix="/api/market-share", tags=["market-share"])
 
 MODEL_PRESETS = {
     "balanced": {
-        "label": "综合代理模型",
-        "description": "兼顾商业结果、App 使用规模与公开讨论热度，适合日常竞品监测。",
-        "weights": {"sales": 0.45, "app": 0.25, "conversation": 0.20, "engagement": 0.10},
+        "label": "下载与评论优先模型",
+        "description": "以 App 下载量和评论数为核心，销售与互动仅用于辅助校准。",
+        "weights": {"sales": 0.10, "app": 0.55, "conversation": 0.30, "engagement": 0.05},
     },
     "commerce": {
         "label": "商业结果优先",
-        "description": "提高销售额/销量权重，适合电商或硬件品牌。",
-        "weights": {"sales": 0.65, "app": 0.15, "conversation": 0.15, "engagement": 0.05},
+        "description": "保留下载量和评论数为主要依据，同时提高销售结果的校准权重。",
+        "weights": {"sales": 0.30, "app": 0.40, "conversation": 0.25, "engagement": 0.05},
     },
     "attention": {
         "label": "产品热度优先",
-        "description": "提高 App、评论讨论与互动权重，适合新品和软件产品。",
-        "weights": {"sales": 0.25, "app": 0.30, "conversation": 0.30, "engagement": 0.15},
+        "description": "提高评论和互动权重，适合新品、软件产品与增长趋势观察。",
+        "weights": {"sales": 0.05, "app": 0.45, "conversation": 0.40, "engagement": 0.10},
     },
 }
 
@@ -77,12 +77,23 @@ def _record_is_relevant(row: sqlite3.Row, brand_name: str, raw: dict) -> bool:
     return reddit_search_record_is_relevant(record, brand_name)
 
 
-def _record_signals(conn: sqlite3.Connection, brand: sqlite3.Row, start: str, end: str) -> dict:
+def _record_signals(
+    conn: sqlite3.Connection,
+    brand: sqlite3.Row,
+    start: str,
+    end: str,
+    country: str,
+) -> dict:
+    country_filter = " AND UPPER(COALESCE(region, '')) = ?" if country else ""
+    params: list[str] = [brand["id"], start, end]
+    if country:
+        params.append(country)
     rows = conn.execute(
-        "SELECT source_id, link_id, data_type, dimension, channel, platform, title, body, url, "
+        "SELECT source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, "
         "metrics_json, raw_json FROM records WHERE brand_id = ? "
-        "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ?",
-        (brand["id"], start, end),
+        "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ?"
+        + country_filter,
+        params,
     ).fetchall()
 
     mentions = 0
@@ -166,7 +177,7 @@ def _record_signals(conn: sqlite3.Connection, brand: sqlite3.Row, start: str, en
     return {
         "mentions": mentions,
         "voc_records": voc_records,
-        "app_reviews": app_reviews,
+        "app_reviews": round(app_review_base),
         "app_rating": round(app_rating_sum / app_rating_count, 2) if app_rating_count else None,
         "comments": round(comments),
         "engagement": round(engagement),
@@ -178,12 +189,24 @@ def _record_signals(conn: sqlite3.Connection, brand: sqlite3.Row, start: str, en
     }
 
 
-def _sales_signals(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
+def _sales_signals(
+    conn: sqlite3.Connection,
+    brand_id: str,
+    start: str,
+    end: str,
+    country: str,
+) -> dict:
+    country_filter = " AND UPPER(COALESCE(l.region, '')) = ?" if country else ""
+    params: list[str] = [brand_id, start, end]
+    if country:
+        params.append(country)
     rows = conn.execute(
-        "SELECT id, link_id, snapshot_date, revenue_est, units_est, review_count "
-        "FROM sales_metrics WHERE brand_id = ? AND snapshot_date >= ? AND snapshot_date <= ? "
-        "ORDER BY snapshot_date, id",
-        (brand_id, start, end),
+        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.revenue_est, sm.units_est, sm.review_count "
+        "FROM sales_metrics sm LEFT JOIN links l ON l.id = sm.link_id "
+        "WHERE sm.brand_id = ? AND sm.snapshot_date >= ? AND sm.snapshot_date <= ?"
+        + country_filter
+        + " ORDER BY sm.snapshot_date, sm.id",
+        params,
     ).fetchall()
     latest_reviews: dict[str, float] = {}
     revenue = 0.0
@@ -202,6 +225,36 @@ def _sales_signals(conn: sqlite3.Connection, brand_id: str, start: str, end: str
     }
 
 
+def _available_countries(
+    conn: sqlite3.Connection,
+    brand_ids: list[str],
+    start: str,
+    end: str,
+) -> list[str]:
+    placeholders = ",".join("?" for _ in brand_ids)
+    record_rows = conn.execute(
+        f"SELECT DISTINCT UPPER(region) AS country FROM records "
+        f"WHERE brand_id IN ({placeholders}) AND region IS NOT NULL AND TRIM(region) != '' "
+        "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ? "
+        "AND (LOWER(COALESCE(channel, '')) = 'app' "
+        "OR LOWER(COALESCE(platform, '')) IN ('app_store', 'google_play'))",
+        [*brand_ids, start, end],
+    ).fetchall()
+    link_rows = conn.execute(
+        f"SELECT DISTINCT UPPER(region) AS country FROM links "
+        f"WHERE brand_id IN ({placeholders}) AND region IS NOT NULL AND TRIM(region) != '' "
+        "AND (LOWER(COALESCE(channel, '')) = 'app' "
+        "OR LOWER(COALESCE(platform, '')) IN ('app_store', 'google_play'))",
+        brand_ids,
+    ).fetchall()
+    countries = {
+        str(row["country"]).strip().upper()
+        for row in [*record_rows, *link_rows]
+        if len(str(row["country"] or "").strip()) == 2
+    }
+    return sorted(countries)
+
+
 def _signal_share(rows: list[dict], key: str) -> dict[str, float]:
     total = sum(max(0.0, float(row["signals"].get(key) or 0)) for row in rows)
     if total <= 0:
@@ -213,6 +266,7 @@ def _signal_share(rows: list[dict], key: str) -> dict[str, float]:
 def market_share(
     brand_ids: str,
     model: str = "balanced",
+    country: str = "all",
     days: int = 30,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -226,6 +280,9 @@ def market_share(
     preset = MODEL_PRESETS.get(model)
     if not preset:
         raise HTTPException(status_code=400, detail="未知估算模型。")
+    country_code = "" if not country or country.strip().lower() == "all" else country.strip().upper()
+    if country_code and (len(country_code) != 2 or not country_code.isalpha()):
+        raise HTTPException(status_code=400, detail="国家代码必须是两位 ISO 代码，例如 US、CN、GB。")
 
     placeholders = ",".join("?" for _ in ids)
     found = conn.execute(
@@ -238,16 +295,13 @@ def market_share(
         raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(missing)}")
 
     start, end = resolve_window(days, start_date, end_date)
+    countries = _available_countries(conn, ids, start, end)
     rows: list[dict] = []
     for brand_id in ids:
         brand = by_id[brand_id]
-        record_data = _record_signals(conn, brand, start, end)
-        sales_data = _sales_signals(conn, brand_id, start, end)
-        conversation_signal = (
-            record_data["mentions"]
-            + record_data["voc_records"]
-            + record_data["comments"]
-        )
+        record_data = _record_signals(conn, brand, start, end, country_code)
+        sales_data = _sales_signals(conn, brand_id, start, end, country_code)
+        conversation_signal = record_data["app_reviews"] + record_data["comments"]
         signals = {
             "sales": 0,
             "app": record_data["app_downloads_est"],
@@ -311,7 +365,7 @@ def market_share(
         elif row["raw"]["app_download_basis"] == "review_proxy":
             gaps.append("App 下载量由评论量区间推算")
         if not row["signals"]["conversation"]:
-            gaps.append("缺少评论、讨论或媒体提及")
+            gaps.append("缺少可比较的 App、商品或社交评论数")
         if not row["signals"]["engagement"]:
             gaps.append("缺少点赞、评论、分享等互动指标")
         brand_id = row["brand_id"]
@@ -336,9 +390,9 @@ def market_share(
             for key in active_keys
         )
     evidence_total = sum(
-        row["raw"]["mentions"]
-        + row["raw"]["voc_records"]
+        row["raw"]["app_reviews"]
         + row["raw"]["comments"]
+        + row["raw"]["product_reviews"]
         + row["raw"]["sales_data_points"]
         for row in rows
     )
@@ -347,6 +401,8 @@ def market_share(
     confidence_label = "高" if confidence_score >= 75 else "中" if confidence_score >= 50 else "低"
 
     warnings = ["该结果是所选品牌与已采集数据源内的相对份额，不等同于官方全行业市占。"]
+    if country_code:
+        warnings.append(f"当前仅统计国家标签为 {country_code} 的记录；未标注国家的数据不会混入该国家。")
     categories = {str(row["category"]).strip() for row in rows if row.get("category")}
     if len(categories) > 1:
         warnings.append("所选品牌分属不同品类，横向市占的业务含义可能有限。")
@@ -356,7 +412,7 @@ def market_share(
         warnings.append("App 下载估算按 0.5%-2% 的评论转化率给出宽区间，中位值按 1% 计算。")
     if active_base_weight < 0.999:
         warnings.append("数据覆盖不足、无法横向比较的指标未计入综合值，其权重已自动分配给可用指标。")
-    for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "评论/声量"), ("engagement", "互动")):
+    for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "评论数"), ("engagement", "互动")):
         if 0 < signal_coverage[key] < comparable_floor:
             warnings.append(f"{label}仅覆盖 {signal_coverage[key]}/{len(rows)} 个品牌，本次未纳入综合份额。")
     if product_review_coverage and product_review_coverage < comparable_floor:
@@ -364,6 +420,8 @@ def market_share(
 
     return {
         "range": {"start": start, "end": end},
+        "country": country_code or "all",
+        "countries": countries,
         "model": {
             "key": model,
             "label": preset["label"],

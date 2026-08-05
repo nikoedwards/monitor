@@ -14,15 +14,26 @@ const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280"
 const SIGNALS = [
   { key: "sales", label: "销售结果" },
   { key: "app", label: "App 下载" },
-  { key: "conversation", label: "评论 / 声量" },
+  { key: "conversation", label: "评论数" },
   { key: "engagement", label: "互动" },
 ] as const;
 
 const MODELS: { value: MarketShareModelKey; label: string }[] = [
-  { value: "balanced", label: "综合代理模型（推荐）" },
+  { value: "balanced", label: "下载与评论优先（推荐）" },
   { value: "commerce", label: "商业结果优先" },
   { value: "attention", label: "产品热度优先" },
 ];
+
+const COUNTRY_LABELS: Record<string, string> = {
+  AU: "澳大利亚", BR: "巴西", CA: "加拿大", CN: "中国", DE: "德国", ES: "西班牙",
+  FR: "法国", GB: "英国", HK: "中国香港", ID: "印度尼西亚", IN: "印度", IT: "意大利",
+  JP: "日本", KR: "韩国", MX: "墨西哥", NL: "荷兰", SG: "新加坡", TH: "泰国",
+  TW: "中国台湾", US: "美国", VN: "越南",
+};
+
+function countryLabel(code: string): string {
+  return COUNTRY_LABELS[code] ? `${COUNTRY_LABELS[code]}（${code}）` : code;
+}
 
 function initialSavedBrands(): string[] {
   try {
@@ -61,6 +72,7 @@ export default function MarketShare() {
   const [draft, setDraft] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [model, setModel] = useState<MarketShareModelKey>("balanced");
+  const [country, setCountry] = useState("all");
 
   useEffect(() => {
     if (!brands.length) return;
@@ -83,8 +95,12 @@ export default function MarketShare() {
     () => selected.map((id) => brands.find((brand) => brand.id === id)).filter(Boolean),
     [brands, selected],
   );
-  const query = useMarketShare(selected, model, range);
+  const query = useMarketShare(selected, model, country, range);
   const result = query.data;
+  const countryOptions = useMemo(
+    () => Array.from(new Set([...(result?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
+    [result?.countries, country],
+  );
   const leader = result?.brands[0];
   const appDownloads = result?.brands.reduce((sum, row) => sum + row.raw.app_downloads_est, 0) || 0;
   const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0).length : 0;
@@ -104,10 +120,14 @@ export default function MarketShare() {
     <div className="space-y-6">
       <SectionTitle
         title="市占分析"
-        subtitle="基于已采集的销售、App、评论声量与互动信号，估算所选品牌内的相对份额"
+        subtitle="按国家，以 App 下载量和评论数为核心估算所选品牌内的相对份额"
         hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            <Select value={country} onChange={(event) => setCountry(event.target.value)} aria-label="国家">
+              <option value="all">全部国家</option>
+              {countryOptions.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
+            </Select>
             <Select value={model} onChange={(event) => setModel(event.target.value as MarketShareModelKey)}>
               {MODELS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
             </Select>
@@ -150,10 +170,10 @@ export default function MarketShare() {
       {result && (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `综合估算 ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
+            <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
             <StatCard label="模型置信度" value={`${result.confidence.score}%`} hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`} />
             <StatCard label="可用信号" value={`${activeSignals}/4`} hint="缺失信号会自动重分配权重" />
-            <StatCard label="App 下载估算" value={appDownloads ? fmtNum(appDownloads) : "—"} hint="所选品牌合计中位估算" />
+            <StatCard label="App 下载估算" value={appDownloads ? fmtNum(appDownloads) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 所选品牌合计`} />
           </div>
 
           {result.warnings.length > 0 && (
@@ -167,7 +187,7 @@ export default function MarketShare() {
 
           <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4">
             <Card>
-              <SectionTitle title="综合估算份额" subtitle={`${result.range.start} 至 ${result.range.end}`} />
+              <SectionTitle title="综合估算份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
               <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-5 items-center">
                 <div className="h-[260px] relative">
                   <ResponsiveContainer width="100%" height="100%">
@@ -251,7 +271,7 @@ export default function MarketShare() {
                     <th className="text-right font-medium py-2.5 px-3">App 下载估算</th>
                     <th className="text-right font-medium py-2.5 px-3">App 评论</th>
                     <th className="text-right font-medium py-2.5 px-3">商品评论量</th>
-                    <th className="text-right font-medium py-2.5 px-3">公开提及</th>
+                    <th className="text-right font-medium py-2.5 px-3">公开提及（不计权）</th>
                     <th className="text-right font-medium py-2.5 px-3">评论 / 回复</th>
                     <th className="text-right font-medium py-2.5 px-3">互动</th>
                     <th className="text-right font-medium py-2.5 px-3">播放 / 浏览</th>
@@ -297,7 +317,7 @@ export default function MarketShare() {
                 })}
               </div>
               <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
-                算法：每个指标先除以所选品牌总量得到单项份额，再按有效权重加权求和。覆盖不足、无法横向比较的指标不会进入综合值；大模型不参与数值计算，避免生成不可验证的份额。
+                算法：当前模型基础权重为 App 下载 {(result.model.base_weights.app * 100).toFixed(0)}%、评论数 {(result.model.base_weights.conversation * 100).toFixed(0)}%、销售结果 {(result.model.base_weights.sales * 100).toFixed(0)}%、互动 {(result.model.base_weights.engagement * 100).toFixed(0)}%。每项先在所选品牌和国家内归一化；覆盖不足的指标会自动降权，公开提及不参与计算。大模型不参与数值计算。
               </div>
             </Card>
 
