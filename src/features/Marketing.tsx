@@ -333,6 +333,7 @@ export default function Marketing() {
           ) : (
             <RecordList
               records={shownRecords}
+              variant={isSocial ? "social-cards" : "list"}
               emptyHint={selectedPublication
                 ? "当前时间范围内暂无该媒体的收录文章。"
                 : isSocial && socialPlatform !== "all"
