@@ -1,6 +1,7 @@
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import {
   Briefcase,
+  ChartPie,
   ChevronDown,
   Globe,
   LayoutDashboard,
@@ -20,6 +21,7 @@ import { Badge, Button, Field, Input, Modal, Textarea } from "./ui";
 const NAV = [
   { to: "overview", label: "经营总览", icon: LayoutDashboard },
   { to: "sales", label: "销售监控", icon: ShoppingCart },
+  { to: "market-share", label: "市占分析", icon: ChartPie },
   { to: "hiring", label: "招聘监控", icon: Briefcase },
   { to: "marketing", label: "营销监控", icon: Megaphone },
   { to: "voice", label: "用户之声", icon: MessageSquare },
