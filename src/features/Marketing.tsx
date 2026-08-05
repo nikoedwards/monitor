@@ -41,6 +41,12 @@ const TIER_LABEL: Record<string, string> = {
 };
 
 const PLATFORM_LABEL: Record<string, string> = {
+  youtube: "YouTube",
+  instagram: "Instagram",
+  tiktok: "TikTok",
+  x: "X",
+  facebook: "Facebook",
+  linkedin: "LinkedIn",
   reddit: "Reddit",
   discourse: "论坛 (Discourse)",
   frill: "反馈站 (Frill)",
@@ -233,11 +239,14 @@ export default function Marketing() {
         </Card>
         <Card>
           <SectionTitle
-            title={view === "channel" ? "来源渠道明细" : "平台分布"}
-            subtitle={view === "channel" ? "该渠道下各数据源的采集量" : undefined}
+            title={isSocial ? "社媒平台明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
+            subtitle={isSocial ? "按 YouTube、Instagram、TikTok 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
           />
           {view === "channel" ? (
-            <SourceBreakdown sources={summary.by_source || []} />
+            <SourceBreakdown
+              sources={isSocial ? summary.by_platform || [] : summary.by_source || []}
+              kind={isSocial ? "platform" : "source"}
+            />
           ) : summary.by_platform?.length ? (
             <Bars data={summary.by_platform.slice(0, 8)} dataKey="total" nameKey="platform" name="声量" color="var(--violet)" />
           ) : (
@@ -498,24 +507,41 @@ function CommunityBreakdown({ groups, hidden, onToggle }: { groups: SubGroup[]; 
   );
 }
 
-function SourceBreakdown({ sources }: { sources: { source_id: string; total: number }[] }) {
+type SourceBreakdownItem = { source_id?: string; platform?: string; total: number };
+
+function SourceBreakdown({
+  sources,
+  kind = "source",
+}: {
+  sources: SourceBreakdownItem[];
+  kind?: "source" | "platform";
+}) {
   if (!sources.length) {
-    return <EmptyState title="暂无数据源" hint="该渠道尚未采集到数据，配置链接或手动刷新后查看。" />;
+    return (
+      <EmptyState
+        title={kind === "platform" ? "暂无平台数据" : "暂无数据源"}
+        hint="该渠道尚未采集到数据，配置链接或手动刷新后查看。"
+      />
+    );
   }
   const max = Math.max(...sources.map((s) => s.total), 1);
   return (
     <div className="space-y-2.5">
-      {sources.map((s) => (
-        <div key={s.source_id}>
-          <div className="flex items-center justify-between text-[13px] mb-1">
-            <span style={{ color: "var(--ink)" }}>{SOURCE_LABEL[s.source_id] || s.source_id}</span>
-            <span className="tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(s.total)}</span>
+      {sources.map((s) => {
+        const key = kind === "platform" ? s.platform || "unknown" : s.source_id || "unknown";
+        const label = kind === "platform" ? PLATFORM_LABEL[key] || key : SOURCE_LABEL[key] || key;
+        return (
+          <div key={key}>
+            <div className="flex items-center justify-between text-[13px] mb-1">
+              <span style={{ color: "var(--ink)" }}>{label}</span>
+              <span className="tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(s.total)}</span>
+            </div>
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+              <div className="h-full rounded-full" style={{ width: `${(s.total / max) * 100}%`, background: "var(--accent)" }} />
+            </div>
           </div>
-          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-            <div className="h-full rounded-full" style={{ width: `${(s.total / max) * 100}%`, background: "var(--accent)" }} />
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
