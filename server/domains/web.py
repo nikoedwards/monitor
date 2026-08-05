@@ -47,7 +47,9 @@ SNAPSHOT_RETRY_DELAYS_MINUTES = (10, 30, 60, 180)
 SNAPSHOT_RECOVERY_RETRY_MINUTES = 360
 SNAPSHOT_CIRCUIT_BREAKER_AFTER = 8
 SNAPSHOT_CIRCUIT_BREAKER_MINUTES = 1440
+SNAPSHOT_CIRCUIT_PROBE_MINUTES = 60
 SHARED_CAPTURE_REUSE_MINUTES = 30
+_RATE_LIMIT_ERROR_RE = re.compile(r"(?:\b429\b|too many requests|rate.?limit|local_rate_limited)", re.IGNORECASE)
 _BROWSER_FALLBACK_NETWORK_ERRORS = (
     "timed out",
     "timeout",
@@ -97,11 +99,31 @@ def _interval_minutes(monitor: dict, kind: str) -> int:
         return DEFAULT_INTERVAL_MINUTES
 
 
+def _rate_limit_circuit_active(monitor: dict) -> bool:
+    try:
+        failures = max(0, int(monitor.get("snapshot_retry_count") or 0))
+    except (TypeError, ValueError):
+        failures = 0
+    return (
+        monitor.get("last_status") == "error"
+        and failures > SNAPSHOT_CIRCUIT_BREAKER_AFTER
+        and bool(_RATE_LIMIT_ERROR_RE.search(monitor.get("last_error") or ""))
+    )
+
+
 def next_run_at(monitor: dict, kind: str) -> datetime:
     if kind == "snapshot" and monitor.get("last_status") == "error":
         retry_at = _parse_datetime(monitor.get("next_snapshot_retry_at"))
         if retry_at:
             return retry_at
+    if kind == "check" and _rate_limit_circuit_active(monitor):
+        base = (
+            _parse_datetime(monitor.get("last_check_at"))
+            or _parse_datetime(monitor.get("last_snapshot_attempt_at"))
+            or _parse_datetime(monitor.get("created_at"))
+            or datetime.now(timezone.utc)
+        )
+        return base + timedelta(minutes=SNAPSHOT_CIRCUIT_PROBE_MINUTES)
     last_field = "last_check_at" if kind == "check" else "last_snapshot_at"
     last_value = monitor.get(last_field)
     if kind == "check" and not last_value:

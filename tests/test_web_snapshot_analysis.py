@@ -760,6 +760,35 @@ class SnapshotSchedulingTests(unittest.TestCase):
         }
         self.assertEqual(next_run_at(monitor, "snapshot").isoformat(), "2026-07-25T00:10:00+00:00")
 
+    def test_rate_limit_circuit_probes_hourly_before_full_retry(self):
+        monitor = {
+            "status": "active",
+            "created_at": "2026-07-01T00:00:00+00:00",
+            "last_check_at": "2026-08-04T23:12:06+00:00",
+            "last_snapshot_at": "2026-07-30T18:24:38+00:00",
+            "last_snapshot_attempt_at": "2026-08-04T23:12:06+00:00",
+            "check_interval_minutes": 1440,
+            "snapshot_interval_minutes": 1440,
+            "snapshot_retry_count": 12,
+            "last_status": "error",
+            "last_error": "HTTP Error 429: Too Many Requests",
+            "next_snapshot_retry_at": "2026-08-05T23:12:06+00:00",
+        }
+        self.assertEqual(next_run_at(monitor, "check").isoformat(), "2026-08-05T00:12:06+00:00")
+        self.assertEqual(next_run_at(monitor, "snapshot").isoformat(), "2026-08-05T23:12:06+00:00")
+
+    def test_non_rate_limit_circuit_keeps_configured_check_interval(self):
+        monitor = {
+            "status": "active",
+            "created_at": "2026-07-01T00:00:00+00:00",
+            "last_check_at": "2026-08-04T23:12:06+00:00",
+            "check_interval_minutes": 1440,
+            "snapshot_retry_count": 12,
+            "last_status": "error",
+            "last_error": "HTTP Error 404: Not Found",
+        }
+        self.assertEqual(next_run_at(monitor, "check").isoformat(), "2026-08-05T23:12:06+00:00")
+
     def test_snapshot_retry_uses_bounded_backoff_then_recovery_interval(self):
         now = datetime.fromisoformat("2026-07-25T00:00:00+00:00")
         expected_minutes = (10, 30, 60, 180, 360, 360, 360, 360, 1440, 1440)
