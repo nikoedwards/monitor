@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars, SimpleLine } from "../components/charts";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import {
   useActivities,
   useAnalyzeJd,
   useCatalogMutations,
+  useEmployeeHistory,
+  useEmployeeMutations,
   useEmployees,
   useEmployeesSync,
   useHiringSummary,
@@ -18,13 +20,13 @@ import {
   useSettings,
 } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import type { JobPosting, Link } from "../lib/api";
+import type { JobPosting, Link, LinkedInEmployee } from "../lib/api";
 import { fmtDate, fmtDateTime, fmtNum } from "../lib/format";
 
 const PLATFORM_LABEL: Record<string, string> = {
   boss: "Boss 直聘",
   linkedin: "LinkedIn 职位",
-  linkedin_people: "LinkedIn 员工",
+  linkedin_people: "LinkedIn 人员",
 };
 
 const PLATFORM_FILTERS = [
@@ -53,8 +55,8 @@ export default function Hiring() {
     <div className="space-y-6">
       <SectionTitle
         title="招聘监控"
-        subtitle="监控 Boss 直聘 / LinkedIn 职位与 JD，分析 JD 释放频率反推对方业务动向"
-        hint="Boss 直聘 / LinkedIn 反爬严格，需在设置中配置登录 Cookie；抓取 LinkedIn 员工动态可能违反其服务条款，请自行评估合规与账号风险。"
+        subtitle="监控 Boss 直聘 / LinkedIn 职位与 JD，并以重点人员变化补充判断企业投入方向"
+        hint="Boss 直聘 / LinkedIn 反爬严格，需在设置中配置登录 Cookie；抓取 LinkedIn 个人公开页面与动态可能违反其服务条款，请自行评估合规与账号风险。"
         action={
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
@@ -73,7 +75,7 @@ export default function Hiring() {
 
       <SegmentGroup
         value={tab}
-        options={[{ value: "jobs", label: "职位与 JD" }, { value: "people", label: "员工动态" }]}
+        options={[{ value: "jobs", label: "职位与 JD" }, { value: "people", label: "重点人员" }]}
         onChange={setTab}
       />
 
@@ -327,53 +329,120 @@ function PeopleTab({ brandId }: { brandId: string }) {
   const { data: employees = [], isLoading } = useEmployees(brandId);
   const { data: activities = [] } = useActivities(brandId);
   const sync = useEmployeesSync();
+  const mutations = useEmployeeMutations();
+  const [scope, setScope] = useState<"focus" | "all">("focus");
+  const [addOpen, setAddOpen] = useState(false);
+  const [detailId, setDetailId] = useState<string | undefined>();
+
+  const focusPeople = employees.filter((employee) => employee.monitor);
+  const visiblePeople = scope === "focus" ? focusPeople : employees;
+  const focusIds = new Set(focusPeople.map((employee) => employee.id));
+  const visibleActivities = scope === "focus"
+    ? activities.filter((activity) => focusIds.has(activity.profile_id))
+    : activities;
+  const profileChanges = focusPeople.reduce((sum, employee) => sum + (employee.change_count || 0), 0);
+  const seenDates = focusPeople.map((employee) => employee.last_seen).filter((value): value is string => !!value).sort();
+  const latestSeen = seenDates.length ? seenDates[seenDates.length - 1] : undefined;
 
   return (
     <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard label="重点人员" value={fmtNum(focusPeople.length)} tone="accent" />
+        <StatCard label="员工候选池" value={fmtNum(employees.length)} />
+        <StatCard label="个人页变更" value={fmtNum(profileChanges)} />
+        <StatCard label="最近采集" value={latestSeen ? fmtDate(latestSeen) : "—"} />
+      </div>
+
       <Card>
         <SectionTitle
-          title="LinkedIn 员工名册"
-          subtitle="从目标公司的 LinkedIn People 页采集员工账号（需配置 Cookie，best-effort）"
-          action={<Button onClick={() => sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "采集员工动态"}</Button>}
+          title="重点人员监控"
+          subtitle="公司 People 页用于发现候选人；只有标记为重点的人员才会持续采集个人页、头衔变化和公开动态"
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <SegmentGroup
+                value={scope}
+                options={[{ value: "focus", label: "仅重点" }, { value: "all", label: "全部候选" }]}
+                onChange={setScope}
+              />
+              <Button onClick={() => sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即采集"}</Button>
+              <Button variant="primary" onClick={() => setAddOpen(true)}>+ 添加重点人员</Button>
+            </div>
+          }
         />
         {isLoading ? (
           <Spinner />
-        ) : employees.length ? (
+        ) : visiblePeople.length ? (
           <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead>
                 <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
-                  {["姓名", "头衔", "动态数", "最近动态", ""].map((h) => (
+                  {["人员", "当前身份", "个人页变化", "公开动态", "最近采集", "采集状态", ""].map((h) => (
                     <th key={h} className="text-left font-medium py-2 px-2 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {employees.map((e) => (
+                {visiblePeople.map((e) => (
                   <tr key={e.id} style={{ borderBottom: "1px solid var(--hairline)", color: "var(--body)" }}>
-                    <td className="py-2 px-2" style={{ color: "var(--ink)" }}>{e.name || e.profile_url || "(未知)"}</td>
-                    <td className="py-2 px-2 max-w-[280px] truncate">{e.title || e.headline || "—"}</td>
+                    <td className="py-2 px-2 min-w-[190px]">
+                      <button onClick={() => setDetailId(e.id)} className="text-left font-medium cursor-pointer hover:underline" style={{ color: "var(--ink)" }}>
+                        {e.name || "未识别姓名"}
+                      </button>
+                      <div className="text-[11px] mt-0.5" style={{ color: "var(--mute)" }}>
+                        {e.source_type === "manual" ? "手动添加" : "公司 People 页发现"}
+                      </div>
+                    </td>
+                    <td className="py-2 px-2 max-w-[300px]">
+                      <div className="truncate">{e.title || e.headline || "—"}</div>
+                      {e.notes && <div className="text-[11px] truncate mt-0.5" style={{ color: "var(--mute)" }}>{e.notes}</div>}
+                    </td>
+                    <td className="py-2 px-2">{e.change_count ? <Badge tone="warning">{e.change_count} 次</Badge> : "—"}</td>
                     <td className="py-2 px-2 tabular-nums">{fmtNum(e.activity_count)}</td>
-                    <td className="py-2 px-2 whitespace-nowrap">{e.last_activity_at ? fmtDateTime(e.last_activity_at) : "—"}</td>
-                    <td className="py-2 px-2">{e.profile_url && <a href={e.profile_url} target="_blank" rel="noreferrer" className="text-[12px] cursor-pointer" style={{ color: "var(--accent)" }}>主页</a>}</td>
+                    <td className="py-2 px-2 whitespace-nowrap">{e.last_seen ? fmtDateTime(e.last_seen) : "待首次采集"}</td>
+                    <td className="py-2 px-2">
+                      {e.last_status === "ok" || e.last_status === "partial"
+                        ? <Badge tone={e.last_status === "ok" ? "positive" : "warning"}>{e.last_status === "ok" ? "正常" : "部分数据"}</Badge>
+                        : e.last_status
+                          ? <Badge tone="warning">{e.last_status}</Badge>
+                          : <span style={{ color: "var(--mute)" }}>未采集</span>}
+                    </td>
+                    <td className="py-2 px-2 whitespace-nowrap">
+                      <button
+                        onClick={() => mutations.update.mutate({ id: e.id, monitor: !e.monitor, status: "active" })}
+                        className="text-[12px] px-2 py-1 rounded-md cursor-pointer mr-2"
+                        style={e.monitor ? { background: "rgba(0,112,243,0.12)", color: "var(--accent)" } : { color: "var(--mute)", border: "1px solid var(--hairline-strong)" }}
+                      >
+                        {e.monitor ? "重点监控中" : "设为重点"}
+                      </button>
+                      <button onClick={() => setDetailId(e.id)} className="text-[12px] cursor-pointer mr-2" style={{ color: "var(--accent)" }}>详情</button>
+                      {e.profile_url && <a href={e.profile_url} target="_blank" rel="noreferrer" className="text-[12px] cursor-pointer mr-2" style={{ color: "var(--accent)" }}>主页</a>}
+                      <button onClick={() => mutations.remove.mutate(e.id)} className="text-[12px] cursor-pointer" style={{ color: "var(--mute)" }}>删除</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ) : (
-          <EmptyState title="暂无员工数据" hint="配置一个 platform 为「LinkedIn 员工」的采集源（公司 People 页 URL），采集后展示。" />
+          <EmptyState
+            title={scope === "focus" ? "暂无重点人员" : "暂无人员数据"}
+            hint="可直接添加 LinkedIn 个人主页；也可配置公司 People 页批量发现候选人，再从名单中标记重点。"
+            action={<Button variant="primary" onClick={() => setAddOpen(true)}>添加重点人员</Button>}
+          />
         )}
       </Card>
 
       <Card>
-        <SectionTitle title="员工动态 Feed" subtitle="一线员工的公开动态，用于侧面反馈其工作状态与团队节奏" />
-        {activities.length ? (
+        <SectionTitle title="重点人员信号 Feed" subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据" />
+        {visibleActivities.length ? (
           <div className="space-y-2 max-h-[480px] overflow-y-auto">
-            {activities.map((a) => (
+            {visibleActivities.map((a) => (
               <div key={a.id} className="p-3 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <span className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{a.profile_name || "员工"}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{a.profile_name || "人员"}</span>
+                    <Badge tone={a.activity_type === "profile_change" ? "warning" : "neutral"}>{a.activity_type === "profile_change" ? "个人页变更" : "公开动态"}</Badge>
+                  </div>
                   <span className="text-[11px]" style={{ color: "var(--mute)" }}>{a.posted_at ? fmtDateTime(a.posted_at) : fmtDateTime(a.created_at)}</span>
                 </div>
                 <p className="text-[13px]" style={{ color: "var(--body)" }}>{a.text}</p>
@@ -382,10 +451,110 @@ function PeopleTab({ brandId }: { brandId: string }) {
             ))}
           </div>
         ) : (
-          <EmptyState title="暂无动态" hint="LinkedIn 员工动态抓取为最佳努力，可能因反爬或未配置 Cookie 而为空。" />
+          <EmptyState title="暂无人员信号" hint="首次采集后会在这里展示个人页变化和公开动态；LinkedIn 抓取为最佳努力，可能受 Cookie 或风控影响。" />
         )}
       </Card>
+
+      <AddFocusPersonModal open={addOpen} onClose={() => setAddOpen(false)} brandId={brandId} />
+      <PersonDetailModal profileId={detailId} onClose={() => setDetailId(undefined)} />
     </div>
+  );
+}
+
+function AddFocusPersonModal({ open, onClose, brandId }: { open: boolean; onClose: () => void; brandId: string }) {
+  const { add } = useEmployeeMutations();
+  const [form, setForm] = useState({ profile_url: "", name: "", title: "", notes: "" });
+  const [error, setError] = useState("");
+
+  const save = async () => {
+    setError("");
+    try {
+      await add.mutateAsync({ brand_id: brandId, ...form, monitor: true });
+      setForm({ profile_url: "", name: "", title: "", notes: "" });
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || "添加失败");
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="添加重点人员" width={600}>
+      <div className="space-y-3">
+        <Field label="LinkedIn 个人主页" hint="目前只支持 linkedin.com/in/... 形式的公开个人页。">
+          <Input value={form.profile_url} onChange={(e) => setForm({ ...form, profile_url: e.target.value })} placeholder="https://www.linkedin.com/in/..." />
+        </Field>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="姓名（可选）"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="当前职位（可选）"><Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></Field>
+        </div>
+        <Field label="关注原因 / 备注（可选）"><Textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="例如：AI 团队负责人、近期加入竞品、核心销售负责人" /></Field>
+        {error && <p className="text-[12px]" style={{ color: "var(--danger)" }}>{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={save} disabled={!form.profile_url || add.isPending}>{add.isPending ? "添加中…" : "添加并监控"}</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function PersonDetailModal({ profileId, onClose }: { profileId?: string; onClose: () => void }) {
+  const { data, isLoading } = useEmployeeHistory(profileId);
+  if (!profileId) return null;
+  const profile: LinkedInEmployee | undefined = data?.profile;
+  const snapshots: any[] = data?.snapshots || [];
+  const activities: any[] = data?.activities || [];
+
+  return (
+    <Modal open={!!profileId} onClose={onClose} title={profile?.name || "重点人员详情"} width={720}>
+      {isLoading || !data ? <Spinner /> : (
+        <div className="space-y-4">
+          <div>
+            <div className="text-[15px] font-medium" style={{ color: "var(--ink)" }}>{profile?.title || profile?.headline || "未识别当前职位"}</div>
+            {profile?.notes && <div className="text-[13px] mt-1" style={{ color: "var(--body)" }}>{profile.notes}</div>}
+            <div className="text-[12px] mt-2" style={{ color: "var(--mute)" }}>
+              {profile?.snapshot_count || 0} 个个人页快照 · {profile?.change_count || 0} 次变化 · {profile?.activity_count || 0} 条信号
+            </div>
+            {profile?.profile_url && <a href={profile.profile_url} target="_blank" rel="noreferrer" className="text-[12px] mt-1 inline-block" style={{ color: "var(--accent)" }}>打开 LinkedIn 主页</a>}
+          </div>
+
+          <div>
+            <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>个人页变化</div>
+            {snapshots.some((snapshot) => snapshot.changes?.length) ? (
+              <div className="space-y-2 max-h-56 overflow-y-auto">
+                {snapshots.filter((snapshot) => snapshot.changes?.length).map((snapshot) => (
+                  <div key={snapshot.id} className="p-2 rounded-md text-[12px]" style={{ background: "var(--bg-soft-2)" }}>
+                    <div style={{ color: "var(--mute)" }}>{fmtDate(snapshot.snapshot_date)}</div>
+                    {snapshot.changes.map((change: any, index: number) => (
+                      <div key={index} style={{ color: "var(--body)" }}>
+                        <span className="font-medium">{change.field === "name" ? "姓名" : change.field === "headline" ? "头衔" : "职位"}</span>：{String(change.from || "—")} → {String(change.to || "—")}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : <p className="text-[12px]" style={{ color: "var(--mute)" }}>暂无个人页变化</p>}
+          </div>
+
+          <div>
+            <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>最近信号</div>
+            {activities.length ? (
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {activities.map((activity) => (
+                  <div key={activity.id} className="p-2 rounded-md text-[12px]" style={{ background: "var(--bg-soft-2)" }}>
+                    <div className="flex justify-between gap-2 mb-1">
+                      <Badge tone={activity.activity_type === "profile_change" ? "warning" : "neutral"}>{activity.activity_type === "profile_change" ? "个人页变更" : "公开动态"}</Badge>
+                      <span style={{ color: "var(--mute)" }}>{fmtDateTime(activity.posted_at || activity.created_at)}</span>
+                    </div>
+                    <div style={{ color: "var(--body)" }}>{activity.text}</div>
+                  </div>
+                ))}
+              </div>
+            ) : <p className="text-[12px]" style={{ color: "var(--mute)" }}>暂无公开动态</p>}
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 

@@ -148,6 +148,25 @@ class SalesListingUpdate(BaseModel):
     product_id: Optional[str] = None
 
 
+class LinkedInProfileIn(BaseModel):
+    brand_id: str
+    profile_url: str
+    name: Optional[str] = None
+    headline: Optional[str] = None
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    monitor: bool = True
+
+
+class LinkedInProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    headline: Optional[str] = None
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    monitor: Optional[bool] = None
+    status: Optional[str] = None
+
+
 class SettingsIn(BaseModel):
     api_key: Optional[str] = None
     base_url: Optional[str] = None

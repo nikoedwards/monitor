@@ -397,16 +397,19 @@ CREATE TABLE IF NOT EXISTS linkedin_profiles (
   id TEXT PRIMARY KEY,
   brand_id TEXT NOT NULL,
   link_id TEXT,
+  source_type TEXT NOT NULL DEFAULT 'company', -- company | manual
   external_id TEXT,
   name TEXT,
   headline TEXT,
   title TEXT,
+  notes TEXT,
   profile_url TEXT,
   canonical_url TEXT,
   avatar_url TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   monitor INTEGER NOT NULL DEFAULT 1,
   last_activity_at TEXT,
+  last_profile_change_at TEXT,
   first_seen TEXT,
   last_seen TEXT,
   last_status TEXT,
@@ -414,6 +417,21 @@ CREATE TABLE IF NOT EXISTS linkedin_profiles (
   raw_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+-- Daily LinkedIn profile snapshots for monitored/key people.
+CREATE TABLE IF NOT EXISTS linkedin_profile_snapshots (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  snapshot_date TEXT NOT NULL,
+  name TEXT,
+  headline TEXT,
+  title TEXT,
+  status TEXT,
+  changes_json TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
 );
 
 -- LinkedIn employee activity feed (posts / comments / job changes).
@@ -457,6 +475,8 @@ CREATE INDEX IF NOT EXISTS idx_job_postings_link ON job_postings(link_id);
 CREATE INDEX IF NOT EXISTS idx_job_snapshots_brand ON job_snapshots(brand_id, snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_job_snapshots_posting ON job_snapshots(posting_id, snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_li_profiles_brand ON linkedin_profiles(brand_id);
+CREATE INDEX IF NOT EXISTS idx_li_profile_snapshots_profile ON linkedin_profile_snapshots(profile_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_li_profile_snapshots_brand ON linkedin_profile_snapshots(brand_id, snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_li_activities_brand ON linkedin_activities(brand_id, posted_at);
 CREATE INDEX IF NOT EXISTS idx_li_activities_profile ON linkedin_activities(profile_id, posted_at);
 """
@@ -539,6 +559,9 @@ MIGRATIONS = [
     ("publications", "popularity_rank", "INTEGER"),
     ("publications", "traffic_confidence", "TEXT NOT NULL DEFAULT 'low'"),
     ("publications", "traffic_as_of", "TEXT"),
+    ("linkedin_profiles", "source_type", "TEXT NOT NULL DEFAULT 'company'"),
+    ("linkedin_profiles", "notes", "TEXT"),
+    ("linkedin_profiles", "last_profile_change_at", "TEXT"),
 ]
 
 

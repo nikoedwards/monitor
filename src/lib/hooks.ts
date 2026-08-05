@@ -392,6 +392,12 @@ function invalidateHiring(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["job-postings"] });
 }
 
+function invalidatePeople(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["li-employees"] });
+  qc.invalidateQueries({ queryKey: ["li-employee-history"] });
+  qc.invalidateQueries({ queryKey: ["li-activities"] });
+}
+
 export function useHiringSync() {
   const qc = useQueryClient();
   return useMutation({
@@ -421,11 +427,43 @@ export function useEmployeesSync() {
   return useMutation({
     mutationFn: ({ brandId, linkId }: { brandId: string; linkId?: string }) =>
       api.post<any>(`/api/hiring/employees/sync${qs({ brand_id: brandId, link_id: linkId })}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["li-employees"] });
-      qc.invalidateQueries({ queryKey: ["li-activities"] });
-    },
+    onSuccess: () => invalidatePeople(qc),
   });
+}
+
+export function useEmployeeHistory(profileId?: string) {
+  return useQuery({
+    queryKey: ["li-employee-history", profileId],
+    queryFn: () => api.get<any>(`/api/hiring/employees/${profileId}/history`),
+    enabled: !!profileId,
+  });
+}
+
+export function useEmployeeMutations() {
+  const qc = useQueryClient();
+  return {
+    add: useMutation({
+      mutationFn: (payload: {
+        brand_id: string;
+        profile_url: string;
+        name?: string;
+        title?: string;
+        headline?: string;
+        notes?: string;
+        monitor?: boolean;
+      }) => api.post<import("./api").LinkedInEmployee>("/api/hiring/employees", payload),
+      onSuccess: () => invalidatePeople(qc),
+    }),
+    update: useMutation({
+      mutationFn: ({ id, ...payload }: { id: string; monitor?: boolean; status?: string; name?: string; title?: string; headline?: string; notes?: string }) =>
+        api.put<import("./api").LinkedInEmployee>(`/api/hiring/employees/${id}`, payload),
+      onSuccess: () => invalidatePeople(qc),
+    }),
+    remove: useMutation({
+      mutationFn: (id: string) => api.del(`/api/hiring/employees/${id}`),
+      onSuccess: () => invalidatePeople(qc),
+    }),
+  };
 }
 
 export function useActivities(brandId?: string, profileId?: string) {

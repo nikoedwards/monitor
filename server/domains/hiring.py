@@ -9,11 +9,14 @@ import json
 import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
 from ..connectors.hiring.runner import run_hiring_collection, run_linkedin_people_collection
+from ..schemas import LinkedInProfileIn, LinkedInProfileUpdate
+from ..util import canonical_url, clean_text, new_id, normalize_url, utc_now
 from .common import fetch_brand, get_conn, resolve_window
 
 router = APIRouter(prefix="/api/hiring", tags=["hiring"])
@@ -52,6 +55,28 @@ def profile_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     item["activity_count"] = conn.execute(
         "SELECT COUNT(*) AS c FROM linkedin_activities WHERE profile_id = ?", (item["id"],)
     ).fetchone()["c"]
+    item["snapshot_count"] = conn.execute(
+        "SELECT COUNT(*) AS c FROM linkedin_profile_snapshots WHERE profile_id = ?", (item["id"],)
+    ).fetchone()["c"]
+    item["change_count"] = conn.execute(
+        """
+        SELECT COUNT(*) AS c FROM linkedin_profile_snapshots
+        WHERE profile_id = ? AND changes_json IS NOT NULL AND changes_json != '' AND changes_json != '[]'
+        """,
+        (item["id"],),
+    ).fetchone()["c"]
+    latest = conn.execute(
+        "SELECT * FROM linkedin_profile_snapshots WHERE profile_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
+        (item["id"],),
+    ).fetchone()
+    item["latest_snapshot"] = profile_snapshot_to_dict(latest) if latest else None
+    return item
+
+
+def profile_snapshot_to_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    item.pop("raw_json", None)
+    item["changes"] = json.loads(item.pop("changes_json", None) or "[]")
     return item
 
 
@@ -123,12 +148,145 @@ def sync_employees(brand_id: str, link_id: str | None = None, conn: sqlite3.Conn
 
 # -------------------------------------------------------------------- employees
 @router.get("/employees")
-def list_employees(brand_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+def list_employees(
+    brand_id: str,
+    monitor: bool | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    clauses, params = ["brand_id = ?"], [brand_id]
+    if monitor is not None:
+        clauses.append("monitor = ?")
+        params.append(int(monitor))
     rows = conn.execute(
-        "SELECT * FROM linkedin_profiles WHERE brand_id = ? ORDER BY last_activity_at DESC, last_seen DESC LIMIT 300",
-        (brand_id,),
+        f"""
+        SELECT * FROM linkedin_profiles WHERE {' AND '.join(clauses)}
+        ORDER BY monitor DESC, last_profile_change_at DESC, last_activity_at DESC, last_seen DESC LIMIT 300
+        """,
+        params,
     ).fetchall()
     return {"employees": [profile_to_dict(conn, r) for r in rows]}
+
+
+def _validated_profile_url(value: str) -> tuple[str, str, str]:
+    try:
+        url = normalize_url(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="请输入有效的 LinkedIn 个人主页 URL。") from exc
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not (host == "linkedin.com" or host.endswith(".linkedin.com")) or "/in/" not in parsed.path.lower():
+        raise HTTPException(status_code=400, detail="重点人员目前仅支持 LinkedIn /in/ 个人主页 URL。")
+    canon = canonical_url(url)
+    slug = parsed.path.strip("/").split("/")[-1]
+    return url, canon, slug
+
+
+@router.post("/employees")
+def create_employee(payload: LinkedInProfileIn, conn: sqlite3.Connection = Depends(get_conn)):
+    fetch_brand(conn, payload.brand_id)
+    url, canon, external_id = _validated_profile_url(payload.profile_url)
+    existing = conn.execute(
+        "SELECT * FROM linkedin_profiles WHERE brand_id = ? AND canonical_url = ? LIMIT 1",
+        (payload.brand_id, canon),
+    ).fetchone()
+    now = utc_now()
+    if existing:
+        conn.execute(
+            """
+            UPDATE linkedin_profiles
+            SET source_type = 'manual', profile_url = ?, external_id = COALESCE(NULLIF(?, ''), external_id),
+                name = COALESCE(NULLIF(?, ''), name), headline = COALESCE(NULLIF(?, ''), headline),
+                title = COALESCE(NULLIF(?, ''), title), notes = COALESCE(?, notes),
+                monitor = ?, status = 'active', updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                url, external_id, clean_text(payload.name), clean_text(payload.headline),
+                clean_text(payload.title), payload.notes, int(payload.monitor), now, existing["id"],
+            ),
+        )
+        row = conn.execute("SELECT * FROM linkedin_profiles WHERE id = ?", (existing["id"],)).fetchone()
+        return profile_to_dict(conn, row)
+
+    profile_id = new_id()
+    conn.execute(
+        """
+        INSERT INTO linkedin_profiles (id, brand_id, link_id, source_type, external_id, name,
+            headline, title, notes, profile_url, canonical_url, status, monitor, first_seen,
+            created_at, updated_at)
+        VALUES (?, ?, NULL, 'manual', ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        """,
+        (
+            profile_id, payload.brand_id, external_id, clean_text(payload.name),
+            clean_text(payload.headline), clean_text(payload.title), payload.notes,
+            url, canon, int(payload.monitor), now, now, now,
+        ),
+    )
+    return profile_to_dict(conn, conn.execute("SELECT * FROM linkedin_profiles WHERE id = ?", (profile_id,)).fetchone())
+
+
+@router.put("/employees/{profile_id}")
+def update_employee(
+    profile_id: str,
+    payload: LinkedInProfileUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    existing = conn.execute("SELECT * FROM linkedin_profiles WHERE id = ?", (profile_id,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    data = payload.model_dump(exclude_unset=True)
+    if data.get("status") not in (None, "active", "paused", "inactive"):
+        raise HTTPException(status_code=400, detail="无效的人员监控状态。")
+    fields = []
+    params: list = []
+    for key in ("name", "headline", "title", "notes", "status"):
+        if key in data:
+            fields.append(f"{key} = ?")
+            params.append(clean_text(data[key]) if key != "notes" else data[key])
+    if "monitor" in data:
+        fields.append("monitor = ?")
+        params.append(int(data["monitor"]))
+    if fields:
+        fields.append("updated_at = ?")
+        params.extend([utc_now(), profile_id])
+        conn.execute(f"UPDATE linkedin_profiles SET {', '.join(fields)} WHERE id = ?", params)
+    return profile_to_dict(conn, conn.execute("SELECT * FROM linkedin_profiles WHERE id = ?", (profile_id,)).fetchone())
+
+
+@router.get("/employees/{profile_id}/history")
+def employee_history(profile_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+    profile = conn.execute("SELECT * FROM linkedin_profiles WHERE id = ?", (profile_id,)).fetchone()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    snapshots = conn.execute(
+        "SELECT * FROM linkedin_profile_snapshots WHERE profile_id = ? ORDER BY snapshot_date DESC, created_at DESC",
+        (profile_id,),
+    ).fetchall()
+    activities = conn.execute(
+        "SELECT * FROM linkedin_activities WHERE profile_id = ? ORDER BY COALESCE(posted_at, created_at) DESC LIMIT 100",
+        (profile_id,),
+    ).fetchall()
+    activity_items = []
+    for row in activities:
+        item = dict(row)
+        item.pop("raw_json", None)
+        activity_items.append(item)
+    return {
+        "profile": profile_to_dict(conn, profile),
+        "snapshots": [profile_snapshot_to_dict(row) for row in snapshots],
+        "activities": activity_items,
+    }
+
+
+@router.delete("/employees/{profile_id}")
+def delete_employee(profile_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+    existing = conn.execute("SELECT 1 FROM linkedin_profiles WHERE id = ?", (profile_id,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    conn.execute("DELETE FROM linkedin_profile_snapshots WHERE profile_id = ?", (profile_id,))
+    conn.execute("DELETE FROM linkedin_activities WHERE profile_id = ?", (profile_id,))
+    conn.execute("DELETE FROM linkedin_profiles WHERE id = ?", (profile_id,))
+    return {"deleted": profile_id}
 
 
 @router.get("/activities")

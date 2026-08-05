@@ -14,7 +14,7 @@ import sqlite3
 
 from ...util import canonical_url, clean_text, new_id, today, utc_now
 from . import pick_people_provider, pick_provider
-from .base import JobRef, JobSnapshot, ProfileRef
+from .base import JobRef, JobSnapshot, ProfileRef, ProfileSnapshot
 
 
 def _jd_hash(text: str) -> str:
@@ -289,19 +289,25 @@ def _upsert_profile(conn: sqlite3.Connection, link: dict, ref: ProfileRef) -> st
             SET name = COALESCE(NULLIF(?, ''), name),
                 headline = COALESCE(NULLIF(?, ''), headline),
                 title = COALESCE(NULLIF(?, ''), title),
+                profile_url = COALESCE(NULLIF(?, ''), profile_url),
+                avatar_url = COALESCE(NULLIF(?, ''), avatar_url),
+                status = 'active',
                 last_seen = ?, updated_at = ?
             WHERE id = ?
             """,
-            (clean_text(ref.name), clean_text(ref.headline), clean_text(ref.title), now, now, existing["id"]),
+            (
+                clean_text(ref.name), clean_text(ref.headline), clean_text(ref.title),
+                ref.profile_url, ref.avatar_url, now, now, existing["id"],
+            ),
         )
         return existing["id"]
     profile_id = new_id()
     conn.execute(
         """
-        INSERT INTO linkedin_profiles (id, brand_id, link_id, external_id, name, headline, title,
+        INSERT INTO linkedin_profiles (id, brand_id, link_id, source_type, external_id, name, headline, title,
             profile_url, canonical_url, avatar_url, status, monitor, first_seen, last_seen,
             created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?)
+        VALUES (?, ?, ?, 'company', ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?)
         """,
         (
             profile_id, link["brand_id"], link["id"], ext, clean_text(ref.name),
@@ -310,6 +316,105 @@ def _upsert_profile(conn: sqlite3.Connection, link: dict, ref: ProfileRef) -> st
         ),
     )
     return profile_id
+
+
+def _profile_snapshot_to_dict(snap: ProfileSnapshot, profile: dict) -> dict:
+    return {
+        "name": clean_text(snap.name) or profile.get("name") or "",
+        "headline": clean_text(snap.headline) or profile.get("headline") or "",
+        "title": clean_text(snap.title) or profile.get("title") or "",
+    }
+
+
+def _record_profile_snapshot(conn: sqlite3.Connection, profile: dict, snap: ProfileSnapshot) -> dict:
+    now = utc_now()
+    day = today()
+    if snap.status in ("blocked", "error"):
+        conn.execute(
+            "UPDATE linkedin_profiles SET last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+            (snap.status, snap.error, now, profile["id"]),
+        )
+        return {"changed": False, "status": snap.status}
+
+    current = _profile_snapshot_to_dict(snap, profile)
+    previous_row = conn.execute(
+        "SELECT * FROM linkedin_profile_snapshots WHERE profile_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
+        (profile["id"],),
+    ).fetchone()
+    previous = (
+        {key: previous_row[key] or "" for key in ("name", "headline", "title")}
+        if previous_row
+        else {key: profile.get(key) or "" for key in ("name", "headline", "title")}
+    )
+    changes = _diff_fingerprint(previous, current) if any(previous.values()) else []
+    earlier_today_changes = (
+        json.loads(previous_row["changes_json"] or "[]")
+        if previous_row and previous_row["snapshot_date"] == day
+        else []
+    )
+    snapshot_changes = earlier_today_changes + changes
+
+    conn.execute(
+        "DELETE FROM linkedin_profile_snapshots WHERE profile_id = ? AND snapshot_date = ?",
+        (profile["id"], day),
+    )
+    conn.execute(
+        """
+        INSERT INTO linkedin_profile_snapshots (id, profile_id, brand_id, snapshot_date,
+            name, headline, title, status, changes_json, raw_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            new_id(), profile["id"], profile["brand_id"], day,
+            current["name"], current["headline"], current["title"],
+            "active" if snap.is_active is not False else "inactive",
+            json.dumps(snapshot_changes, ensure_ascii=False), json.dumps(snap.raw, ensure_ascii=False), now,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE linkedin_profiles
+        SET name = ?, headline = ?, title = ?, status = ?, last_seen = ?,
+            last_status = ?, last_error = ?,
+            last_profile_change_at = CASE WHEN ? THEN ? ELSE last_profile_change_at END,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            current["name"], current["headline"], current["title"],
+            "inactive" if snap.is_active is False else "active", now,
+            snap.status, snap.error, int(bool(changes)), now, now, profile["id"],
+        ),
+    )
+    if changes:
+        labels = {"name": "姓名", "headline": "头衔", "title": "职位"}
+        text = "；".join(
+            f"{labels.get(change['field'], change['field'])}：{change.get('from') or '—'} → {change.get('to') or '—'}"
+            for change in changes
+        )
+        external_id = f"profile-change:{day}:{_jd_hash(json.dumps(changes, sort_keys=True))[:12]}"
+        exists = conn.execute(
+            "SELECT 1 FROM linkedin_activities WHERE profile_id = ? AND external_id = ? LIMIT 1",
+            (profile["id"], external_id),
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                """
+                INSERT INTO linkedin_activities (id, profile_id, brand_id, external_id,
+                    activity_type, text, url, posted_at, raw_json, created_at)
+                VALUES (?, ?, ?, ?, 'profile_change', ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id(), profile["id"], profile["brand_id"], external_id, text,
+                    profile.get("profile_url") or "", now,
+                    json.dumps({"changes": changes}, ensure_ascii=False), now,
+                ),
+            )
+            conn.execute(
+                "UPDATE linkedin_profiles SET last_activity_at = ? WHERE id = ?",
+                (now, profile["id"]),
+            )
+    return {"changed": bool(changes), "status": snap.status}
 
 
 def _record_activities(conn: sqlite3.Connection, profile: dict, activities: list) -> int:
@@ -349,7 +454,7 @@ def _record_activities(conn: sqlite3.Connection, profile: dict, activities: list
 
 def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
     """Expand LinkedIn company people links into an employee roster + activity feed."""
-    summary = {"links": 0, "profiles": 0, "activities": 0, "errors": 0}
+    summary = {"links": 0, "profiles": 0, "profile_changes": 0, "activities": 0, "errors": 0}
 
     link_clause = "AND id = ?" if link_id else ""
     link_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
@@ -398,6 +503,12 @@ def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_i
         for row in profiles:
             profile = dict(row)
             try:
+                snapshot = provider.fetch_profile(conn, profile)
+                profile_result = _record_profile_snapshot(conn, profile, snapshot)
+                if profile_result["changed"]:
+                    summary["profile_changes"] += 1
+                if snapshot.status in ("error", "blocked"):
+                    summary["errors"] += 1
                 activities = provider.fetch_activities(conn, profile)
             except Exception as exc:  # noqa: BLE001
                 conn.execute(

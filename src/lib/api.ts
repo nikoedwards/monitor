@@ -224,23 +224,43 @@ export interface JobPosting {
 export interface LinkedInEmployee {
   id: string;
   brand_id: string;
+  source_type?: "company" | "manual";
   name?: string;
   headline?: string;
   title?: string;
+  notes?: string;
   profile_url?: string;
   avatar_url?: string;
   status: string;
   monitor: boolean;
   last_activity_at?: string;
+  last_profile_change_at?: string;
   last_seen?: string;
+  last_status?: string;
+  last_error?: string;
   activity_count: number;
+  snapshot_count: number;
+  change_count: number;
+  latest_snapshot?: LinkedInProfileSnapshot | null;
+}
+
+export interface LinkedInProfileSnapshot {
+  id: string;
+  profile_id: string;
+  brand_id: string;
+  snapshot_date: string;
+  name?: string;
+  headline?: string;
+  title?: string;
+  status?: string;
+  changes: { field: string; from?: unknown; to?: unknown }[];
 }
 
 export interface LinkedInActivity {
   id: string;
   profile_id: string;
   brand_id: string;
-  activity_type: string;
+  activity_type: "post" | "comment" | "reaction" | "job_change" | "profile_change" | string;
   text?: string;
   url?: string;
   posted_at?: string;
