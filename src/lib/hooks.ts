@@ -137,11 +137,11 @@ export function useCompare(range?: TimeRange) {
   });
 }
 
-export function useMarketShare(brandIds: string[], model: MarketShareModelKey, range?: TimeRange) {
+export function useMarketShare(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["market-share", brandIds, model, rp],
-    queryFn: () => api.get<MarketShareResponse>(`/api/market-share${qs({ brand_ids: brandIds.join(","), model, ...rp })}`),
+    queryKey: ["market-share", brandIds, model, country, rp],
+    queryFn: () => api.get<MarketShareResponse>(`/api/market-share${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
     enabled: brandIds.length >= 2,
   });
 }

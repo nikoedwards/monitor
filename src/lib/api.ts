@@ -404,6 +404,8 @@ export interface MarketShareBrand {
 
 export interface MarketShareResponse {
   range: { start: string; end: string };
+  country: string;
+  countries: string[];
   model: {
     key: MarketShareModelKey;
     label: string;
