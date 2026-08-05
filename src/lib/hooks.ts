@@ -5,6 +5,8 @@ import {
   qs,
   type Brand,
   type Link,
+  type MarketShareModelKey,
+  type MarketShareResponse,
   type Product,
   type RecordItem,
   type SalesMetric,
@@ -132,6 +134,15 @@ export function useCompare(range?: TimeRange) {
   return useQuery({
     queryKey: ["compare", rp],
     queryFn: () => api.get<{ brands: any[] }>(`/api/compare${qs({ ...rp })}`).then((d) => d.brands),
+  });
+}
+
+export function useMarketShare(brandIds: string[], model: MarketShareModelKey, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["market-share", brandIds, model, rp],
+    queryFn: () => api.get<MarketShareResponse>(`/api/market-share${qs({ brand_ids: brandIds.join(","), model, ...rp })}`),
+    enabled: brandIds.length >= 2,
   });
 }
 

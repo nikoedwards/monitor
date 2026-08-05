@@ -369,6 +369,60 @@ export interface TrendPoint {
   negative: number;
 }
 
+export type MarketShareModelKey = "balanced" | "commerce" | "attention";
+
+export interface MarketShareBrand {
+  brand_id: string;
+  name: string;
+  category?: string;
+  is_primary: boolean;
+  is_competitor: boolean;
+  rank: number;
+  share: number;
+  coverage: number;
+  signals: Record<"sales" | "app" | "conversation" | "engagement", number>;
+  signal_shares: Record<"sales" | "app" | "conversation" | "engagement", number>;
+  raw: {
+    mentions: number;
+    voc_records: number;
+    app_reviews: number;
+    app_rating?: number | null;
+    comments: number;
+    engagement: number;
+    views: number;
+    app_downloads_est: number;
+    app_downloads_low: number;
+    app_downloads_high: number;
+    app_download_basis: "observed" | "review_proxy" | "unavailable";
+    sales_revenue: number;
+    sales_units: number;
+    product_reviews: number;
+    sales_data_points: number;
+  };
+  gaps: string[];
+}
+
+export interface MarketShareResponse {
+  range: { start: string; end: string };
+  model: {
+    key: MarketShareModelKey;
+    label: string;
+    description: string;
+    sales_basis: "revenue" | "units" | "unavailable";
+    base_weights: Record<"sales" | "app" | "conversation" | "engagement", number>;
+    active_weights: Record<"sales" | "app" | "conversation" | "engagement", number>;
+  };
+  confidence: {
+    score: number;
+    label: "高" | "中" | "低";
+    available_weight: number;
+    coverage_fairness: number;
+    evidence_total: number;
+  };
+  brands: MarketShareBrand[];
+  warnings: string[];
+}
+
 export interface LlmSettings {
   configured: boolean;
   key_hint?: string;
