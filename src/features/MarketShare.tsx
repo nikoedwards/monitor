@@ -1,28 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, Plus, SlidersHorizontal, X } from "lucide-react";
+import { AlertTriangle, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { Badge, Button, Card, EmptyState, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
 import { fmtNum } from "../lib/format";
-import { useBrands, useMarketShare } from "../lib/hooks";
+import { useBrands, useMarketShare, useRefreshMarketShareData } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import type { MarketShareBrand, MarketShareModelKey } from "../lib/api";
+import type { MarketShareBrand } from "../lib/api";
 
 const STORAGE_KEY = "monitor.marketShare.brandIds";
 const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280", "#ef4444", "#14b8a6"];
 const SIGNALS = [
-  { key: "sales", label: "销售结果" },
   { key: "app", label: "App 下载" },
-  { key: "conversation", label: "评论数" },
-  { key: "engagement", label: "互动" },
+  { key: "conversation", label: "App 评论" },
 ] as const;
-
-const MODELS: { value: MarketShareModelKey; label: string }[] = [
-  { value: "balanced", label: "下载与评论优先（推荐）" },
-  { value: "commerce", label: "商业结果优先" },
-  { value: "attention", label: "产品热度优先" },
-];
 
 const COUNTRY_LABELS: Record<string, string> = {
   AU: "澳大利亚", BR: "巴西", CA: "加拿大", CN: "中国", DE: "德国", ES: "西班牙",
@@ -71,8 +63,9 @@ export default function MarketShare() {
   const [selected, setSelected] = useState<string[]>(initialSavedBrands);
   const [draft, setDraft] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [model, setModel] = useState<MarketShareModelKey>("balanced");
   const [country, setCountry] = useState("all");
+  const autoRefreshKeys = useRef(new Set<string>());
+  const refreshAppData = useRefreshMarketShareData();
 
   useEffect(() => {
     if (!brands.length) return;
@@ -95,8 +88,19 @@ export default function MarketShare() {
     () => selected.map((id) => brands.find((brand) => brand.id === id)).filter(Boolean),
     [brands, selected],
   );
-  const query = useMarketShare(selected, model, country, range);
+  const query = useMarketShare(selected, "balanced", country, range);
   const result = query.data;
+  const selectedKey = useMemo(() => [...selected].sort().join(","), [selected]);
+  const appDataMissing = Boolean(result?.brands.some(
+    (row) => row.raw.app_download_basis === "unavailable",
+  ));
+
+  useEffect(() => {
+    if (!appDataMissing || selected.length < 2 || refreshAppData.isPending || autoRefreshKeys.current.has(selectedKey)) return;
+    autoRefreshKeys.current.add(selectedKey);
+    refreshAppData.mutate(selected);
+  }, [appDataMissing, refreshAppData, selected, selectedKey]);
+
   const countryOptions = useMemo(
     () => Array.from(new Set([...(result?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
     [result?.countries, country],
@@ -120,16 +124,13 @@ export default function MarketShare() {
     <div className="space-y-6">
       <SectionTitle
         title="市占分析"
-        subtitle="按国家，以 App 下载量和评论数为核心估算所选品牌内的相对份额"
+        subtitle="按国家，仅根据 App 下载估算和 App Store 评论数计算相对份额"
         hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
             <Select value={country} onChange={(event) => setCountry(event.target.value)} aria-label="国家">
               <option value="all">全部国家</option>
               {countryOptions.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
-            </Select>
-            <Select value={model} onChange={(event) => setModel(event.target.value as MarketShareModelKey)}>
-              {MODELS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
             </Select>
             <TimeRangePicker />
           </div>
@@ -158,9 +159,24 @@ export default function MarketShare() {
         >
           <Plus size={14} /> 添加分析品牌
         </Button>
+        <Button
+          size="sm"
+          disabled={selected.length < 2 || refreshAppData.isPending}
+          onClick={() => refreshAppData.mutate(selected)}
+        >
+          <RefreshCw size={14} className={refreshAppData.isPending ? "animate-spin" : ""} />
+          {refreshAppData.isPending ? "正在获取 App 数据" : "刷新 App 数据"}
+        </Button>
       </div>
 
       {query.isLoading && <Spinner />}
+      {refreshAppData.isError && (
+        <Card>
+          <div className="text-[13px]" style={{ color: "var(--danger)" }}>
+            App 数据获取失败：{refreshAppData.error?.message || "请稍后重试"}
+          </div>
+        </Card>
+      )}
       {query.isError && (
         <Card>
           <div className="text-[14px]" style={{ color: "var(--danger)" }}>{query.error?.message || "市占估算失败"}</div>
@@ -172,7 +188,7 @@ export default function MarketShare() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
             <StatCard label="模型置信度" value={`${result.confidence.score}%`} hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`} />
-            <StatCard label="可用信号" value={`${activeSignals}/4`} hint="缺失信号会自动重分配权重" />
+            <StatCard label="可用信号" value={`${activeSignals}/2`} hint="App 下载估算 + App Store 评论" />
             <StatCard label="App 下载估算" value={appDownloads ? fmtNum(appDownloads) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 所选品牌合计`} />
           </div>
 
@@ -267,13 +283,13 @@ export default function MarketShare() {
                 <thead>
                   <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
                     <th className="text-left font-medium py-2.5 px-3">品牌</th>
-                    <th className="text-right font-medium py-2.5 px-3">销售结果</th>
+                    <th className="text-right font-medium py-2.5 px-3">销售结果（不计权）</th>
                     <th className="text-right font-medium py-2.5 px-3">App 下载估算</th>
                     <th className="text-right font-medium py-2.5 px-3">App 评论</th>
-                    <th className="text-right font-medium py-2.5 px-3">商品评论量</th>
+                    <th className="text-right font-medium py-2.5 px-3">商品评论量（不计权）</th>
                     <th className="text-right font-medium py-2.5 px-3">公开提及（不计权）</th>
-                    <th className="text-right font-medium py-2.5 px-3">评论 / 回复</th>
-                    <th className="text-right font-medium py-2.5 px-3">互动</th>
+                    <th className="text-right font-medium py-2.5 px-3">评论 / 回复（不计权）</th>
+                    <th className="text-right font-medium py-2.5 px-3">互动（不计权）</th>
                     <th className="text-right font-medium py-2.5 px-3">播放 / 浏览</th>
                   </tr>
                 </thead>
@@ -317,7 +333,7 @@ export default function MarketShare() {
                 })}
               </div>
               <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
-                算法：当前模型基础权重为 App 下载 {(result.model.base_weights.app * 100).toFixed(0)}%、评论数 {(result.model.base_weights.conversation * 100).toFixed(0)}%、销售结果 {(result.model.base_weights.sales * 100).toFixed(0)}%、互动 {(result.model.base_weights.engagement * 100).toFixed(0)}%。每项先在所选品牌和国家内归一化；覆盖不足的指标会自动降权，公开提及不参与计算。大模型不参与数值计算。
+                算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，App Store 评论数权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。两项先在所选品牌和国家内归一化；销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
               </div>
             </Card>
 

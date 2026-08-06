@@ -440,6 +440,7 @@ export interface MarketShareResponse {
     available_weight: number;
     coverage_fairness: number;
     evidence_total: number;
+    download_proxy_ratio: number;
   };
   brands: MarketShareBrand[];
   warnings: string[];

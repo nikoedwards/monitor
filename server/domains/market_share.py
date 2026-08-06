@@ -21,9 +21,9 @@ router = APIRouter(prefix="/api/market-share", tags=["market-share"])
 
 MODEL_PRESETS = {
     "balanced": {
-        "label": "下载与评论优先模型",
-        "description": "以 App 下载量和评论数为核心，销售与互动仅用于辅助校准。",
-        "weights": {"sales": 0.10, "app": 0.55, "conversation": 0.30, "engagement": 0.05},
+        "label": "App 下载与评论模型",
+        "description": "仅使用所选国家的 App 下载估算与 App Store 评论数计算相对份额。",
+        "weights": {"sales": 0.0, "app": 0.65, "conversation": 0.35, "engagement": 0.0},
     },
     "commerce": {
         "label": "商业结果优先",
@@ -142,7 +142,10 @@ def _record_signals(
         views += _number(metrics.get("views"))
 
         if is_app:
-            app_reviews += 1 if dimension == "voc" or "review" in source_id or "review" in data_type else 0
+            is_review_record = data_type != "app_metric" and (
+                dimension == "voc" or "review" in source_id or "review" in data_type
+            )
+            app_reviews += 1 if is_review_record else 0
             rating = _number(metrics.get("rating"))
             if rating:
                 app_rating_sum += rating
@@ -301,7 +304,7 @@ def market_share(
         brand = by_id[brand_id]
         record_data = _record_signals(conn, brand, start, end, country_code)
         sales_data = _sales_signals(conn, brand_id, start, end, country_code)
-        conversation_signal = record_data["app_reviews"] + record_data["comments"]
+        conversation_signal = record_data["app_reviews"]
         signals = {
             "sales": 0,
             "app": record_data["app_downloads_est"],
@@ -337,18 +340,13 @@ def market_share(
     else:
         sales_basis = "unavailable"
 
-    # Cumulative product review totals are useful only when available for a
-    # comparable portion of the cohort; otherwise they would reward data
-    # coverage rather than brand demand.
-    product_review_coverage = sum(1 for row in rows if row["raw"]["product_reviews"] > 0)
-    if product_review_coverage >= comparable_floor:
-        for row in rows:
-            row["signals"]["conversation"] += row["raw"]["product_reviews"]
-
     signal_coverage = {
         key: sum(1 for row in rows if row["signals"][key] > 0) for key in base_weights
     }
-    active_keys = [key for key in base_weights if signal_coverage[key] >= comparable_floor]
+    active_keys = [
+        key for key in base_weights
+        if base_weights[key] > 0 and signal_coverage[key] >= comparable_floor
+    ]
     active_base_weight = sum(base_weights[key] for key in active_keys)
     active_weights = {
         key: (base_weights[key] / active_base_weight if active_base_weight and key in active_keys else 0.0)
@@ -358,15 +356,15 @@ def market_share(
 
     for row in rows:
         gaps = row["gaps"]
-        if not row["signals"]["sales"]:
+        if base_weights["sales"] > 0 and not row["signals"]["sales"]:
             gaps.append("缺少可比较的销量或销售额")
         if row["raw"]["app_download_basis"] == "unavailable":
             gaps.append("缺少 App 下载量或应用商店评论")
         elif row["raw"]["app_download_basis"] == "review_proxy":
             gaps.append("App 下载量由评论量区间推算")
         if not row["signals"]["conversation"]:
-            gaps.append("缺少可比较的 App、商品或社交评论数")
-        if not row["signals"]["engagement"]:
+            gaps.append("缺少 App Store 评论数")
+        if base_weights["engagement"] > 0 and not row["signals"]["engagement"]:
             gaps.append("缺少点赞、评论、分享等互动指标")
         brand_id = row["brand_id"]
         score = sum(active_weights[key] * shares_by_signal[key][brand_id] for key in active_keys)
@@ -391,13 +389,18 @@ def market_share(
         )
     evidence_total = sum(
         row["raw"]["app_reviews"]
-        + row["raw"]["comments"]
-        + row["raw"]["product_reviews"]
-        + row["raw"]["sales_data_points"]
         for row in rows
     )
     sample_strength = min(1.0, math.log1p(evidence_total) / math.log1p(max(500, len(rows) * 250)))
-    confidence_score = round(100 * (0.55 * active_base_weight + 0.25 * fairness + 0.20 * sample_strength))
+    base_confidence = 100 * (0.55 * active_base_weight + 0.25 * fairness + 0.20 * sample_strength)
+    proxy_ratio = (
+        sum(1 for row in rows if row["raw"]["app_download_basis"] == "review_proxy") / len(rows)
+        if rows else 0.0
+    )
+    # Review-derived downloads and review counts are correlated rather than
+    # independent evidence.  Discount confidence until observed install data
+    # is available instead of showing a misleading near-100% score.
+    confidence_score = round(base_confidence * (1.0 - 0.30 * proxy_ratio))
     confidence_label = "高" if confidence_score >= 75 else "中" if confidence_score >= 50 else "低"
 
     warnings = ["该结果是所选品牌与已采集数据源内的相对份额，不等同于官方全行业市占。"]
@@ -412,11 +415,9 @@ def market_share(
         warnings.append("App 下载估算按 0.5%-2% 的评论转化率给出宽区间，中位值按 1% 计算。")
     if active_base_weight < 0.999:
         warnings.append("数据覆盖不足、无法横向比较的指标未计入综合值，其权重已自动分配给可用指标。")
-    for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "评论数"), ("engagement", "互动")):
-        if 0 < signal_coverage[key] < comparable_floor:
+    for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "App 评论"), ("engagement", "互动")):
+        if base_weights[key] > 0 and 0 < signal_coverage[key] < comparable_floor:
             warnings.append(f"{label}仅覆盖 {signal_coverage[key]}/{len(rows)} 个品牌，本次未纳入综合份额。")
-    if product_review_coverage and product_review_coverage < comparable_floor:
-        warnings.append("商品累计评论量覆盖品牌不足，仅展示原始值，未纳入评论/声量信号。")
 
     return {
         "range": {"start": start, "end": end},
@@ -436,6 +437,7 @@ def market_share(
             "available_weight": round(active_base_weight, 2),
             "coverage_fairness": round(fairness, 2),
             "evidence_total": evidence_total,
+            "download_proxy_ratio": round(proxy_ratio, 2),
         },
         "brands": rows,
         "warnings": warnings,
