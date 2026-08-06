@@ -62,7 +62,9 @@ SELLERSPRITE_SECRET_KEY=... # 卖家精灵 OpenAPI（可选，也可在「设置
 
 ## 招聘监控
 
-招聘监控支持 Boss 直聘、LinkedIn 职位与 LinkedIn 人员动态。通过品牌下 `dimension='hiring'` 的链接配置公司 Jobs/People 采集入口，并按日保存岗位/JD 快照、上下线状态和人员公开动态。公司 People 页发现的普通员工只进入候选名单；手动添加或标记为“重点”的人员会额外按日保存个人页头衔/职位快照并检测履历变化。Boss 与 LinkedIn 反爬严格，需要在设置中配置对应登录 Cookie；采集为最佳努力模式，Cookie 失效或触发风控时不会影响其他板块。
+招聘监控支持 Boss 直聘、LinkedIn 职位与 LinkedIn 人员动态。通过品牌下 `dimension='hiring'` 的链接配置公司 Jobs/People 采集入口，并按日保存岗位/JD 快照、上下线状态和人员公开动态。公司 People 页发现的普通员工只进入候选名单；手动添加或标记为“重点”的人员会额外按日保存个人页头衔/职位快照并检测履历变化。
+
+Boss 与 LinkedIn 反爬严格。后台 Cookie 采集仍作为最佳努力路径；对于打开开发者工具就刷新、登录跳转或自动化浏览器被拦截的页面，使用 [`browser_extensions/hiring_capture`](browser_extensions/hiring_capture) 浏览器助手：在用户正常登录且能看到页面的前提下，一键把当前列表/详情页的可见职位回传 Monitor，不打开 F12、不复制 Cookie，也不处理验证码或绕过安全验证。列表页用于发现岗位，详情页补充 JD 并记录明确的岗位下线；不完整列表不会把未出现的岗位误判为下线。
 
 ## 社媒官方账号自采
 

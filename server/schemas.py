@@ -47,6 +47,29 @@ class LinkIn(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class BrowserCapturedJobIn(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    title: Optional[str] = Field(default=None, max_length=500)
+    department: Optional[str] = Field(default=None, max_length=300)
+    city: Optional[str] = Field(default=None, max_length=200)
+    jd_text: Optional[str] = Field(default=None, max_length=20000)
+    posted_at: Optional[str] = Field(default=None, max_length=100)
+    refreshed_at: Optional[str] = Field(default=None, max_length=100)
+    applicant_signal: Optional[str] = Field(default=None, max_length=500)
+    is_open: Optional[bool] = True
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class BrowserHiringCaptureIn(BaseModel):
+    brand_id: str
+    platform: str = "boss"
+    source_url: str = Field(min_length=1, max_length=2000)
+    source_title: Optional[str] = Field(default=None, max_length=500)
+    page_status: str = "ok"
+    page_error: Optional[str] = Field(default=None, max_length=500)
+    jobs: list[BrowserCapturedJobIn] = Field(default_factory=list, max_length=200)
+
+
 class SalesMetricIn(BaseModel):
     brand_id: str
     product_id: Optional[str] = None

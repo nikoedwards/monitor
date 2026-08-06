@@ -575,6 +575,26 @@ def init_db() -> None:
                 pass
         conn.executescript(INDEXES)
         _backfill_brand_ids(conn)
+        _cleanup_fake_boss_login_postings(conn)
+
+
+def _cleanup_fake_boss_login_postings(conn: sqlite3.Connection) -> None:
+    """Remove legacy login pages that older Boss fallback logic stored as jobs."""
+    rows = conn.execute(
+        """
+        SELECT id FROM job_postings
+        WHERE platform = 'boss'
+          AND lower(COALESCE(url, '')) NOT LIKE '%/job_detail/%'
+          AND (
+            lower(COALESCE(title, '')) LIKE '%boss直聘注册登录%'
+            OR lower(COALESCE(title, '')) LIKE '%boss直聘在线注册登录%'
+            OR lower(COALESCE(url, '')) LIKE '%/web/user/%'
+          )
+        """
+    ).fetchall()
+    for row in rows:
+        conn.execute("DELETE FROM job_snapshots WHERE posting_id = ?", (row["id"],))
+        conn.execute("DELETE FROM job_postings WHERE id = ?", (row["id"],))
 
 
 def _backfill_brand_ids(conn: sqlite3.Connection) -> None:

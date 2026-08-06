@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Monitor 招聘采集助手",
+  "version": "1.0.0",
+  "description": "从当前正常登录的 BOSS 直聘或 LinkedIn 页面提取可见职位并发送到 Monitor。",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "action": {
+    "default_title": "采集当前招聘页面",
+    "default_popup": "popup.html"
+  }
+}

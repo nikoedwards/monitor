@@ -9,13 +9,21 @@ import json
 import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
+from io import BytesIO
 from urllib.parse import urlparse
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from .. import ai
-from ..connectors.hiring.runner import run_hiring_collection, run_linkedin_people_collection
-from ..schemas import LinkedInProfileIn, LinkedInProfileUpdate
+from ..config import ROOT
+from ..connectors.hiring.runner import (
+    ingest_browser_hiring_capture,
+    run_hiring_collection,
+    run_linkedin_people_collection,
+)
+from ..schemas import BrowserHiringCaptureIn, LinkedInProfileIn, LinkedInProfileUpdate
 from ..util import canonical_url, clean_text, new_id, normalize_url, utc_now
 from .common import fetch_brand, get_conn, resolve_window
 
@@ -138,6 +146,44 @@ def delete_posting(posting_id: str, conn: sqlite3.Connection = Depends(get_conn)
 def sync_hiring(brand_id: str, link_id: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
     brand = fetch_brand(conn, brand_id)
     return run_hiring_collection(conn, brand, link_id=link_id)
+
+
+@router.post("/browser-capture")
+def browser_capture(payload: BrowserHiringCaptureIn, conn: sqlite3.Connection = Depends(get_conn)):
+    brand = fetch_brand(conn, payload.brand_id)
+    try:
+        return ingest_browser_hiring_capture(
+            conn,
+            brand,
+            platform=payload.platform,
+            source_url=payload.source_url,
+            source_title=payload.source_title or "",
+            page_status=payload.page_status,
+            page_error=payload.page_error or "",
+            jobs=[item.model_dump() for item in payload.jobs],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/browser-helper.zip")
+def download_browser_helper():
+    helper_dir = ROOT / "browser_extensions" / "hiring_capture"
+    if not helper_dir.is_dir():
+        raise HTTPException(status_code=404, detail="浏览器助手文件未部署。")
+    files = [path for path in helper_dir.iterdir() if path.is_file()]
+    if not files:
+        raise HTTPException(status_code=404, detail="浏览器助手文件未部署。")
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for path in files:
+            archive.write(path, arcname=f"monitor-hiring-capture/{path.name}")
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="monitor-hiring-capture.zip"'},
+    )
 
 
 @router.post("/employees/sync")

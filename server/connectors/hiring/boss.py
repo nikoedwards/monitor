@@ -18,6 +18,23 @@ _JOB_DETAIL_RE = re.compile(r"/job_detail/[^\"'<>\s]+", re.I)
 _JOB_ID_RE = re.compile(r"/job_detail/([^/.?\"'<>\s]+)", re.I)
 # Text markers that indicate a posting is no longer accepting applicants.
 _CLOSED_MARKERS = ("职位已下线", "停止招聘", "该职位已", "职位不存在", "已结束", "已关闭")
+_LOGIN_MARKERS = (
+    "boss直聘注册登录",
+    "boss直聘在线注册登录",
+    "登录boss直聘",
+    "请先登录",
+    "安全验证",
+    "访问验证",
+    "完成验证",
+    "验证码",
+)
+_LOGIN_PATH_MARKERS = (
+    "/web/user/",
+    "/login",
+    "/register",
+    "/security-check",
+    "/safe-check",
+)
 
 
 def _boss_cookie(conn: sqlite3.Connection) -> str:
@@ -41,9 +58,17 @@ class BossProvider(HiringProvider):
         except ValueError:
             return []
         page = render(start, self.cookie)
+        blocked_reason = _blocked_reason(page)
+        if blocked_reason:
+            raise RuntimeError(blocked_reason)
         if page.status != "ok" or not (page.html or page.anchors):
-            # Nothing readable — monitor the configured URL directly as a fallback.
-            return [JobRef(url=start, external_id=_job_id(start))]
+            # A configured direct job URL is still useful as a registry entry
+            # when the detail page is temporarily blocked. Listing/company URLs
+            # must not become fake postings themselves.
+            job_id = _job_id(start)
+            if job_id:
+                return [JobRef(url=start, external_id=job_id)]
+            raise RuntimeError(page.error or "无法读取 Boss 招聘源，请检查登录 Cookie、验证码或源 URL。")
 
         seen: set[str] = set()
         found: list[JobRef] = []
@@ -63,14 +88,26 @@ class BossProvider(HiringProvider):
                 break
 
         if not found:
-            return [JobRef(url=start, external_id=_job_id(start))]
+            job_id = _job_id(start)
+            return [JobRef(url=start, external_id=job_id)] if job_id else []
         return found
 
     # ------------------------------------------------------------------- fetch
     def fetch(self, conn: sqlite3.Connection, posting: dict) -> JobSnapshot:
         url = posting.get("url") or ""
         snap = JobSnapshot()
+        if not _job_id(url):
+            snap.status = "blocked"
+            snap.error = "该记录不是 Boss 职位详情页；请删除它并配置公司招聘页或 /job_detail/ 职位链接。"
+            snap.raw = {"provider": self.name, "invalid_posting_url": True}
+            return snap
         page = render(url, self.cookie)
+        blocked_reason = _blocked_reason(page)
+        if blocked_reason:
+            snap.status = "blocked"
+            snap.error = blocked_reason
+            snap.raw = {"final_url": page.final_url, "method": page.method, "provider": self.name}
+            return snap
         if page.status != "ok":
             snap.status = "blocked" if not page.html else "partial"
             snap.error = page.error or "无法读取 Boss 职位页（可能需要登录 Cookie 或被风控拦截）。"
@@ -98,6 +135,16 @@ class BossProvider(HiringProvider):
 def _job_id(url: str) -> str:
     match = _JOB_ID_RE.search(url or "")
     return match.group(1) if match else ""
+
+
+def _blocked_reason(page) -> str:
+    title_and_text = f"{page.title or ''}\n{page.text or ''}".lower()
+    final_url = (page.final_url or "").lower()
+    if any(marker in title_and_text for marker in _LOGIN_MARKERS) or any(
+        marker in final_url for marker in _LOGIN_PATH_MARKERS
+    ):
+        return "Boss 页面跳转到了登录/注册或安全验证页，请更新登录 Cookie 后重试。"
+    return ""
 
 
 def _extract_jd(text: str) -> str:
