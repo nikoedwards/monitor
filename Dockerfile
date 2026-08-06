@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && python -m playwright install --with-deps chromium
 
 COPY server ./server
+COPY browser_extensions ./browser_extensions
 COPY --from=frontend /app/dist ./dist
 
 # Persist SQLite DB + snapshots here (mount a Railway volume at /app/data).

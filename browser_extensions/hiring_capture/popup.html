@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monitor 招聘采集助手</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>招聘采集助手</h1>
+      <p class="hint">正常打开已登录的 BOSS / LinkedIn 页面即可，不需要打开 F12。</p>
+      <label>Monitor 地址<div class="row"><input id="serverUrl" value="http://127.0.0.1:8790" placeholder="https://你的-monitor-地址" /><button id="connect" class="secondary">连接</button></div></label>
+      <label>归属品牌<select id="brand" disabled><option value="">请先连接 Monitor</option></select></label>
+      <button id="capture" class="primary" disabled>采集当前页面</button>
+      <div id="status" role="status">等待连接</div>
+      <details>
+        <summary>使用说明</summary>
+        <ol>
+          <li>先在普通浏览器窗口登录招聘网站。</li>
+          <li>打开职位列表或职位详情页，等待内容正常出现。</li>
+          <li>点击本扩展图标并选择品牌，再点“采集当前页面”。</li>
+          <li>如果出现登录或安全验证，先人工完成验证，再重新采集。</li>
+        </ol>
+      </details>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -574,6 +574,20 @@ function SourceModal({ open, onClose, brandId }: { open: boolean; onClose: () =>
   return (
     <Modal open={open} onClose={onClose} title="配置招聘采集源" width={640}>
       <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3 p-3 rounded-md" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
+          <div>
+            <div className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>BOSS 打开 F12 就刷新 / 后台采集被拦截？</div>
+            <div className="text-[12px] mt-0.5" style={{ color: "var(--mute)" }}>安装浏览器助手，从正常登录的当前页面一键入库，不需要复制 Cookie。</div>
+          </div>
+          <a
+            href="/api/hiring/browser-helper.zip"
+            download="monitor-hiring-capture.zip"
+            className="h-9 px-3.5 rounded-md inline-flex items-center justify-center text-[13px] font-medium shrink-0"
+            style={{ background: "var(--ink)", color: "var(--bg)" }}
+          >
+            下载助手
+          </a>
+        </div>
         <div className="grid grid-cols-1 gap-3">
           <Field label="平台">
             <Select value={form.platform} onChange={(e) => set("platform", e.target.value)} className="w-full">

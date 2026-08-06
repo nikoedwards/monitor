@@ -10,11 +10,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+from urllib.parse import urlparse
 
 from ...util import canonical_url, clean_text, new_id, today, utc_now
 from . import pick_people_provider, pick_provider
 from .base import JobRef, JobSnapshot, ProfileRef, ProfileSnapshot
+
+
+_BROWSER_CAPTURE_LABEL = {
+    "boss": "BOSS 浏览器采集助手",
+    "linkedin": "LinkedIn 浏览器采集助手",
+}
+_BOSS_JOB_ID_RE = re.compile(r"/job_detail/([^/.?]+)", re.I)
+_LINKEDIN_JOB_ID_RE = re.compile(r"/jobs/view/(?:[^/?]*-)?(\d+)", re.I)
 
 
 def _jd_hash(text: str) -> str:
@@ -144,6 +154,168 @@ def _record_snapshot(conn: sqlite3.Connection, posting: dict, snap: JobSnapshot)
         ),
     )
     return {"changed": bool(changes), "status": snap.status, "job_status": status}
+
+
+def _browser_job_id(platform: str, url: str) -> str:
+    matcher = _BOSS_JOB_ID_RE if platform == "boss" else _LINKEDIN_JOB_ID_RE
+    match = matcher.search(url or "")
+    return match.group(1) if match else ""
+
+
+def _browser_capture_link(
+    conn: sqlite3.Connection,
+    brand_id: str,
+    platform: str,
+    source_url: str,
+    source_title: str = "",
+) -> dict:
+    canon = canonical_url(source_url)
+    exact = conn.execute(
+        """
+        SELECT * FROM links
+        WHERE brand_id = ? AND dimension = 'hiring' AND platform = ? AND canonical_url = ?
+        LIMIT 1
+        """,
+        (brand_id, platform, canon),
+    ).fetchone()
+    if exact:
+        return dict(exact)
+
+    label = _BROWSER_CAPTURE_LABEL[platform]
+    helper = conn.execute(
+        """
+        SELECT * FROM links
+        WHERE brand_id = ? AND dimension = 'hiring' AND platform = ? AND label = ?
+        LIMIT 1
+        """,
+        (brand_id, platform, label),
+    ).fetchone()
+    if helper:
+        return dict(helper)
+
+    now = utc_now()
+    link_id = new_id()
+    conn.execute(
+        """
+        INSERT INTO links (id, brand_id, dimension, channel, platform, url, canonical_url,
+            label, cadence, status, config_json, created_at, updated_at)
+        VALUES (?, ?, 'hiring', ?, ?, ?, ?, ?, 'manual', 'paused', ?, ?, ?)
+        """,
+        (
+            link_id, brand_id, platform, platform, source_url, canon, label,
+            json.dumps(
+                {"browser_capture": True, "first_source_title": clean_text(source_title)},
+                ensure_ascii=False,
+            ),
+            now, now,
+        ),
+    )
+    return dict(conn.execute("SELECT * FROM links WHERE id = ?", (link_id,)).fetchone())
+
+
+def ingest_browser_hiring_capture(
+    conn: sqlite3.Connection,
+    brand: dict,
+    *,
+    platform: str,
+    source_url: str,
+    source_title: str = "",
+    page_status: str = "ok",
+    page_error: str = "",
+    jobs: list[dict] | None = None,
+) -> dict:
+    """Ingest jobs extracted by the user's normal signed-in browser.
+
+    This path deliberately does not automate login, solve challenges, or mark
+    unseen list items closed. It only records content that the user can already
+    view in the active browser tab.
+    """
+    platform = (platform or "").lower()
+    if platform not in _BROWSER_CAPTURE_LABEL:
+        raise ValueError("浏览器助手目前仅支持 BOSS 直聘和 LinkedIn 职位。")
+
+    expected_hosts = {
+        "boss": ("zhipin.com",),
+        "linkedin": ("linkedin.com",),
+    }[platform]
+
+    def valid_host(value: str) -> bool:
+        host = (urlparse(value).hostname or "").lower()
+        return any(host == root or host.endswith(f".{root}") for root in expected_hosts)
+
+    if not valid_host(source_url):
+        raise ValueError("当前页面域名与所选招聘平台不匹配。")
+
+    link = _browser_capture_link(conn, brand["id"], platform, source_url, source_title)
+    now = utc_now()
+    if page_status == "blocked":
+        error = clean_text(page_error) or "页面需要登录或安全验证，请在浏览器中完成后重新采集。"
+        conn.execute(
+            "UPDATE links SET last_collect_at = ?, last_status = 'blocked', last_error = ?, updated_at = ? WHERE id = ?",
+            (now, error[:300], now, link["id"]),
+        )
+        return {"link_id": link["id"], "captured": 0, "changed": 0, "closed": 0, "errors": 1, "status": "blocked"}
+
+    summary = {"link_id": link["id"], "captured": 0, "changed": 0, "closed": 0, "errors": 0, "status": "ok"}
+    seen: set[str] = set()
+    for item in jobs or []:
+        url = (item.get("url") or "").strip()
+        if not valid_host(url):
+            summary["errors"] += 1
+            continue
+        external_id = _browser_job_id(platform, url)
+        if not external_id:
+            summary["errors"] += 1
+            continue
+        canon = canonical_url(url)
+        if not canon or canon in seen:
+            continue
+        seen.add(canon)
+
+        ref = JobRef(
+            url=url,
+            external_id=external_id,
+            title=item.get("title") or "",
+            department=item.get("department") or "",
+            city=item.get("city") or "",
+            jd_text=item.get("jd_text") or "",
+            posted_at=item.get("posted_at") or "",
+            raw=item.get("raw") or {},
+        )
+        posting_id = _upsert_posting(conn, link, ref)
+        posting = dict(conn.execute("SELECT * FROM job_postings WHERE id = ?", (posting_id,)).fetchone())
+        # Listing cards often omit JD/city/department. Preserve the most complete
+        # known values so a partial browser capture does not create false changes.
+        snap = JobSnapshot(
+            title=item.get("title") or posting.get("title") or "",
+            department=item.get("department") or posting.get("department") or "",
+            city=item.get("city") or posting.get("city") or "",
+            jd_text=item.get("jd_text") or posting.get("jd_text") or "",
+            posted_at=item.get("posted_at") or posting.get("posted_at") or "",
+            refreshed_at=item.get("refreshed_at") or "",
+            applicant_signal=item.get("applicant_signal") or "",
+            is_open=item.get("is_open"),
+            status="ok" if item.get("jd_text") else "partial",
+            raw={
+                **(item.get("raw") or {}),
+                "provider": "browser_helper",
+                "source_url": source_url,
+                "source_title": clean_text(source_title),
+            },
+        )
+        result = _record_snapshot(conn, posting, snap)
+        summary["captured"] += 1
+        summary["changed"] += int(result["changed"])
+        summary["closed"] += int(result["job_status"] == "closed")
+
+    link_status = "ok" if summary["captured"] else "partial"
+    link_error = "" if summary["captured"] else "当前页面没有发现可识别的职位；请打开职位列表或职位详情页后重试。"
+    conn.execute(
+        "UPDATE links SET last_collect_at = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+        (now, link_status, link_error, now, link["id"]),
+    )
+    summary["status"] = link_status
+    return summary
 
 
 def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
