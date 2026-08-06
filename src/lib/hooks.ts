@@ -261,6 +261,77 @@ export function useCreatorsRoster(brandId?: string, platform?: string, productId
   });
 }
 
+export function useCreatorCandidates(
+  brandId?: string,
+  platform?: string,
+  productId?: string,
+  reviewStatus?: string,
+  q?: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["creator-candidates", brandId, platform, productId, reviewStatus, q],
+    queryFn: () => api.get<import("./api").CreatorCandidatesResponse>(
+      `/api/creators/candidates${qs({ brand_id: brandId, platform, product_id: productId, review_status: reviewStatus, q })}`,
+    ),
+    enabled: !!brandId && enabled,
+  });
+}
+
+export function useCreatorCandidateEvidence(candidateId?: string, productId?: string) {
+  return useQuery({
+    queryKey: ["creator-candidate-evidence", candidateId, productId],
+    queryFn: () => api
+      .get<{ evidence: import("./api").CreatorCandidateEvidence[] }>(
+        `/api/creators/candidates/${candidateId}/evidence${qs({ product_id: productId })}`,
+      )
+      .then((data) => data.evidence),
+    enabled: !!candidateId,
+  });
+}
+
+export function useCreatorMapSnapshots(brandId?: string, platform?: string, productId?: string) {
+  return useQuery({
+    queryKey: ["creator-map-snapshots", brandId, platform, productId],
+    queryFn: () => api
+      .get<{ snapshots: import("./api").CreatorMapSnapshot[] }>(
+        `/api/creators/map-snapshots${qs({ brand_id: brandId, platform, product_id: productId })}`,
+      )
+      .then((data) => data.snapshots),
+    enabled: !!brandId,
+  });
+}
+
+export function useCreatorCurationMutations() {
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["creator-candidates"] });
+    qc.invalidateQueries({ queryKey: ["creator-candidate-evidence"] });
+    qc.invalidateQueries({ queryKey: ["creator-map-snapshots"] });
+  };
+  return {
+    rebuild: useMutation({
+      mutationFn: (brandId: string) => api.post(`/api/creators/candidates/rebuild${qs({ brand_id: brandId })}`),
+      onSuccess: invalidate,
+    }),
+    importCandidates: useMutation({
+      mutationFn: (payload: { brand_id: string; rows: Record<string, unknown>[] }) =>
+        api.post<{ created: number; updated: number }>("/api/creators/candidates/import", payload),
+      onSuccess: invalidate,
+    }),
+    updateCandidate: useMutation({
+      mutationFn: ({ id, ...payload }: { id: string; review_status?: import("./api").CreatorReviewStatus; relationship_status?: import("./api").CreatorRelationshipStatus; notes?: string }) =>
+        api.put<import("./api").CreatorCandidate>(`/api/creators/candidates/${id}`, payload),
+      onSuccess: invalidate,
+    }),
+    saveSnapshot: useMutation({
+      mutationFn: (payload: { brand_id: string; product_id?: string; platform?: string; title?: string }) =>
+        api.post<import("./api").CreatorMapSnapshot>("/api/creators/map-snapshots", payload),
+      onSuccess: invalidate,
+    }),
+  };
+}
+
 export function useCreatorsSync() {
   const qc = useQueryClient();
   return useMutation({
