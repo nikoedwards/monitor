@@ -146,6 +146,20 @@ export function useMarketShare(brandIds: string[], model: MarketShareModelKey, c
   });
 }
 
+export function useRefreshMarketShareData() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (brandIds: string[]) => Promise.all(
+      brandIds.map((brandId) => api.post(`/api/sources/app_store_reviews/collect${qs({ brand_id: brandId })}`)),
+    ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market-share"] });
+      qc.invalidateQueries({ queryKey: ["records"] });
+      qc.invalidateQueries({ queryKey: ["sources"] });
+    },
+  });
+}
+
 // ---------------------------------------------------------------- voc
 export function useVocSummary(brandId?: string, range?: TimeRange, sources?: string[]) {
   const rp = rangeParams(range);

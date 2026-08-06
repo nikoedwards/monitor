@@ -64,7 +64,19 @@ class MarketShareTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def add_record(self, record_id, brand_id, *, dimension, channel, platform, source_id, metrics, region="US"):
+    def add_record(
+        self,
+        record_id,
+        brand_id,
+        *,
+        dimension,
+        channel,
+        platform,
+        source_id,
+        metrics,
+        region="US",
+        data_type=None,
+    ):
         self.conn.execute(
             "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -72,7 +84,7 @@ class MarketShareTests(unittest.TestCase):
                 source_id,
                 brand_id,
                 f"link-{brand_id}",
-                "user_voice" if dimension == "voc" else "social_post",
+                data_type or ("user_voice" if dimension == "voc" else "social_post"),
                 dimension,
                 channel,
                 platform,
@@ -114,14 +126,30 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual(alpha["raw"]["app_download_basis"], "review_proxy")
         self.assertEqual(
             result["model"]["base_weights"],
-            {"sales": 0.10, "app": 0.55, "conversation": 0.30, "engagement": 0.05},
+            {"sales": 0.0, "app": 0.65, "conversation": 0.35, "engagement": 0.0},
         )
         self.assertEqual(result["model"]["active_weights"], result["model"]["base_weights"])
 
     def test_missing_signals_are_reweighted_to_available_data(self):
-        self.conn.executemany(
-            "INSERT INTO sales_metrics VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [("sa", "sale-a", "a", "2026-07-15", 0, 0, 2), ("sb", "sale-b", "b", "2026-07-15", 0, 0, 1)],
+        self.add_record(
+            "a-downloads",
+            "a",
+            dimension="platform",
+            channel="app",
+            platform="app_store",
+            source_id="app_store_reviews",
+            data_type="app_metric",
+            metrics={"downloads": 2000},
+        )
+        self.add_record(
+            "b-downloads",
+            "b",
+            dimension="platform",
+            channel="app",
+            platform="app_store",
+            source_id="app_store_reviews",
+            data_type="app_metric",
+            metrics={"downloads": 1000},
         )
 
         result = market_share(
@@ -132,7 +160,7 @@ class MarketShareTests(unittest.TestCase):
             conn=self.conn,
         )
 
-        self.assertEqual(result["model"]["active_weights"]["conversation"], 1.0)
+        self.assertEqual(result["model"]["active_weights"]["app"], 1.0)
         self.assertEqual(result["model"]["active_weights"]["sales"], 0.0)
         alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
         beta = next(row for row in result["brands"] if row["brand_id"] == "b")
@@ -174,6 +202,43 @@ class MarketShareTests(unittest.TestCase):
                 end_date="2026-07-31",
                 conn=self.conn,
             )
+
+    def test_app_metric_rating_count_drives_review_and_download_estimates(self):
+        self.add_record(
+            "a-metric",
+            "a",
+            dimension="platform",
+            channel="app",
+            platform="app_store",
+            source_id="app_store_reviews",
+            data_type="app_metric",
+            metrics={"rating": 4.8, "rating_count": 21000},
+        )
+        self.add_record(
+            "b-metric",
+            "b",
+            dimension="platform",
+            channel="app",
+            platform="app_store",
+            source_id="app_store_reviews",
+            data_type="app_metric",
+            metrics={"rating": 4.5, "rating_count": 1000},
+        )
+
+        result = market_share(
+            brand_ids="a,b",
+            country="US",
+            start_date="2026-07-01",
+            end_date="2026-07-31",
+            conn=self.conn,
+        )
+
+        alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
+        self.assertEqual(21000, alpha["raw"]["app_reviews"])
+        self.assertEqual(2100000, alpha["raw"]["app_downloads_est"])
+        self.assertEqual("review_proxy", alpha["raw"]["app_download_basis"])
+        self.assertEqual(1.0, result["confidence"]["download_proxy_ratio"])
+        self.assertLessEqual(result["confidence"]["score"], 70)
 
 
 if __name__ == "__main__":

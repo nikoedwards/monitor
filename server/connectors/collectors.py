@@ -454,26 +454,135 @@ def collect_reddit(conn: sqlite3.Connection, brand: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------- App Store
-def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM links WHERE brand_id = ? AND platform = 'app_store'",
-        (brand.get("id"),),
-    ).fetchall()
-    payloads: list[dict] = []
-    for row in rows:
-        match = re.search(r"id(\d+)", row["url"] or "")
-        if not match:
+_DEFAULT_APP_STORE_COUNTRIES = ("US", "CN", "GB")
+
+
+def _app_store_identity(value) -> str:
+    return re.sub(r"[^a-z0-9]+", "", clean_text(str(value or "")).casefold())
+
+
+def _app_store_count(value) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _select_official_apps(brand: dict, results: list[dict]) -> list[dict]:
+    """Keep the most likely official seller portfolio for a brand search.
+
+    Apple search can return competitors and third-party companion apps.  We
+    first score sellers whose app names visibly contain the configured brand,
+    then keep results from the strongest seller only.  This admits portfolios
+    such as Anker/soundcore/eufy while rejecting unrelated search results.
+    """
+    brand_key = _app_store_identity(brand.get("name"))
+    if len(brand_key) < 3:
+        return []
+
+    seller_scores: dict[str, int] = {}
+    for item in results:
+        if not isinstance(item, dict) or brand_key not in _app_store_identity(item.get("trackName")):
             continue
-        app_id = match.group(1)
-        country = (row["region"] or "us").lower()[:2]
-        feed = (
-            f"https://itunes.apple.com/{country}/rss/customerreviews/"
-            f"id={app_id}/sortBy=mostRecent/json"
+        seller = clean_text(item.get("sellerName"))
+        seller_key = _app_store_identity(seller)
+        if not seller_key:
+            continue
+        seller_scores[seller_key] = seller_scores.get(seller_key, 0) + max(
+            1, _app_store_count(item.get("userRatingCount"))
         )
-        try:
-            data = fetch_json(feed, timeout=16)
-        except FetchError:
-            continue
+    if not seller_scores:
+        return []
+
+    trusted_seller = max(seller_scores, key=lambda key: (seller_scores[key], key))
+    selected = [
+        item for item in results
+        if isinstance(item, dict)
+        and _app_store_identity(item.get("sellerName")) == trusted_seller
+        and item.get("trackId")
+    ]
+    selected.sort(
+        key=lambda item: (-_app_store_count(item.get("userRatingCount")), clean_text(item.get("trackName")).casefold())
+    )
+    return selected[:12]
+
+
+def _app_store_metric_payload(
+    brand: dict,
+    app: dict,
+    country: str,
+    *,
+    link_id: str | None = None,
+    product_id: str | None = None,
+    discovery: str,
+) -> dict | None:
+    app_id = clean_text(str(app.get("trackId") or ""))
+    rating_count = _app_store_count(app.get("userRatingCount"))
+    if not app_id or rating_count <= 0:
+        return None
+    track_name = clean_text(app.get("trackName")) or brand.get("name") or "App"
+    rating = app.get("averageUserRating") or app.get("averageUserRatingForCurrentVersion")
+    app_link_id = link_id or f"auto-app-store:{country}:{app_id}"
+    return {
+        "source_id": "app_store_reviews",
+        "brand_id": brand.get("id"),
+        "product_id": product_id,
+        "link_id": app_link_id,
+        "external_id": f"{brand.get('id')}:app-store:{country}:{app_id}:metrics:{today()}",
+        "data_type": "app_metric",
+        "dimension": "platform",
+        "channel": "app",
+        "platform": "app_store",
+        "title": f"{track_name} App Store 指标",
+        "body": f"{country} App Store 累计评分 {rating_count}",
+        "url": clean_text(app.get("trackViewUrl")),
+        "region": country,
+        "metrics": {"rating": rating, "rating_count": rating_count},
+        "raw": {
+            "track_id": app_id,
+            "track_name": track_name,
+            "seller_name": clean_text(app.get("sellerName")),
+            "rating_count": rating_count,
+            "average_user_rating": rating,
+            "discovery": discovery,
+        },
+    }
+
+
+def _configured_app_payloads(conn: sqlite3.Connection, brand: dict, row: sqlite3.Row) -> list[dict]:
+    match = re.search(r"id(\d+)", row["url"] or "")
+    if not match:
+        _touch_link(conn, row["id"], status="empty", error="App Store 链接中未找到应用 ID")
+        return []
+    app_id = match.group(1)
+    country = (row["region"] or "US").upper()[:2]
+    payloads: list[dict] = []
+    errors: list[str] = []
+
+    lookup = f"https://itunes.apple.com/lookup?id={app_id}&country={country.lower()}"
+    try:
+        data = fetch_json(lookup, timeout=16)
+        apps = data.get("results", []) if isinstance(data, dict) else []
+        if apps:
+            metric = _app_store_metric_payload(
+                brand,
+                apps[0],
+                country,
+                link_id=row["id"],
+                product_id=row["product_id"],
+                discovery="configured_link",
+            )
+            if metric:
+                payloads.append(metric)
+    except FetchError as exc:
+        errors.append(str(exc))
+
+    feed = (
+        f"https://itunes.apple.com/{country.lower()}/rss/customerreviews/"
+        f"id={app_id}/sortBy=mostRecent/json"
+    )
+    try:
+        data = fetch_json(feed, timeout=16)
         entries = (data.get("feed", {}) or {}).get("entry", []) if isinstance(data, dict) else []
         for entry in entries:
             if not isinstance(entry, dict) or "im:rating" not in entry:
@@ -496,10 +605,54 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
                 "author": clean_text((entry.get("author", {}) or {}).get("name", {}).get("label")),
                 "body": body or title,
                 "url": row["url"],
-                "region": country.upper(),
+                "region": country,
                 "metrics": {"rating": rating},
                 "raw": {"rating": rating},
             })
+    except FetchError as exc:
+        errors.append(str(exc))
+
+    _touch_link(
+        conn,
+        row["id"],
+        status="ok" if payloads else "network" if errors else "empty",
+        error="; ".join(errors) if not payloads else "",
+    )
+    return payloads
+
+
+def _discovered_app_payloads(brand: dict) -> list[dict]:
+    brand_name = clean_text(brand.get("name"))
+    if not brand_name:
+        return []
+    payloads: list[dict] = []
+    for country in _DEFAULT_APP_STORE_COUNTRIES:
+        search = (
+            "https://itunes.apple.com/search?"
+            f"term={quote_plus(brand_name)}&entity=software&country={country.lower()}&limit=25"
+        )
+        try:
+            data = fetch_json(search, timeout=16)
+        except FetchError:
+            continue
+        results = data.get("results", []) if isinstance(data, dict) else []
+        for app in _select_official_apps(brand, results):
+            metric = _app_store_metric_payload(brand, app, country, discovery="brand_search")
+            if metric:
+                payloads.append(metric)
+    return payloads
+
+
+def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM links WHERE brand_id = ? AND platform = 'app_store' AND status = 'active'",
+        (brand.get("id"),),
+    ).fetchall()
+    if not rows:
+        return _discovered_app_payloads(brand)
+    payloads: list[dict] = []
+    for row in rows:
+        payloads.extend(_configured_app_payloads(conn, brand, row))
     return payloads
 
 
