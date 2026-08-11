@@ -270,6 +270,25 @@ function SnapshotViewer({
     setComparisonFailed(false);
   }, [comparisonSrc]);
 
+  const textChanges = (
+    <div className={mode === "comparison" ? "rounded-lg p-3 space-y-2" : "space-y-2"} style={mode === "comparison" ? { background: "var(--bg-soft)", border: "1px solid var(--hairline)" } : undefined}>
+      {mode === "comparison" && (
+        <div className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>文字变化</div>
+      )}
+      <div className="text-[13px]" style={{ color: "var(--body)" }}>{snapshot.summary}</div>
+      {snapshot.changes?.length > 0 && (
+        <div className="space-y-1 max-h-32 overflow-y-auto">
+          {snapshot.changes.map((change, index) => (
+            <div key={index} className="text-[12px] flex gap-2" style={{ color: change.type === "removed" ? "var(--danger)" : "var(--body)" }}>
+              <Badge tone={change.type === "added" ? "positive" : change.type === "removed" ? "negative" : "neutral"}>{change.type}</Badge>
+              <span>{change.text || `${change.from} → ${change.to}`}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -288,17 +307,7 @@ function SnapshotViewer({
           {onDelete && <Button size="sm" variant="danger" onClick={onDelete}>删除此快照</Button>}
         </div>
       </div>
-      <div className="text-[13px]" style={{ color: "var(--body)" }}>{snapshot.summary}</div>
-      {snapshot.changes?.length > 0 && (
-        <div className="space-y-1 max-h-32 overflow-y-auto">
-          {snapshot.changes.map((change, index) => (
-            <div key={index} className="text-[12px] flex gap-2" style={{ color: change.type === "removed" ? "var(--danger)" : "var(--body)" }}>
-              <Badge tone={change.type === "added" ? "positive" : change.type === "removed" ? "negative" : "neutral"}>{change.type}</Badge>
-              <span>{change.text || `${change.from} → ${change.to}`}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {mode !== "comparison" && textChanges}
       {mode === "screenshot" && (
         <img src={snapshot.screenshot_url} alt={snapshot.title} loading="eager" fetchPriority="high" decoding="async" className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
       )}
@@ -319,13 +328,13 @@ function SnapshotViewer({
           </div>
 
           {regionCount > 1 && (
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex gap-1.5 overflow-x-auto pb-1" aria-label="选择视觉变化区域">
               {snapshot.visual_regions.map((region, index) => (
                 <button
                   key={`${snapshot.id}-region-${index}`}
                   type="button"
                   onClick={() => setComparisonRegion(index)}
-                  className="h-8 px-3 rounded-md text-[12px] font-medium cursor-pointer"
+                  className="h-8 px-3 rounded-md text-[12px] font-medium cursor-pointer shrink-0"
                   style={index === comparisonRegion
                     ? { background: "var(--ink)", color: "var(--bg)" }
                     : { background: "var(--panel)", color: "var(--body)", border: "1px solid var(--hairline-strong)" }}
@@ -372,6 +381,7 @@ function SnapshotViewer({
           </div>
         </div>
       )}
+      {mode === "comparison" && textChanges}
       {snapshot.archive_url && (mode !== "comparison" || archiveReady) && (
         <div style={{ display: mode === "archive" ? "block" : "none" }}>
           <div className="text-[12px] mb-2 rounded-md px-3 py-2" style={{ color: "var(--mute)", background: "var(--bg-soft)" }}>
