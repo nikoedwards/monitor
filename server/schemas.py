@@ -190,6 +190,33 @@ class LinkedInProfileUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class CreatorCandidateImportRow(BaseModel):
+    platform: Optional[str] = None
+    url: Optional[str] = None
+    handle: Optional[str] = None
+    name: Optional[str] = None
+    notes: Optional[str] = None
+    follower_count: int = Field(default=0, ge=0)
+
+
+class CreatorCandidateImportIn(BaseModel):
+    brand_id: str
+    rows: list[CreatorCandidateImportRow]
+
+
+class CreatorCandidateUpdate(BaseModel):
+    review_status: Optional[str] = None
+    relationship_status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CreatorMapSnapshotIn(BaseModel):
+    brand_id: str
+    product_id: Optional[str] = None
+    platform: Optional[str] = None
+    title: Optional[str] = None
+
+
 class SettingsIn(BaseModel):
     api_key: Optional[str] = None
     base_url: Optional[str] = None

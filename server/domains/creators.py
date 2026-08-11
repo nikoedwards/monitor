@@ -11,9 +11,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from .. import ai
 from ..connectors.base import run_collector
 from ..connectors.creators import PLATFORM_LABELS, PLATFORMS
+from ..connectors.creators.curation import (
+    candidate_dashboard,
+    candidate_evidence,
+    import_candidates,
+    list_map_snapshots,
+    rebuild_candidates,
+    save_map_snapshot,
+    update_candidate,
+)
 from ..connectors.creators.products import rebuild_product_matches
 from ..connectors.creators.runner import PLATFORM_SOURCE, rebuild_roster
 from ..connectors.registry import get_spec
+from ..schemas import CreatorCandidateImportIn, CreatorCandidateUpdate, CreatorMapSnapshotIn
 from .common import build_trend, fetch_brand, get_conn, query_records, resolve_window
 
 router = APIRouter(prefix="/api/creators", tags=["creators"])
@@ -232,6 +242,7 @@ def creators_summary(
     if brand_id:
         rebuild_roster(conn, brand_id)
         rebuild_product_matches(conn, brand_id)
+        rebuild_candidates(conn, brand_id)
     start, end = resolve_window(days, start_date, end_date)
     filters = {
         "brand_id": brand_id,
@@ -325,6 +336,103 @@ def creators_roster(
     return {"scope": {"product": product}, "roster": _add_shared_brands(conn, roster, brand_id)}
 
 
+# --------------------------------------------------------------- curation pool
+@router.get("/candidates")
+def creators_candidates(
+    brand_id: str,
+    product_id: str | None = None,
+    platform: str | None = None,
+    review_status: str | None = None,
+    q: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, brand_id)
+    _scope_product(conn, brand_id, product_id)
+    return candidate_dashboard(conn, brand_id, product_id, platform, review_status, q)
+
+
+@router.post("/candidates/rebuild")
+def creators_candidates_rebuild(
+    brand_id: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, brand_id)
+    product_matches = rebuild_product_matches(conn, brand_id)
+    candidates = rebuild_candidates(conn, brand_id)
+    return {"product_matches": product_matches, "candidates": candidates}
+
+
+@router.post("/candidates/import", status_code=201)
+def creators_candidates_import(
+    payload: CreatorCandidateImportIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, payload.brand_id)
+    result = import_candidates(
+        conn,
+        payload.brand_id,
+        [row.model_dump() for row in payload.rows],
+    )
+    if not result["ids"]:
+        raise HTTPException(status_code=400, detail="未识别到有效的 YouTube、Instagram 或 TikTok 红人。")
+    return result
+
+
+@router.put("/candidates/{candidate_id}")
+def creators_candidate_update(
+    candidate_id: str,
+    payload: CreatorCandidateUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    try:
+        return update_candidate(conn, candidate_id, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/candidates/{candidate_id}/evidence")
+def creators_candidate_evidence(
+    candidate_id: str,
+    product_id: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    row = conn.execute("SELECT id FROM creator_candidates WHERE id = ?", (candidate_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Creator candidate not found")
+    return {"evidence": candidate_evidence(conn, candidate_id, product_id)}
+
+
+@router.get("/map-snapshots")
+def creators_map_snapshots(
+    brand_id: str,
+    product_id: str | None = None,
+    platform: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, brand_id)
+    _scope_product(conn, brand_id, product_id)
+    return {"snapshots": list_map_snapshots(conn, brand_id, product_id, platform)}
+
+
+@router.post("/map-snapshots", status_code=201)
+def creators_map_snapshot_create(
+    payload: CreatorMapSnapshotIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, payload.brand_id)
+    _scope_product(conn, payload.brand_id, payload.product_id)
+    try:
+        return save_map_snapshot(
+            conn,
+            payload.brand_id,
+            payload.product_id,
+            payload.platform,
+            payload.title,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 # ------------------------------------------------------------------------ sync
 @router.post("/sync")
 def creators_sync(
@@ -343,7 +451,13 @@ def creators_sync(
         results.append({"platform": plat, **outcome})
     product_matches = rebuild_product_matches(conn, brand_id)
     roster_size = rebuild_roster(conn, brand_id)
-    return {"results": results, "roster_size": roster_size, "product_matches": product_matches}
+    candidates = rebuild_candidates(conn, brand_id)
+    return {
+        "results": results,
+        "roster_size": roster_size,
+        "product_matches": product_matches,
+        "candidates": candidates,
+    }
 
 
 # ---------------------------------------------------------------------- report

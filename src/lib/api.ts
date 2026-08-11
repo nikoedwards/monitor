@@ -500,6 +500,81 @@ export interface CreatorMapPoint {
   total_views: number;
   total_engagement: number;
   engagement_rate?: number | null;
+  review_status?: CreatorReviewStatus;
+}
+
+export type CreatorReviewStatus = "pending" | "approved" | "priority" | "rejected";
+export type CreatorRelationshipStatus = "potential" | "contacted" | "collaborating" | "past";
+
+export interface CreatorCandidate {
+  id: string;
+  brand_id: string;
+  platform: "youtube" | "instagram" | "tiktok";
+  identity_key: string;
+  handle?: string;
+  name?: string;
+  url?: string;
+  avatar_url?: string;
+  review_status: CreatorReviewStatus;
+  relationship_status: CreatorRelationshipStatus;
+  discovery_source: "collected" | "manual" | "manual+collected";
+  relevance_score: number;
+  follower_count: number;
+  post_count: number;
+  collab_count: number;
+  sponsored_count: number;
+  total_views: number;
+  total_engagement: number;
+  evidence_count: number;
+  avg_engagement: number;
+  engagement_rate?: number | null;
+  first_seen?: string;
+  last_seen?: string;
+  last_collab_at?: string;
+  notes?: string;
+  reviewed_at?: string;
+  products: { id: string; name: string }[];
+}
+
+export interface CreatorCandidateEvidence {
+  id: string;
+  candidate_id: string;
+  record_id?: string;
+  product_id?: string;
+  product_name?: string;
+  evidence_type: string;
+  query?: string;
+  title?: string;
+  excerpt?: string;
+  url?: string;
+  confidence: number;
+  occurred_at?: string;
+  evidence: {
+    match_type?: string;
+    signals?: { kind: string; signal: string }[];
+    mentions?: string[];
+    collab_type?: string;
+  };
+}
+
+export interface CreatorCandidatesResponse {
+  candidates: CreatorCandidate[];
+  totals: Record<"all" | "pending" | "approved" | "priority" | "rejected" | "curated", number>;
+  curated_map: {
+    points: CreatorMapPoint[];
+    quadrants: { key: "core" | "potential" | "scale" | "observe"; label: string; total: number }[];
+  };
+}
+
+export interface CreatorMapSnapshot {
+  id: string;
+  brand_id: string;
+  product_id?: string;
+  platform: string;
+  snapshot_date: string;
+  title?: string;
+  created_at: string;
+  map: CreatorCandidatesResponse["curated_map"];
 }
 
 export interface BrandDraft {

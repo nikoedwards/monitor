@@ -218,6 +218,69 @@ CREATE TABLE IF NOT EXISTS record_product_matches (
   PRIMARY KEY (record_id, product_id)
 );
 
+-- Gladia-style editorial workflow: collected or manually seeded creators first
+-- enter a candidate pool, then a reviewer promotes the representative set that
+-- is allowed into the curated landscape/map.
+CREATE TABLE IF NOT EXISTS creator_candidates (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  identity_key TEXT NOT NULL,
+  handle TEXT,
+  name TEXT,
+  url TEXT,
+  avatar_url TEXT,
+  review_status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|priority|rejected
+  relationship_status TEXT NOT NULL DEFAULT 'potential', -- potential|contacted|collaborating|past
+  discovery_source TEXT NOT NULL DEFAULT 'collected', -- collected|manual|manual+collected
+  relevance_score REAL NOT NULL DEFAULT 0,
+  follower_count INTEGER NOT NULL DEFAULT 0,
+  post_count INTEGER NOT NULL DEFAULT 0,
+  collab_count INTEGER NOT NULL DEFAULT 0,
+  sponsored_count INTEGER NOT NULL DEFAULT 0,
+  total_views INTEGER NOT NULL DEFAULT 0,
+  total_engagement INTEGER NOT NULL DEFAULT 0,
+  evidence_count INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT,
+  last_seen TEXT,
+  last_collab_at TEXT,
+  notes TEXT,
+  reviewed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (brand_id, platform, identity_key)
+);
+
+CREATE TABLE IF NOT EXISTS creator_candidate_evidence (
+  id TEXT PRIMARY KEY,
+  candidate_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  record_id TEXT,
+  product_id TEXT NOT NULL DEFAULT '',
+  evidence_type TEXT NOT NULL DEFAULT 'record',
+  query TEXT,
+  title TEXT,
+  excerpt TEXT,
+  url TEXT,
+  confidence REAL NOT NULL DEFAULT 0,
+  occurred_at TEXT,
+  evidence_json TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (candidate_id, record_id, product_id, evidence_type)
+);
+
+CREATE TABLE IF NOT EXISTS creator_map_snapshots (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT NOT NULL,
+  product_id TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL DEFAULT 'all',
+  snapshot_date TEXT NOT NULL,
+  title TEXT,
+  points_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (brand_id, product_id, platform, snapshot_date)
+);
+
 CREATE TABLE IF NOT EXISTS web_monitors (
   id TEXT PRIMARY KEY,
   brand_id TEXT,
@@ -470,6 +533,10 @@ CREATE INDEX IF NOT EXISTS idx_voc_actions_status ON voc_actions(status, brand_i
 CREATE INDEX IF NOT EXISTS idx_creators_brand ON creators(brand_id, platform);
 CREATE INDEX IF NOT EXISTS idx_record_product_matches_brand ON record_product_matches(brand_id, product_id);
 CREATE INDEX IF NOT EXISTS idx_record_product_matches_record ON record_product_matches(record_id);
+CREATE INDEX IF NOT EXISTS idx_creator_candidates_brand ON creator_candidates(brand_id, review_status, platform);
+CREATE INDEX IF NOT EXISTS idx_creator_candidate_evidence_candidate ON creator_candidate_evidence(candidate_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_creator_candidate_evidence_product ON creator_candidate_evidence(brand_id, product_id);
+CREATE INDEX IF NOT EXISTS idx_creator_map_snapshots_scope ON creator_map_snapshots(brand_id, product_id, platform, snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_job_postings_brand ON job_postings(brand_id, platform);
 CREATE INDEX IF NOT EXISTS idx_job_postings_link ON job_postings(link_id);
 CREATE INDEX IF NOT EXISTS idx_job_snapshots_brand ON job_snapshots(brand_id, snapshot_date);

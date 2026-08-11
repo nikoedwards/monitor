@@ -5,6 +5,7 @@ import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
+import { CreatorCuration } from "./CreatorCuration";
 import { useBrands, useCreatorsReport, useCreatorsRoster, useCreatorsSummary, useCreatorsSync, useProducts, useRecords } from "../lib/hooks";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
 import type { CreatorMapPoint, CreatorRosterItem } from "../lib/api";
@@ -15,7 +16,6 @@ const PLATFORMS = [
   { value: "youtube", label: "YouTube" },
   { value: "instagram", label: "Instagram" },
   { value: "tiktok", label: "TikTok" },
-  { value: "x", label: "X" },
 ];
 
 const COLLAB_LABEL: Record<string, string> = {
@@ -228,6 +228,8 @@ export default function Creators() {
         <StatCard label="产品归因" value={`${Math.round(Number(t.product_match_coverage || 0) * 100)}%`} hint={selectedProduct ? "当前内容均命中该产品" : `未归因 ${fmtNum(t.unmapped_posts)}`} />
       </div>
 
+      {brandId && <CreatorCuration brandId={brandId} productId={selectedProductId} platform={plat} />}
+
       {empty ? (
         <EmptyState
           title={selectedProduct ? `${selectedProduct.name} 暂无红人数据` : "红人达人板块暂无数据"}
@@ -261,8 +263,8 @@ export default function Creators() {
 
           <Card>
             <SectionTitle
-              title={selectedProduct ? `${selectedProduct.name} 红人四象限` : "品牌红人四象限"}
-              subtitle="横轴为合作深度，纵轴为内容效果；按当前时间范围和平台实时计算"
+              title={selectedProduct ? `${selectedProduct.name} 自动候选预览` : "自动候选数据预览"}
+              subtitle="这是未经人工审核的采集数据预览；正式策展地图以上方审核通过的红人为准"
             />
             <CreatorQuadrantMap points={summary.creator_map?.points || []} quadrants={summary.creator_map?.quadrants || []} />
           </Card>
