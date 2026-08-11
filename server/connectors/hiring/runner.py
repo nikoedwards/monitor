@@ -624,10 +624,13 @@ def _record_activities(conn: sqlite3.Connection, profile: dict, activities: list
     return added
 
 
-def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
-    """Expand LinkedIn company people links into an employee roster + activity feed."""
-    summary = {"links": 0, "profiles": 0, "profile_changes": 0, "activities": 0, "errors": 0}
-
+def discover_linkedin_people_candidates(
+    conn: sqlite3.Connection,
+    brand: dict,
+    link_id: str | None = None,
+) -> dict:
+    """Import employee candidates from configured LinkedIn company People pages."""
+    summary = {"links": 0, "profiles": 0, "errors": 0}
     link_clause = "AND id = ?" if link_id else ""
     link_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
     links = conn.execute(
@@ -657,10 +660,23 @@ def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_i
         for ref in refs:
             _upsert_profile(conn, link, ref)
             summary["profiles"] += 1
+        status = "ok" if refs else "partial"
+        error = "" if refs else "当前 LinkedIn People 页面没有发现可导入员工，请检查页面 URL、登录 Cookie 或访问状态。"
         conn.execute(
-            "UPDATE links SET last_status = ?, last_error = '', last_collect_at = ?, updated_at = ? WHERE id = ?",
-            ("ok", utc_now(), utc_now(), link["id"]),
+            "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
+            (status, error, utc_now(), utc_now(), link["id"]),
         )
+    return summary
+
+
+def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
+    """Discover candidates, then capture monitored LinkedIn profiles and activity."""
+    discovery = discover_linkedin_people_candidates(conn, brand, link_id=link_id)
+    summary = {
+        **discovery,
+        "profile_changes": 0,
+        "activities": 0,
+    }
 
     provider = pick_people_provider("linkedin", conn)
     if provider is not None:

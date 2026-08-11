@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from ...util import canonical_url, clean_text, normalize_url
@@ -28,6 +29,59 @@ _JOB_VIEW_RE = re.compile(r"/jobs/view/[0-9]+", re.I)
 _JOB_ID_RE = re.compile(r"/jobs/view/([0-9]+)", re.I)
 _PROFILE_RE = re.compile(r"/in/[^\"'<>\s?/]+", re.I)
 _CLOSED_MARKERS = ("no longer accepting", "not accepting applications", "已关闭", "不再接受")
+
+
+class _ProfileAnchorParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.current: dict | None = None
+        self.items: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = {key: value or "" for key, value in attrs}
+        if not self.current and tag == "a" and "/in/" in attr.get("href", ""):
+            self.current = {
+                "href": attr["href"],
+                "preferred": attr.get("aria-label", "") or attr.get("title", ""),
+                "text": [],
+            }
+            return
+        if self.current:
+            if tag == "img":
+                self.current["text"].append(attr.get("alt", ""))
+
+    def handle_data(self, data: str) -> None:
+        if self.current:
+            self.current["text"].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.current and tag == "a":
+            label = clean_text(self.current["preferred"] or " ".join(self.current["text"]))
+            self.items.append((self.current["href"], label))
+            self.current = None
+
+
+def _profile_anchor_details(html: str) -> list[tuple[str, str]]:
+    if not html:
+        return []
+    parser = _ProfileAnchorParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    return parser.items
+
+
+def _profile_name_from_anchor(value: str) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    match = re.match(r"^(?:view\s+)?(.+?)(?:'s|’s)\s+profile$", text, flags=re.I)
+    if match:
+        text = clean_text(match.group(1))
+    if text.lower() in {"linkedin member", "view profile", "profile"} or len(text) > 120:
+        return ""
+    return text
 
 
 def _linkedin_cookie(conn: sqlite3.Connection) -> str:
@@ -111,8 +165,10 @@ class LinkedInPeopleProvider(PeopleProvider):
             return []
         seen: set[str] = set()
         found: list[ProfileRef] = []
-        candidates = list(page.anchors or []) + _PROFILE_RE.findall(page.html or "")
-        for href in candidates:
+        detailed = _profile_anchor_details(page.html or "")
+        candidates = detailed + [(href, "") for href in (page.anchors or [])]
+        candidates += [(href, "") for href in _PROFILE_RE.findall(page.html or "")]
+        for href, anchor_text in candidates:
             if not href or "/in/" not in href:
                 continue
             absolute = urljoin(page.final_url or start, href.split("?")[0])
@@ -120,7 +176,13 @@ class LinkedInPeopleProvider(PeopleProvider):
             if not canon or "/in/" not in canon or canon in seen:
                 continue
             seen.add(canon)
-            found.append(ProfileRef(profile_url=absolute, external_id=_profile_slug(absolute)))
+            found.append(
+                ProfileRef(
+                    profile_url=absolute,
+                    external_id=_profile_slug(absolute),
+                    name=_profile_name_from_anchor(anchor_text),
+                )
+            )
             if len(found) >= self.max_profiles:
                 break
         return found

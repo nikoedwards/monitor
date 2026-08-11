@@ -19,11 +19,17 @@ from fastapi.responses import StreamingResponse
 from .. import ai
 from ..config import ROOT
 from ..connectors.hiring.runner import (
+    discover_linkedin_people_candidates,
     ingest_browser_hiring_capture,
     run_hiring_collection,
     run_linkedin_people_collection,
 )
-from ..schemas import BrowserHiringCaptureIn, LinkedInProfileIn, LinkedInProfileUpdate
+from ..schemas import (
+    BrowserHiringCaptureIn,
+    LinkedInMonitorSelectionIn,
+    LinkedInProfileIn,
+    LinkedInProfileUpdate,
+)
 from ..util import canonical_url, clean_text, new_id, normalize_url, utc_now
 from .common import fetch_brand, get_conn, resolve_window
 
@@ -192,6 +198,26 @@ def sync_employees(brand_id: str, link_id: str | None = None, conn: sqlite3.Conn
     return run_linkedin_people_collection(conn, brand, link_id=link_id)
 
 
+@router.post("/employees/import")
+def import_company_employees(
+    brand_id: str,
+    link_id: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    brand = fetch_brand(conn, brand_id)
+    summary = discover_linkedin_people_candidates(conn, brand, link_id=link_id)
+    rows = conn.execute(
+        """
+        SELECT * FROM linkedin_profiles
+        WHERE brand_id = ? AND source_type = 'company'
+        ORDER BY monitor DESC, name, external_id
+        LIMIT 300
+        """,
+        (brand_id,),
+    ).fetchall()
+    return {**summary, "candidates": [profile_to_dict(conn, row) for row in rows]}
+
+
 # -------------------------------------------------------------------- employees
 @router.get("/employees")
 def list_employees(
@@ -211,6 +237,39 @@ def list_employees(
         params,
     ).fetchall()
     return {"employees": [profile_to_dict(conn, r) for r in rows]}
+
+
+@router.put("/employees/monitor-selection")
+def update_employee_monitor_selection(
+    payload: LinkedInMonitorSelectionIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, payload.brand_id)
+    selected_ids = list(dict.fromkeys(payload.profile_ids))
+    if selected_ids:
+        placeholders = ",".join("?" for _ in selected_ids)
+        rows = conn.execute(
+            f"""
+            SELECT id FROM linkedin_profiles
+            WHERE brand_id = ? AND source_type = 'company' AND id IN ({placeholders})
+            """,
+            (payload.brand_id, *selected_ids),
+        ).fetchall()
+        if len(rows) != len(selected_ids):
+            raise HTTPException(status_code=400, detail="选择中包含不属于当前企业候选池的人员。")
+
+    now = utc_now()
+    conn.execute(
+        "UPDATE linkedin_profiles SET monitor = 0, updated_at = ? WHERE brand_id = ? AND source_type = 'company'",
+        (now, payload.brand_id),
+    )
+    if selected_ids:
+        placeholders = ",".join("?" for _ in selected_ids)
+        conn.execute(
+            f"UPDATE linkedin_profiles SET monitor = 1, status = 'active', updated_at = ? WHERE id IN ({placeholders})",
+            (now, *selected_ids),
+        )
+    return {"selected": len(selected_ids)}
 
 
 def _validated_profile_url(value: str) -> tuple[str, str, str]:

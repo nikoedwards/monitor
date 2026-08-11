@@ -516,6 +516,29 @@ export function useEmployeesSync() {
   });
 }
 
+export function useEmployeeImport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ brandId, linkId }: { brandId: string; linkId?: string }) =>
+      api.post<import("./api").LinkedInEmployeeImportResult>(
+        `/api/hiring/employees/import${qs({ brand_id: brandId, link_id: linkId })}`,
+      ),
+    onSuccess: () => invalidatePeople(qc),
+  });
+}
+
+export function useEmployeeMonitorSelection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ brandId, profileIds }: { brandId: string; profileIds: string[] }) =>
+      api.put<{ selected: number }>("/api/hiring/employees/monitor-selection", {
+        brand_id: brandId,
+        profile_ids: profileIds,
+      }),
+    onSuccess: () => invalidatePeople(qc),
+  });
+}
+
 export function useEmployeeHistory(profileId?: string) {
   return useQuery({
     queryKey: ["li-employee-history", profileId],
