@@ -249,6 +249,7 @@ function SnapshotViewer({
 }) {
   const [archiveReady, setArchiveReady] = useState(false);
   const [comparisonRegion, setComparisonRegion] = useState(0);
+  const [comparisonReady, setComparisonReady] = useState(false);
   const [comparisonFailed, setComparisonFailed] = useState(false);
   const regionCount = snapshot.visual_regions?.length || 0;
   const comparisonSrc = snapshot.comparison_url
@@ -265,6 +266,7 @@ function SnapshotViewer({
   }, [snapshot.id, snapshot.comparison_url]);
 
   useEffect(() => {
+    setComparisonReady(false);
     setComparisonFailed(false);
   }, [comparisonSrc]);
 
@@ -298,7 +300,7 @@ function SnapshotViewer({
         </div>
       )}
       {mode === "screenshot" && (
-        <img src={snapshot.screenshot_url} alt={snapshot.title} className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
+        <img src={snapshot.screenshot_url} alt={snapshot.title} loading="eager" fetchPriority="high" decoding="async" className="w-full rounded-md" style={{ border: "1px solid var(--hairline)" }} />
       )}
       {mode === "comparison" && snapshot.comparison_url && (
         <div className="rounded-lg p-3 space-y-3" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
@@ -334,7 +336,17 @@ function SnapshotViewer({
             </div>
           )}
 
-          <div className="rounded-md overflow-hidden" style={{ minHeight: 240, background: "var(--panel)", border: "1px solid var(--hairline)" }}>
+          <div
+            className="relative rounded-md overflow-hidden"
+            aria-busy={!comparisonReady && !comparisonFailed}
+            style={{ minHeight: 240, background: "var(--panel)", border: "1px solid var(--hairline)" }}
+          >
+            {!comparisonReady && !comparisonFailed && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 px-6 text-center" style={{ color: "var(--mute)" }}>
+                <Spinner />
+                <div className="text-[13px]">正在优先加载变化对比…</div>
+              </div>
+            )}
             {comparisonFailed ? (
               <div className="min-h-[240px] flex items-center justify-center px-6 text-center text-[13px]" style={{ color: "var(--mute)" }}>
                 这组局部对比暂时无法生成，仍可切回「截图」查看完整页面。
@@ -344,8 +356,13 @@ function SnapshotViewer({
                 key={comparisonSrc}
                 src={comparisonSrc}
                 alt={`${snapshot.title || "网页"}变化区域前后对比`}
-                onError={() => setComparisonFailed(true)}
-                className="w-full h-auto"
+                loading="eager"
+                fetchPriority="high"
+                decoding="async"
+                onLoad={() => setComparisonReady(true)}
+                onError={() => { setComparisonReady(false); setComparisonFailed(true); }}
+                className="w-full h-auto transition-opacity"
+                style={{ opacity: comparisonReady ? 1 : 0 }}
               />
             )}
           </div>
@@ -355,7 +372,7 @@ function SnapshotViewer({
           </div>
         </div>
       )}
-      {snapshot.archive_url && (
+      {snapshot.archive_url && (mode !== "comparison" || archiveReady) && (
         <div style={{ display: mode === "archive" ? "block" : "none" }}>
           <div className="text-[12px] mb-2 rounded-md px-3 py-2" style={{ color: "var(--mute)", background: "var(--bg-soft)" }}>
             归档在独立沙箱中运行：允许离线脚本交互，但禁止联网、表单提交、下载和外部跳转。视频仅保存封面。
@@ -363,7 +380,7 @@ function SnapshotViewer({
           <div className="relative rounded-md overflow-hidden" style={{ minHeight: "72vh", border: "1px solid var(--hairline)", background: "var(--panel)" }}>
             {!archiveReady && (
               <>
-                <img src={snapshot.screenshot_url} alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover object-top opacity-30" />
+                <img src={snapshot.screenshot_url} alt="" aria-hidden="true" loading="eager" fetchPriority="high" decoding="async" className="absolute inset-0 h-full w-full object-cover object-top opacity-30" />
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 px-6 text-center" style={{ background: "rgba(255,255,255,0.78)", backdropFilter: "blur(3px)" }}>
                   <Spinner />
                   <div className="text-[13px]" style={{ color: "var(--body)" }}>正在加载交互归档…</div>
@@ -569,7 +586,9 @@ function SnapshotTimeline({ snapshots, brandId, monitorId, rangeText }: { snapsh
                 aria-label={`查看 ${fmtDate(snapshot.snapshot_date)} 快照`}
               >
                 <div className="aspect-[4/3] overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-                  {snapshot.screenshot_url && <img src={snapshot.screenshot_url} alt={snapshot.title} loading="lazy" className="w-full h-full object-cover object-top" />}
+                  {!active && !historyOpen && snapshot.screenshot_url && (
+                    <img src={snapshot.screenshot_url} alt={snapshot.title} loading="lazy" fetchPriority="low" decoding="async" className="w-full h-full object-cover object-top" />
+                  )}
                 </div>
                 <div className="p-2.5">
                   <div className="flex items-center justify-between gap-1">
