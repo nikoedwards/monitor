@@ -3,9 +3,10 @@ import { useNavigate, useParams } from "react-router-dom";
 import { AlertTriangle, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
+import { MultiLineChart } from "../components/charts";
 import { Badge, Button, Card, EmptyState, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
 import { fmtNum } from "../lib/format";
-import { useBrands, useMarketShare, useRefreshMarketShareData } from "../lib/hooks";
+import { useBrands, useMarketShare, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
 import type { MarketShareBrand } from "../lib/api";
 
@@ -64,6 +65,7 @@ export default function MarketShare() {
   const [draft, setDraft] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [country, setCountry] = useState("all");
+  const [trendFocus, setTrendFocus] = useState("all");
   const autoRefreshKeys = useRef(new Set<string>());
   const refreshAppData = useRefreshMarketShareData();
 
@@ -89,6 +91,7 @@ export default function MarketShare() {
     [brands, selected],
   );
   const query = useMarketShare(selected, "balanced", country, range);
+  const trendQuery = useMarketShareTrend(selected, "balanced", country, range);
   const result = query.data;
   const selectedKey = useMemo(() => [...selected].sort().join(","), [selected]);
   const appDataMissing = Boolean(result?.brands.some(
@@ -101,6 +104,10 @@ export default function MarketShare() {
     refreshAppData.mutate(selected);
   }, [appDataMissing, refreshAppData, selected, selectedKey]);
 
+  useEffect(() => {
+    if (trendFocus !== "all" && !selected.includes(trendFocus)) setTrendFocus("all");
+  }, [selected, trendFocus]);
+
   const countryOptions = useMemo(
     () => Array.from(new Set([...(result?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
     [result?.countries, country],
@@ -108,6 +115,21 @@ export default function MarketShare() {
   const leader = result?.brands[0];
   const appDownloads = result?.brands.reduce((sum, row) => sum + row.raw.app_downloads_est, 0) || 0;
   const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0).length : 0;
+  const trendData = useMemo(
+    () => (trendQuery.data?.points || []).map((point) => ({ date: point.date, ...point.shares })),
+    [trendQuery.data?.points],
+  );
+  const trendKeys = useMemo(
+    () => selectedBrands
+      .map((brand, index) => ({ brand, color: COLORS[index % COLORS.length] }))
+      .filter(({ brand }) => brand && (trendFocus === "all" || brand.id === trendFocus))
+      .map(({ brand, color }) => ({ key: brand!.id, name: brand!.name, color })),
+    [selectedBrands, trendFocus],
+  );
+  const trendSummary = useMemo(
+    () => (trendQuery.data?.summary || []).filter((row) => trendFocus === "all" || row.brand_id === trendFocus),
+    [trendFocus, trendQuery.data?.summary],
+  );
 
   if (brandsLoading) return <Spinner />;
   if (brands.length < 2) {
@@ -200,6 +222,51 @@ export default function MarketShare() {
               </div>
             </div>
           )}
+
+          <Card>
+            <SectionTitle
+              title="每日市占趋势"
+              subtitle={trendQuery.data?.latest_date
+                ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 已记录至 ${trendQuery.data.latest_date}`
+                : "每天采集 App 数据后生成国家 × 品牌快照"}
+              action={
+                <Select value={trendFocus} onChange={(event) => setTrendFocus(event.target.value)} aria-label="趋势品牌">
+                  <option value="all">全部品牌趋势</option>
+                  {selectedBrands.map((brand) => brand && <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+                </Select>
+              }
+            />
+            {trendQuery.isLoading ? <Spinner /> : trendQuery.isError ? (
+              <div className="text-[13px]" style={{ color: "var(--danger)" }}>{trendQuery.error?.message || "市占趋势加载失败"}</div>
+            ) : trendData.length ? (
+              <>
+                <MultiLineChart data={trendData} keys={trendKeys} valueFormatter={(value) => `${Number(value).toFixed(1)}%`} />
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-3">
+                  {trendSummary.map((row) => {
+                    const positive = row.change_pp > 0;
+                    const negative = row.change_pp < 0;
+                    return (
+                      <div key={row.brand_id} className="rounded-md p-3" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+                        <div className="text-[12px] truncate" style={{ color: "var(--mute)" }}>{row.name}</div>
+                        <div className="flex items-baseline justify-between gap-2 mt-1">
+                          <span className="text-[20px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{row.latest_share.toFixed(1)}%</span>
+                          <span className="text-[12px] font-medium tabular-nums" style={{ color: positive ? "var(--accent)" : negative ? "var(--danger)" : "var(--mute)" }}>
+                            {positive ? "+" : ""}{row.change_pp.toFixed(1)}pp
+                          </span>
+                        </div>
+                        <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>期初 {row.start_share.toFixed(1)}%</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="text-[11px] mt-3" style={{ color: "var(--mute)" }}>
+                  每日自动刷新；某天未获得新商店数据时沿用最近一次快照，并在下一次成功采集后更新当天值。
+                </div>
+              </>
+            ) : (
+              <div className="text-[13px] py-8 text-center" style={{ color: "var(--mute)" }}>尚无历史快照，完成首次每日采集或点击“刷新 App 数据”后开始记录趋势。</div>
+            )}
+          </Card>
 
           <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4">
             <Card>

@@ -4,7 +4,7 @@ import unittest
 
 from fastapi import HTTPException
 
-from server.domains.market_share import market_share
+from server.domains.market_share import market_share, market_share_trend, sync_market_share_snapshots
 
 
 SCHEMA = """
@@ -48,6 +48,21 @@ CREATE TABLE sales_metrics (
   units_est INTEGER,
   review_count INTEGER
 );
+CREATE TABLE market_share_snapshots (
+  id TEXT PRIMARY KEY,
+  snapshot_date TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  country TEXT NOT NULL DEFAULT 'all',
+  app_downloads_est INTEGER NOT NULL DEFAULT 0,
+  app_downloads_low INTEGER NOT NULL DEFAULT 0,
+  app_downloads_high INTEGER NOT NULL DEFAULT 0,
+  app_download_basis TEXT NOT NULL DEFAULT 'unavailable',
+  app_reviews INTEGER NOT NULL DEFAULT 0,
+  source_updated_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (snapshot_date, brand_id, country)
+);
 """
 
 
@@ -76,6 +91,7 @@ class MarketShareTests(unittest.TestCase):
         metrics,
         region="US",
         data_type=None,
+        occurred_at="2026-07-15T00:00:00+00:00",
     ):
         self.conn.execute(
             "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -92,7 +108,7 @@ class MarketShareTests(unittest.TestCase):
                 "useful brand signal",
                 "https://example.com",
                 region,
-                "2026-07-15T00:00:00+00:00",
+                occurred_at,
                 json.dumps(metrics),
                 "{}",
             ),
@@ -239,6 +255,48 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual("review_proxy", alpha["raw"]["app_download_basis"])
         self.assertEqual(1.0, result["confidence"]["download_proxy_ratio"])
         self.assertLessEqual(result["confidence"]["score"], 70)
+
+    def test_daily_snapshots_drive_brand_and_cohort_trends(self):
+        self.add_record(
+            "a-day-1", "a", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric",
+            metrics={"rating_count": 100}, occurred_at="2026-07-14T08:00:00+00:00",
+        )
+        self.add_record(
+            "b-day-1", "b", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric",
+            metrics={"rating_count": 100}, occurred_at="2026-07-14T08:00:00+00:00",
+        )
+        self.add_record(
+            "a-day-2", "a", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric",
+            metrics={"rating_count": 200}, occurred_at="2026-07-15T08:00:00+00:00",
+        )
+        self.add_record(
+            "b-day-2", "b", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric",
+            metrics={"rating_count": 100}, occurred_at="2026-07-15T08:00:00+00:00",
+        )
+
+        synced = sync_market_share_snapshots(self.conn, brand_ids=["a", "b"], include_history=True)
+        self.assertIn("2026-07-14", synced["captured_dates"])
+        self.assertIn("2026-07-15", synced["captured_dates"])
+
+        result = market_share_trend(
+            brand_ids="a,b",
+            country="US",
+            start_date="2026-07-14",
+            end_date="2026-07-16",
+            conn=self.conn,
+        )
+
+        self.assertEqual(["2026-07-14", "2026-07-15", "2026-07-16"], [point["date"] for point in result["points"]])
+        self.assertEqual(50.0, result["points"][0]["shares"]["a"])
+        self.assertAlmostEqual(66.67, result["points"][1]["shares"]["a"], places=2)
+        self.assertEqual(result["points"][1]["shares"], result["points"][2]["shares"])
+        self.assertTrue(result["points"][2]["is_carried_forward"])
+        alpha = next(row for row in result["summary"] if row["brand_id"] == "a")
+        self.assertAlmostEqual(16.67, alpha["change_pp"], places=2)
 
 
 if __name__ == "__main__":

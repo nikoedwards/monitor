@@ -454,6 +454,34 @@ export interface MarketShareResponse {
   warnings: string[];
 }
 
+export interface MarketShareTrendPoint {
+  date: string;
+  shares: Record<string, number>;
+  fresh_brand_count: number;
+  is_carried_forward: boolean;
+  data_as_of?: string | null;
+}
+
+export interface MarketShareTrendSummary {
+  brand_id: string;
+  name: string;
+  start_share: number;
+  latest_share: number;
+  change_pp: number;
+}
+
+export interface MarketShareTrendResponse {
+  range: { start: string; end: string };
+  country: string;
+  model: MarketShareModelKey;
+  cadence: "daily";
+  latest_date?: string | null;
+  last_snapshot_at?: string | null;
+  brands: Array<Pick<MarketShareBrand, "brand_id" | "name" | "category" | "is_primary" | "is_competitor">>;
+  points: MarketShareTrendPoint[];
+  summary: MarketShareTrendSummary[];
+}
+
 export interface LlmSettings {
   configured: boolean;
   key_hint?: string;

@@ -130,6 +130,17 @@ def _run_due_hiring() -> None:
                 logger.exception("LinkedIn people collection failed for %s", brand.get("id"))
 
 
+def _run_due_market_share_snapshots() -> None:
+    """Materialize today's market-share inputs after scheduled App collection."""
+    from .domains.market_share import sync_market_share_snapshots
+
+    try:
+        with db() as conn:
+            sync_market_share_snapshots(conn)
+    except Exception:
+        logger.exception("Market-share snapshot refresh failed")
+
+
 def _run_due_web_snapshots() -> None:
     from datetime import datetime, timezone
 
@@ -161,6 +172,7 @@ def _collection_loop() -> None:
             _run_due_collections()
             _run_due_sales()
             _run_due_hiring()
+            _run_due_market_share_snapshots()
         except Exception:
             logger.exception("Collection scheduler cycle failed")
         time.sleep(max(60, SCHEDULER_SECONDS))

@@ -10,10 +10,12 @@ import json
 import math
 import sqlite3
 from collections import defaultdict
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..relevance import google_news_record_is_relevant, reddit_search_record_is_relevant
+from ..util import new_id, today, utc_now
 from .common import get_conn, resolve_window
 
 router = APIRouter(prefix="/api/market-share", tags=["market-share"])
@@ -89,7 +91,7 @@ def _record_signals(
     if country:
         params.append(country)
     rows = conn.execute(
-        "SELECT source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, "
+        "SELECT source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, occurred_at, "
         "metrics_json, raw_json FROM records WHERE brand_id = ? "
         "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ?"
         + country_filter,
@@ -106,6 +108,7 @@ def _record_signals(
     views = 0.0
     explicit_downloads_by_app: dict[str, float] = defaultdict(float)
     app_ratings_by_app: dict[str, float] = defaultdict(float)
+    app_data_updated_at = ""
 
     for row in rows:
         metrics = _json_object(row["metrics_json"])
@@ -142,6 +145,7 @@ def _record_signals(
         views += _number(metrics.get("views"))
 
         if is_app:
+            app_data_updated_at = max(app_data_updated_at, str(row["occurred_at"] or ""))
             is_review_record = data_type != "app_metric" and (
                 dimension == "voc" or "review" in source_id or "review" in data_type
             )
@@ -189,6 +193,7 @@ def _record_signals(
         "app_downloads_low": round(app_downloads_low),
         "app_downloads_high": round(app_downloads_high),
         "app_download_basis": app_download_basis,
+        "app_data_updated_at": app_data_updated_at or None,
     }
 
 
@@ -263,6 +268,284 @@ def _signal_share(rows: list[dict], key: str) -> dict[str, float]:
     if total <= 0:
         return {row["brand_id"]: 0.0 for row in rows}
     return {row["brand_id"]: max(0.0, float(row["signals"].get(key) or 0)) / total for row in rows}
+
+
+def _snapshot_date(value: str | None) -> str:
+    candidate = value or today()
+    try:
+        return date.fromisoformat(candidate).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"无效快照日期：{candidate}") from exc
+
+
+def capture_market_share_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_date: str | None = None,
+    brand_ids: list[str] | None = None,
+) -> int:
+    """Persist one daily App-signal snapshot per brand and country.
+
+    Percentages are deliberately not stored: market share is relative to the
+    selected comparison cohort, which can change. The trend endpoint computes
+    percentages from these immutable daily inputs for the current cohort.
+    """
+    day = _snapshot_date(snapshot_date)
+    params: list[str] = []
+    where = ""
+    if brand_ids:
+        placeholders = ",".join("?" for _ in brand_ids)
+        where = f" WHERE id IN ({placeholders})"
+        params.extend(brand_ids)
+    brands = conn.execute(
+        "SELECT id, name, category, is_primary, is_competitor FROM brands" + where,
+        params,
+    ).fetchall()
+    if not brands:
+        return 0
+
+    ids = [row["id"] for row in brands]
+    countries = ["all", *_available_countries(conn, ids, "1970-01-01", day)]
+    now = utc_now()
+    changed = 0
+    for country in countries:
+        country_code = "" if country == "all" else country
+        for brand in brands:
+            signals = _record_signals(conn, brand, "1970-01-01", day, country_code)
+            before = conn.total_changes
+            conn.execute(
+                """
+                INSERT INTO market_share_snapshots
+                  (id, snapshot_date, brand_id, country, app_downloads_est,
+                   app_downloads_low, app_downloads_high, app_download_basis,
+                   app_reviews, source_updated_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, brand_id, country) DO UPDATE SET
+                  app_downloads_est = excluded.app_downloads_est,
+                  app_downloads_low = excluded.app_downloads_low,
+                  app_downloads_high = excluded.app_downloads_high,
+                  app_download_basis = excluded.app_download_basis,
+                  app_reviews = excluded.app_reviews,
+                  source_updated_at = excluded.source_updated_at,
+                  updated_at = excluded.updated_at
+                WHERE market_share_snapshots.app_downloads_est != excluded.app_downloads_est
+                   OR market_share_snapshots.app_downloads_low != excluded.app_downloads_low
+                   OR market_share_snapshots.app_downloads_high != excluded.app_downloads_high
+                   OR market_share_snapshots.app_download_basis != excluded.app_download_basis
+                   OR market_share_snapshots.app_reviews != excluded.app_reviews
+                   OR COALESCE(market_share_snapshots.source_updated_at, '') != COALESCE(excluded.source_updated_at, '')
+                """,
+                (
+                    new_id(), day, brand["id"], country,
+                    signals["app_downloads_est"], signals["app_downloads_low"],
+                    signals["app_downloads_high"], signals["app_download_basis"],
+                    signals["app_reviews"], signals["app_data_updated_at"], now, now,
+                ),
+            )
+            changed += conn.total_changes - before
+    return changed
+
+
+def sync_market_share_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    brand_ids: list[str] | None = None,
+    include_history: bool = False,
+) -> dict:
+    """Backfill historical App metric dates when needed, then refresh today."""
+    params: list[str] = []
+    brand_filter = ""
+    if brand_ids:
+        placeholders = ",".join("?" for _ in brand_ids)
+        brand_filter = f" AND brand_id IN ({placeholders})"
+        params.extend(brand_ids)
+    existing = conn.execute(
+        "SELECT COUNT(*) AS c FROM market_share_snapshots"
+        + (f" WHERE brand_id IN ({','.join('?' for _ in brand_ids)})" if brand_ids else ""),
+        brand_ids or [],
+    ).fetchone()["c"]
+
+    dates = {today()}
+    if include_history or existing == 0:
+        rows = conn.execute(
+            "SELECT DISTINCT substr(occurred_at, 1, 10) AS d FROM records "
+            "WHERE data_type = 'app_metric' AND occurred_at IS NOT NULL "
+            "AND length(substr(occurred_at, 1, 10)) = 10"
+            + brand_filter,
+            params,
+        ).fetchall()
+        dates.update(str(row["d"]) for row in rows if row["d"])
+
+    changes = 0
+    captured_dates: list[str] = []
+    for day in sorted(dates):
+        try:
+            normalized = _snapshot_date(day)
+        except ValueError:
+            continue
+        changes += capture_market_share_snapshots(
+            conn,
+            snapshot_date=normalized,
+            brand_ids=brand_ids,
+        )
+        captured_dates.append(normalized)
+    return {"captured_dates": captured_dates, "changes": changes}
+
+
+def _trend_shares(brand_ids: list[str], state: dict[str, dict], model: str) -> dict[str, float]:
+    weights = MODEL_PRESETS[model]["weights"]
+    comparable_floor = max(2, math.ceil(len(brand_ids) * 0.5))
+    signal_values = {
+        "app": {brand_id: _number(state.get(brand_id, {}).get("app_downloads_est")) for brand_id in brand_ids},
+        "conversation": {brand_id: _number(state.get(brand_id, {}).get("app_reviews")) for brand_id in brand_ids},
+    }
+    active = [
+        key for key in ("app", "conversation")
+        if weights[key] > 0 and sum(1 for value in signal_values[key].values() if value > 0) >= comparable_floor
+    ]
+    active_total = sum(weights[key] for key in active)
+    shares = {brand_id: 0.0 for brand_id in brand_ids}
+    if not active_total:
+        return shares
+    for key in active:
+        total = sum(signal_values[key].values())
+        if total <= 0:
+            continue
+        normalized_weight = weights[key] / active_total
+        for brand_id in brand_ids:
+            shares[brand_id] += normalized_weight * signal_values[key][brand_id] / total
+    return {brand_id: round(value * 100, 2) for brand_id, value in shares.items()}
+
+
+@router.post("/snapshots/refresh")
+def refresh_market_share_snapshots(
+    brand_ids: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    ids = list(dict.fromkeys(part.strip() for part in brand_ids.split(",") if part.strip()))
+    if len(ids) > 12:
+        raise HTTPException(status_code=400, detail="单次最多刷新 12 个品牌。")
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        found = {row["id"] for row in conn.execute(
+            f"SELECT id FROM brands WHERE id IN ({placeholders})", ids,
+        ).fetchall()}
+        missing = [brand_id for brand_id in ids if brand_id not in found]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(missing)}")
+    return sync_market_share_snapshots(conn, brand_ids=ids or None, include_history=True)
+
+
+@router.get("/trend")
+def market_share_trend(
+    brand_ids: str,
+    model: str = "balanced",
+    country: str = "all",
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    ids = list(dict.fromkeys(part.strip() for part in brand_ids.split(",") if part.strip()))
+    if len(ids) < 2:
+        raise HTTPException(status_code=400, detail="至少选择 2 个品牌才能查看相对市占趋势。")
+    if len(ids) > 12:
+        raise HTTPException(status_code=400, detail="单次最多分析 12 个品牌。")
+    if model not in MODEL_PRESETS:
+        raise HTTPException(status_code=400, detail="未知估算模型。")
+    country_code = "all" if not country or country.strip().lower() == "all" else country.strip().upper()
+    if country_code != "all" and (len(country_code) != 2 or not country_code.isalpha()):
+        raise HTTPException(status_code=400, detail="国家代码必须是两位 ISO 代码，例如 US、CN、GB。")
+
+    placeholders = ",".join("?" for _ in ids)
+    brands = conn.execute(
+        f"SELECT id, name, category, is_primary, is_competitor FROM brands WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    by_id = {row["id"]: row for row in brands}
+    missing = [brand_id for brand_id in ids if brand_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(missing)}")
+
+    start, end = resolve_window(days, start_date, end_date)
+    snapshot_rows = conn.execute(
+        f"SELECT * FROM market_share_snapshots WHERE brand_id IN ({placeholders}) "
+        "AND country = ? AND snapshot_date <= ? ORDER BY snapshot_date, brand_id",
+        [*ids, country_code, end],
+    ).fetchall()
+    updates_by_date: dict[str, list[dict]] = defaultdict(list)
+    state: dict[str, dict] = {}
+    last_snapshot_at = ""
+    for row in snapshot_rows:
+        item = dict(row)
+        last_snapshot_at = max(last_snapshot_at, str(item.get("updated_at") or ""))
+        if item["snapshot_date"] < start:
+            state[item["brand_id"]] = item
+        else:
+            updates_by_date[item["snapshot_date"]].append(item)
+
+    points: list[dict] = []
+    current = date.fromisoformat(start)
+    end_day = date.fromisoformat(end)
+    comparable_floor = max(2, math.ceil(len(ids) * 0.5))
+    while current <= end_day:
+        day = current.isoformat()
+        fresh = updates_by_date.get(day, [])
+        for item in fresh:
+            state[item["brand_id"]] = item
+        evidence_brands = sum(
+            1 for brand_id in ids
+            if _number(state.get(brand_id, {}).get("app_downloads_est"))
+            or _number(state.get(brand_id, {}).get("app_reviews"))
+        )
+        if evidence_brands >= comparable_floor:
+            points.append({
+                "date": day,
+                "shares": _trend_shares(ids, state, model),
+                "fresh_brand_count": len({item["brand_id"] for item in fresh}),
+                "is_carried_forward": not fresh,
+                "data_as_of": max(
+                    (str(state.get(brand_id, {}).get("source_updated_at") or "") for brand_id in ids),
+                    default="",
+                ) or None,
+            })
+        current += timedelta(days=1)
+
+    summaries = []
+    if points:
+        first_shares = points[0]["shares"]
+        latest_shares = points[-1]["shares"]
+        for brand_id in ids:
+            start_share = float(first_shares.get(brand_id) or 0)
+            latest_share = float(latest_shares.get(brand_id) or 0)
+            summaries.append({
+                "brand_id": brand_id,
+                "name": by_id[brand_id]["name"],
+                "start_share": round(start_share, 2),
+                "latest_share": round(latest_share, 2),
+                "change_pp": round(latest_share - start_share, 2),
+            })
+
+    return {
+        "range": {"start": start, "end": end},
+        "country": country_code,
+        "model": model,
+        "cadence": "daily",
+        "latest_date": points[-1]["date"] if points else None,
+        "last_snapshot_at": last_snapshot_at or None,
+        "brands": [
+            {
+                "brand_id": brand_id,
+                "name": by_id[brand_id]["name"],
+                "category": by_id[brand_id]["category"],
+                "is_primary": bool(by_id[brand_id]["is_primary"]),
+                "is_competitor": bool(by_id[brand_id]["is_competitor"]),
+            }
+            for brand_id in ids
+        ],
+        "points": points,
+        "summary": summaries,
+    }
 
 
 @router.get("")
