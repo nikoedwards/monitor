@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
@@ -454,7 +455,12 @@ def collect_reddit(conn: sqlite3.Connection, brand: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------- App Store
-_DEFAULT_APP_STORE_COUNTRIES = ("US", "CN", "GB")
+_DEFAULT_APP_STORE_COUNTRIES = (
+    "US", "CN", "GB", "JP", "KR", "DE", "FR", "CA", "AU", "SG", "HK",
+    "TW", "IN", "BR", "MX", "IT", "ES", "NL", "ID", "TH", "VN",
+)
+_APP_STORE_DISCOVERY_COUNTRIES = ("US", "CN", "GB")
+_APP_STORE_MARKET_WORKERS = 6
 
 
 def _app_store_identity(value) -> str:
@@ -507,6 +513,60 @@ def _select_official_apps(brand: dict, results: list[dict]) -> list[dict]:
     return selected[:12]
 
 
+def _lookup_app_store_apps(app_ids: list[str], country: str) -> list[dict]:
+    if not app_ids:
+        return []
+    lookup = (
+        "https://itunes.apple.com/lookup?"
+        f"id={quote_plus(','.join(app_ids))}&entity=software&country={country.lower()}"
+    )
+    data = fetch_json(lookup, timeout=16)
+    return [item for item in (data.get("results", []) if isinstance(data, dict) else []) if isinstance(item, dict)]
+
+
+def _search_official_app_store_apps(brand: dict, country: str) -> list[dict]:
+    brand_name = clean_text(brand.get("name"))
+    if not brand_name:
+        return []
+    search = (
+        "https://itunes.apple.com/search?"
+        f"term={quote_plus(brand_name)}&entity=software&country={country.lower()}&limit=25"
+    )
+    data = fetch_json(search, timeout=16)
+    results = data.get("results", []) if isinstance(data, dict) else []
+    return _select_official_apps(brand, results)
+
+
+def _discover_app_store_portfolio(brand: dict) -> list[dict]:
+    """Discover official app ids once, then localize them across storefronts."""
+    for country in _APP_STORE_DISCOVERY_COUNTRIES:
+        try:
+            apps = _search_official_app_store_apps(brand, country)
+        except FetchError:
+            continue
+        if apps:
+            return apps
+    return []
+
+
+def _collect_app_store_markets(collector) -> list[tuple[str, list]]:
+    """Fetch storefronts concurrently while preserving the configured order."""
+    countries = list(_DEFAULT_APP_STORE_COUNTRIES)
+    workers = min(_APP_STORE_MARKET_WORKERS, len(countries))
+
+    def collect(country: str) -> tuple[str, list]:
+        for attempt in range(2):
+            try:
+                return country, collector(country)
+            except (FetchError, ValueError):
+                if attempt == 0:
+                    time.sleep(0.25)
+        return country, []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(collect, countries))
+
+
 def _app_store_metric_payload(
     brand: dict,
     app: dict,
@@ -537,19 +597,79 @@ def _app_store_metric_payload(
         "body": f"{country} App Store 累计评分 {rating_count}",
         "url": clean_text(app.get("trackViewUrl")),
         "region": country,
-        "metrics": {"rating": rating, "rating_count": rating_count},
+        "metrics": {
+            "rating": rating,
+            "rating_count": rating_count,
+            "rating_count_observed": True,
+        },
         "raw": {
             "track_id": app_id,
             "track_name": track_name,
             "seller_name": clean_text(app.get("sellerName")),
             "rating_count": rating_count,
             "average_user_rating": rating,
+            "storefront": country,
+            "version": clean_text(app.get("version")),
+            "current_version_release_date": app.get("currentVersionReleaseDate"),
+            "public_data": True,
             "discovery": discovery,
         },
     }
 
 
-def _configured_app_payloads(conn: sqlite3.Connection, brand: dict, row: sqlite3.Row) -> list[dict]:
+def _configured_market_metric_payloads(
+    brand: dict,
+    rows: list[sqlite3.Row],
+) -> tuple[list[dict], set[str]]:
+    targets: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        match = re.search(r"id(\d+)", row["url"] or "")
+        if match:
+            targets.setdefault(match.group(1), row)
+    if not targets:
+        return [], set()
+
+    app_ids = list(targets)
+    fallback_row = next(iter(targets.values()))
+
+    def collect_market(country: str) -> list[tuple[dict, str]]:
+        apps = _lookup_app_store_apps(app_ids, country)
+        discovery = "configured_link_market_lookup"
+        if not apps:
+            apps = _search_official_app_store_apps(brand, country)
+            discovery = "configured_link_storefront_search"
+        market_payloads: list[tuple[dict, str]] = []
+        for app in apps:
+            app_id = clean_text(str(app.get("trackId") or ""))
+            row = targets.get(app_id) or fallback_row
+            metric = _app_store_metric_payload(
+                brand,
+                app,
+                country,
+                link_id=f"{row['id']}:{country}:{app_id}",
+                product_id=row["product_id"],
+                discovery=discovery,
+            )
+            if metric:
+                market_payloads.append((metric, row["id"]))
+        return market_payloads
+
+    payloads: list[dict] = []
+    successful_links: set[str] = set()
+    for _country, market_payloads in _collect_app_store_markets(collect_market):
+        for metric, link_id in market_payloads:
+            payloads.append(metric)
+            successful_links.add(link_id)
+    return payloads, successful_links
+
+
+def _configured_review_payloads(
+    conn: sqlite3.Connection,
+    brand: dict,
+    row: sqlite3.Row,
+    *,
+    has_metric: bool,
+) -> list[dict]:
     match = re.search(r"id(\d+)", row["url"] or "")
     if not match:
         _touch_link(conn, row["id"], status="empty", error="App Store 链接中未找到应用 ID")
@@ -558,24 +678,6 @@ def _configured_app_payloads(conn: sqlite3.Connection, brand: dict, row: sqlite3
     country = (row["region"] or "US").upper()[:2]
     payloads: list[dict] = []
     errors: list[str] = []
-
-    lookup = f"https://itunes.apple.com/lookup?id={app_id}&country={country.lower()}"
-    try:
-        data = fetch_json(lookup, timeout=16)
-        apps = data.get("results", []) if isinstance(data, dict) else []
-        if apps:
-            metric = _app_store_metric_payload(
-                brand,
-                apps[0],
-                country,
-                link_id=row["id"],
-                product_id=row["product_id"],
-                discovery="configured_link",
-            )
-            if metric:
-                payloads.append(metric)
-    except FetchError as exc:
-        errors.append(str(exc))
 
     feed = (
         f"https://itunes.apple.com/{country.lower()}/rss/customerreviews/"
@@ -615,31 +717,35 @@ def _configured_app_payloads(conn: sqlite3.Connection, brand: dict, row: sqlite3
     _touch_link(
         conn,
         row["id"],
-        status="ok" if payloads else "network" if errors else "empty",
-        error="; ".join(errors) if not payloads else "",
+        status="ok" if payloads or has_metric else "network" if errors else "empty",
+        error="; ".join(errors) if not payloads and not has_metric else "",
     )
     return payloads
 
 
 def _discovered_app_payloads(brand: dict) -> list[dict]:
-    brand_name = clean_text(brand.get("name"))
-    if not brand_name:
+    portfolio = _discover_app_store_portfolio(brand)
+    app_ids = [clean_text(str(app.get("trackId") or "")) for app in portfolio if app.get("trackId")]
+    if not app_ids:
         return []
     payloads: list[dict] = []
-    for country in _DEFAULT_APP_STORE_COUNTRIES:
-        search = (
-            "https://itunes.apple.com/search?"
-            f"term={quote_plus(brand_name)}&entity=software&country={country.lower()}&limit=25"
-        )
+    def collect_market(country: str) -> list[dict]:
         try:
-            data = fetch_json(search, timeout=16)
-        except FetchError:
-            continue
-        results = data.get("results", []) if isinstance(data, dict) else []
-        for app in _select_official_apps(brand, results):
-            metric = _app_store_metric_payload(brand, app, country, discovery="brand_search")
-            if metric:
-                payloads.append(metric)
+            apps = _lookup_app_store_apps(app_ids, country)
+        except (FetchError, ValueError):
+            apps = []
+        discovery = "portfolio_market_lookup"
+        if not apps:
+            apps = _search_official_app_store_apps(brand, country)
+            discovery = "storefront_brand_search"
+        return [
+            metric
+            for app in apps
+            if (metric := _app_store_metric_payload(brand, app, country, discovery=discovery))
+        ]
+
+    for _country, market_payloads in _collect_app_store_markets(collect_market):
+        payloads.extend(market_payloads)
     return payloads
 
 
@@ -650,9 +756,14 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     ).fetchall()
     if not rows:
         return _discovered_app_payloads(brand)
-    payloads: list[dict] = []
+    payloads, successful_links = _configured_market_metric_payloads(brand, rows)
     for row in rows:
-        payloads.extend(_configured_app_payloads(conn, brand, row))
+        payloads.extend(_configured_review_payloads(
+            conn,
+            brand,
+            row,
+            has_metric=row["id"] in successful_links,
+        ))
     return payloads
 
 

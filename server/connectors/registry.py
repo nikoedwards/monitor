@@ -47,9 +47,9 @@ REGISTRY: list[ConnectorSpec] = [
         collect=social.collect_social_accounts,
     ),
     ConnectorSpec(
-        id="app_store_reviews", name="App Store 评论", category="voc", dimension="voc",
+        id="app_store_reviews", name="App Store 评分与评论", category="voc", dimension="voc",
         tier=1, vendor="Apple", sync_mode="scheduled", cadence="daily",
-        notes="抓取 App Store 累计评分与最新评论；未配置链接时按品牌自动发现官方 App（无需 API key）。",
+        notes="按主要国家市场抓取 App Store 公开累计评分、平均评分与最新评论；未配置链接时自动发现官方 App（无需 API key）。",
         collect=collectors.collect_app_store,
     ),
     ConnectorSpec(

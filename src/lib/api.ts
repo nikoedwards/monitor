@@ -416,6 +416,8 @@ export interface MarketShareBrand {
     voc_records: number;
     app_reviews: number;
     app_rating?: number | null;
+    app_store_apps: number;
+    app_rating_count_observed: boolean;
     comments: number;
     engagement: number;
     views: number;
@@ -458,6 +460,7 @@ export interface MarketShareResponse {
 export interface MarketShareTrendPoint {
   date: string;
   shares: Record<string, number>;
+  public_metrics: Record<string, { rating_count: number; average_rating?: number | null; app_count: number }>;
   fresh_brand_count: number;
   is_carried_forward: boolean;
   data_as_of?: string | null;
@@ -469,6 +472,10 @@ export interface MarketShareTrendSummary {
   start_share: number;
   latest_share: number;
   change_pp: number;
+  start_rating_count: number;
+  latest_rating_count: number;
+  rating_count_change: number;
+  latest_average_rating?: number | null;
 }
 
 export interface MarketShareTrendResponse {

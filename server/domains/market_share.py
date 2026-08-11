@@ -23,13 +23,13 @@ router = APIRouter(prefix="/api/market-share", tags=["market-share"])
 
 MODEL_PRESETS = {
     "balanced": {
-        "label": "App 下载与评论模型",
-        "description": "仅使用所选国家的 App 下载估算与 App Store 评论数计算相对份额。",
+        "label": "App 下载与评分模型",
+        "description": "使用所选国家的 App 下载估算与 App Store 公开评分数计算相对份额。",
         "weights": {"sales": 0.0, "app": 0.65, "conversation": 0.35, "engagement": 0.0},
     },
     "commerce": {
         "label": "商业结果优先",
-        "description": "保留下载量和评论数为主要依据，同时提高销售结果的校准权重。",
+        "description": "保留下载量和公开评分数为主要依据，同时提高销售结果的校准权重。",
         "weights": {"sales": 0.30, "app": 0.40, "conversation": 0.25, "engagement": 0.05},
     },
     "attention": {
@@ -94,20 +94,20 @@ def _record_signals(
         "SELECT source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, occurred_at, "
         "metrics_json, raw_json FROM records WHERE brand_id = ? "
         "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ?"
-        + country_filter,
+        + country_filter
+        + " ORDER BY occurred_at",
         params,
     ).fetchall()
 
     mentions = 0
     voc_records = 0
     app_reviews = 0
-    app_rating_sum = 0.0
-    app_rating_count = 0
     comments = 0.0
     engagement = 0.0
     views = 0.0
     explicit_downloads_by_app: dict[str, float] = defaultdict(float)
     app_ratings_by_app: dict[str, float] = defaultdict(float)
+    app_average_rating_by_app: dict[str, tuple[float, float]] = {}
     app_data_updated_at = ""
 
     for row in rows:
@@ -150,16 +150,16 @@ def _record_signals(
                 dimension == "voc" or "review" in source_id or "review" in data_type
             )
             app_reviews += 1 if is_review_record else 0
-            rating = _number(metrics.get("rating"))
-            if rating:
-                app_rating_sum += rating
-                app_rating_count += 1
             app_key = str(row["link_id"] or source_id or platform or "app")
+            rating = _number(metrics.get("rating"))
+            rating_count = _number(metrics.get("rating_count"))
+            if data_type == "app_metric" and rating and rating_count >= app_average_rating_by_app.get(app_key, (0, 0))[1]:
+                app_average_rating_by_app[app_key] = (rating, rating_count)
             explicit_downloads_by_app[app_key] = max(
                 explicit_downloads_by_app[app_key], _first_metric(metrics, DOWNLOAD_KEYS)
             )
             app_ratings_by_app[app_key] = max(
-                app_ratings_by_app[app_key], _number(metrics.get("rating_count"))
+                app_ratings_by_app[app_key], rating_count
             )
 
     explicit_downloads = sum(explicit_downloads_by_app.values())
@@ -181,11 +181,19 @@ def _record_signals(
         app_downloads_est = app_downloads_low = app_downloads_high = 0.0
         app_download_basis = "unavailable"
 
+    rating_weight = sum(max(1.0, count) for _, count in app_average_rating_by_app.values())
+    app_rating = (
+        sum(rating * max(1.0, count) for rating, count in app_average_rating_by_app.values()) / rating_weight
+        if rating_weight else None
+    )
+
     return {
         "mentions": mentions,
         "voc_records": voc_records,
         "app_reviews": round(app_review_base),
-        "app_rating": round(app_rating_sum / app_rating_count, 2) if app_rating_count else None,
+        "app_rating": round(app_rating, 2) if app_rating is not None else None,
+        "app_store_apps": len(app_ratings_by_app),
+        "app_rating_count_observed": bool(known_app_ratings),
         "comments": round(comments),
         "engagement": round(engagement),
         "views": round(views),
@@ -318,14 +326,17 @@ def capture_market_share_snapshots(
                 INSERT INTO market_share_snapshots
                   (id, snapshot_date, brand_id, country, app_downloads_est,
                    app_downloads_low, app_downloads_high, app_download_basis,
-                   app_reviews, source_updated_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   app_reviews, app_rating, app_store_apps, source_updated_at,
+                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(snapshot_date, brand_id, country) DO UPDATE SET
                   app_downloads_est = excluded.app_downloads_est,
                   app_downloads_low = excluded.app_downloads_low,
                   app_downloads_high = excluded.app_downloads_high,
                   app_download_basis = excluded.app_download_basis,
                   app_reviews = excluded.app_reviews,
+                  app_rating = excluded.app_rating,
+                  app_store_apps = excluded.app_store_apps,
                   source_updated_at = excluded.source_updated_at,
                   updated_at = excluded.updated_at
                 WHERE market_share_snapshots.app_downloads_est != excluded.app_downloads_est
@@ -333,13 +344,16 @@ def capture_market_share_snapshots(
                    OR market_share_snapshots.app_downloads_high != excluded.app_downloads_high
                    OR market_share_snapshots.app_download_basis != excluded.app_download_basis
                    OR market_share_snapshots.app_reviews != excluded.app_reviews
+                   OR COALESCE(market_share_snapshots.app_rating, 0) != COALESCE(excluded.app_rating, 0)
+                   OR market_share_snapshots.app_store_apps != excluded.app_store_apps
                    OR COALESCE(market_share_snapshots.source_updated_at, '') != COALESCE(excluded.source_updated_at, '')
                 """,
                 (
                     new_id(), day, brand["id"], country,
                     signals["app_downloads_est"], signals["app_downloads_low"],
                     signals["app_downloads_high"], signals["app_download_basis"],
-                    signals["app_reviews"], signals["app_data_updated_at"], now, now,
+                    signals["app_reviews"], signals["app_rating"], signals["app_store_apps"],
+                    signals["app_data_updated_at"], now, now,
                 ),
             )
             changed += conn.total_changes - before
@@ -502,6 +516,14 @@ def market_share_trend(
             points.append({
                 "date": day,
                 "shares": _trend_shares(ids, state, model),
+                "public_metrics": {
+                    brand_id: {
+                        "rating_count": round(_number(state.get(brand_id, {}).get("app_reviews"))),
+                        "average_rating": state.get(brand_id, {}).get("app_rating"),
+                        "app_count": round(_number(state.get(brand_id, {}).get("app_store_apps"))),
+                    }
+                    for brand_id in ids
+                },
                 "fresh_brand_count": len({item["brand_id"] for item in fresh}),
                 "is_carried_forward": not fresh,
                 "data_as_of": max(
@@ -515,6 +537,8 @@ def market_share_trend(
     if points:
         first_shares = points[0]["shares"]
         latest_shares = points[-1]["shares"]
+        first_metrics = points[0]["public_metrics"]
+        latest_metrics = points[-1]["public_metrics"]
         for brand_id in ids:
             start_share = float(first_shares.get(brand_id) or 0)
             latest_share = float(latest_shares.get(brand_id) or 0)
@@ -524,6 +548,10 @@ def market_share_trend(
                 "start_share": round(start_share, 2),
                 "latest_share": round(latest_share, 2),
                 "change_pp": round(latest_share - start_share, 2),
+                "start_rating_count": first_metrics[brand_id]["rating_count"],
+                "latest_rating_count": latest_metrics[brand_id]["rating_count"],
+                "rating_count_change": latest_metrics[brand_id]["rating_count"] - first_metrics[brand_id]["rating_count"],
+                "latest_average_rating": latest_metrics[brand_id]["average_rating"],
             })
 
     return {
@@ -644,9 +672,9 @@ def market_share(
         if row["raw"]["app_download_basis"] == "unavailable":
             gaps.append("缺少 App 下载量或应用商店评论")
         elif row["raw"]["app_download_basis"] == "review_proxy":
-            gaps.append("App 下载量由评论量区间推算")
+            gaps.append("App 下载量由公开评分数区间推算")
         if not row["signals"]["conversation"]:
-            gaps.append("缺少 App Store 评论数")
+            gaps.append("缺少 App Store 公开评分数")
         if base_weights["engagement"] > 0 and not row["signals"]["engagement"]:
             gaps.append("缺少点赞、评论、分享等互动指标")
         brand_id = row["brand_id"]
@@ -695,10 +723,10 @@ def market_share(
     elif any(not row.get("category") for row in rows):
         warnings.append("部分品牌未设置品类，请确认它们属于同一竞争市场。")
     if any(row["raw"]["app_download_basis"] == "review_proxy" for row in rows):
-        warnings.append("App 下载估算按 0.5%-2% 的评论转化率给出宽区间，中位值按 1% 计算。")
+        warnings.append("App Store 评分数与平均评分为对应国家商店的公开准确值；下载量仍按 0.5%-2% 的评分转化率估算，中位值按 1% 计算。")
     if active_base_weight < 0.999:
         warnings.append("数据覆盖不足、无法横向比较的指标未计入综合值，其权重已自动分配给可用指标。")
-    for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "App 评论"), ("engagement", "互动")):
+    for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "App Store 评分数"), ("engagement", "互动")):
         if base_weights[key] > 0 and 0 < signal_coverage[key] < comparable_floor:
             warnings.append(f"{label}仅覆盖 {signal_coverage[key]}/{len(rows)} 个品牌，本次未纳入综合份额。")
 

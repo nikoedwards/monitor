@@ -192,6 +192,8 @@ CREATE TABLE IF NOT EXISTS market_share_snapshots (
   app_downloads_high INTEGER NOT NULL DEFAULT 0,
   app_download_basis TEXT NOT NULL DEFAULT 'unavailable',
   app_reviews INTEGER NOT NULL DEFAULT 0,
+  app_rating REAL,
+  app_store_apps INTEGER NOT NULL DEFAULT 0,
   source_updated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -648,6 +650,8 @@ MIGRATIONS = [
     ("linkedin_profiles", "source_type", "TEXT NOT NULL DEFAULT 'company'"),
     ("linkedin_profiles", "notes", "TEXT"),
     ("linkedin_profiles", "last_profile_change_at", "TEXT"),
+    ("market_share_snapshots", "app_rating", "REAL"),
+    ("market_share_snapshots", "app_store_apps", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
