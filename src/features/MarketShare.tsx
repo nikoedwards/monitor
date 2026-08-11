@@ -14,7 +14,7 @@ const STORAGE_KEY = "monitor.marketShare.brandIds";
 const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280", "#ef4444", "#14b8a6"];
 const SIGNALS = [
   { key: "app", label: "App 下载" },
-  { key: "conversation", label: "App 评论" },
+  { key: "conversation", label: "App Store 评分数" },
 ] as const;
 
 const COUNTRY_LABELS: Record<string, string> = {
@@ -113,7 +113,7 @@ export default function MarketShare() {
     [result?.countries, country],
   );
   const leader = result?.brands[0];
-  const appDownloads = result?.brands.reduce((sum, row) => sum + row.raw.app_downloads_est, 0) || 0;
+  const appRatingCount = result?.brands.reduce((sum, row) => sum + row.raw.app_reviews, 0) || 0;
   const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0).length : 0;
   const trendData = useMemo(
     () => (trendQuery.data?.points || []).map((point) => ({ date: point.date, ...point.shares })),
@@ -146,7 +146,7 @@ export default function MarketShare() {
     <div className="space-y-6">
       <SectionTitle
         title="市占分析"
-        subtitle="按国家，仅根据 App 下载估算和 App Store 评论数计算相对份额"
+        subtitle="按国家使用 App Store 公开评分数据，并结合下载量估算计算相对份额"
         hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -210,8 +210,8 @@ export default function MarketShare() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
             <StatCard label="模型置信度" value={`${result.confidence.score}%`} hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`} />
-            <StatCard label="可用信号" value={`${activeSignals}/2`} hint="App 下载估算 + App Store 评论" />
-            <StatCard label="App 下载估算" value={appDownloads ? fmtNum(appDownloads) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 所选品牌合计`} />
+            <StatCard label="可用信号" value={`${activeSignals}/2`} hint="App 下载估算 + App Store 公开评分数" />
+            <StatCard label="App Store 评分数" value={appRatingCount ? fmtNum(appRatingCount) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · Apple 公开准确值`} />
           </div>
 
           {result.warnings.length > 0 && (
@@ -254,7 +254,11 @@ export default function MarketShare() {
                             {positive ? "+" : ""}{row.change_pp.toFixed(1)}pp
                           </span>
                         </div>
-                        <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>期初 {row.start_share.toFixed(1)}%</div>
+                        <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>
+                          期初 {row.start_share.toFixed(1)}% · 公开评分 {fmtNum(row.latest_rating_count)}
+                          {row.rating_count_change > 0 ? `（+${fmtNum(row.rating_count_change)}）` : ""}
+                          {row.latest_average_rating ? ` · ${row.latest_average_rating.toFixed(2)} / 5` : ""}
+                        </div>
                       </div>
                     );
                   })}
@@ -351,8 +355,9 @@ export default function MarketShare() {
                   <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
                     <th className="text-left font-medium py-2.5 px-3">品牌</th>
                     <th className="text-right font-medium py-2.5 px-3">销售结果（不计权）</th>
+                    <th className="text-right font-medium py-2.5 px-3">App Store 评分数（公开）</th>
+                    <th className="text-right font-medium py-2.5 px-3">平均评分（公开）</th>
                     <th className="text-right font-medium py-2.5 px-3">App 下载估算</th>
-                    <th className="text-right font-medium py-2.5 px-3">App 评论</th>
                     <th className="text-right font-medium py-2.5 px-3">商品评论量（不计权）</th>
                     <th className="text-right font-medium py-2.5 px-3">公开提及（不计权）</th>
                     <th className="text-right font-medium py-2.5 px-3">评论 / 回复（不计权）</th>
@@ -365,8 +370,9 @@ export default function MarketShare() {
                     <tr key={row.brand_id} style={{ borderBottom: "1px solid var(--hairline)", color: "var(--body)" }}>
                       <td className="py-3 px-3 font-medium" style={{ color: "var(--ink)" }}>{row.name}</td>
                       <td className="py-3 px-3 text-right tabular-nums">{salesText(row)}</td>
-                      <td className="py-3 px-3 text-right tabular-nums">{downloadText(row)}</td>
                       <td className="py-3 px-3 text-right tabular-nums">{fmtNum(row.raw.app_reviews)}</td>
+                      <td className="py-3 px-3 text-right tabular-nums">{row.raw.app_rating ? `${row.raw.app_rating.toFixed(2)} / 5` : "—"}</td>
+                      <td className="py-3 px-3 text-right tabular-nums">{downloadText(row)}</td>
                       <td className="py-3 px-3 text-right tabular-nums">{fmtNum(row.raw.product_reviews)}</td>
                       <td className="py-3 px-3 text-right tabular-nums">{fmtNum(row.raw.mentions)}</td>
                       <td className="py-3 px-3 text-right tabular-nums">{fmtNum(row.raw.comments)}</td>
@@ -400,7 +406,7 @@ export default function MarketShare() {
                 })}
               </div>
               <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
-                算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，App Store 评论数权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。两项先在所选品牌和国家内归一化；销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
+                算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，App Store 公开评分数权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。评分数和平均评分直接来自对应国家 App Store；下载量不公开，仍单独标记为估算。销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
               </div>
             </Card>
 

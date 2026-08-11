@@ -58,6 +58,8 @@ CREATE TABLE market_share_snapshots (
   app_downloads_high INTEGER NOT NULL DEFAULT 0,
   app_download_basis TEXT NOT NULL DEFAULT 'unavailable',
   app_reviews INTEGER NOT NULL DEFAULT 0,
+  app_rating REAL,
+  app_store_apps INTEGER NOT NULL DEFAULT 0,
   source_updated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -251,6 +253,9 @@ class MarketShareTests(unittest.TestCase):
 
         alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
         self.assertEqual(21000, alpha["raw"]["app_reviews"])
+        self.assertEqual(4.8, alpha["raw"]["app_rating"])
+        self.assertEqual(1, alpha["raw"]["app_store_apps"])
+        self.assertTrue(alpha["raw"]["app_rating_count_observed"])
         self.assertEqual(2100000, alpha["raw"]["app_downloads_est"])
         self.assertEqual("review_proxy", alpha["raw"]["app_download_basis"])
         self.assertEqual(1.0, result["confidence"]["download_proxy_ratio"])
@@ -260,22 +265,22 @@ class MarketShareTests(unittest.TestCase):
         self.add_record(
             "a-day-1", "a", dimension="platform", channel="app", platform="app_store",
             source_id="app_store_reviews", data_type="app_metric",
-            metrics={"rating_count": 100}, occurred_at="2026-07-14T08:00:00+00:00",
+            metrics={"rating_count": 100, "rating": 4.5}, occurred_at="2026-07-14T08:00:00+00:00",
         )
         self.add_record(
             "b-day-1", "b", dimension="platform", channel="app", platform="app_store",
             source_id="app_store_reviews", data_type="app_metric",
-            metrics={"rating_count": 100}, occurred_at="2026-07-14T08:00:00+00:00",
+            metrics={"rating_count": 100, "rating": 4.0}, occurred_at="2026-07-14T08:00:00+00:00",
         )
         self.add_record(
             "a-day-2", "a", dimension="platform", channel="app", platform="app_store",
             source_id="app_store_reviews", data_type="app_metric",
-            metrics={"rating_count": 200}, occurred_at="2026-07-15T08:00:00+00:00",
+            metrics={"rating_count": 200, "rating": 4.6}, occurred_at="2026-07-15T08:00:00+00:00",
         )
         self.add_record(
             "b-day-2", "b", dimension="platform", channel="app", platform="app_store",
             source_id="app_store_reviews", data_type="app_metric",
-            metrics={"rating_count": 100}, occurred_at="2026-07-15T08:00:00+00:00",
+            metrics={"rating_count": 100, "rating": 4.0}, occurred_at="2026-07-15T08:00:00+00:00",
         )
 
         synced = sync_market_share_snapshots(self.conn, brand_ids=["a", "b"], include_history=True)
@@ -293,10 +298,13 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual(["2026-07-14", "2026-07-15", "2026-07-16"], [point["date"] for point in result["points"]])
         self.assertEqual(50.0, result["points"][0]["shares"]["a"])
         self.assertAlmostEqual(66.67, result["points"][1]["shares"]["a"], places=2)
+        self.assertEqual(200, result["points"][1]["public_metrics"]["a"]["rating_count"])
+        self.assertEqual(4.6, result["points"][1]["public_metrics"]["a"]["average_rating"])
         self.assertEqual(result["points"][1]["shares"], result["points"][2]["shares"])
         self.assertTrue(result["points"][2]["is_carried_forward"])
         alpha = next(row for row in result["summary"] if row["brand_id"] == "a")
         self.assertAlmostEqual(16.67, alpha["change_pp"], places=2)
+        self.assertEqual(100, alpha["rating_count_change"])
 
 
 if __name__ == "__main__":
