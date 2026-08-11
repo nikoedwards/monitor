@@ -96,8 +96,8 @@ export default function Web() {
   const [now, setNow] = useState(() => Date.now());
   const [analysis, setAnalysis] = useState<WebAiAnalysis | null>(null);
   const { data: monitors = [], isLoading } = useWebMonitors(brandId);
-  const { data: summary } = useWebSummary(brandId, selected, range);
-  const { data: snapshots = [] } = useWebSnapshots(brandId, selected, range);
+  const { data: summary, isFetching: summaryLoading, error: summaryError } = useWebSummary(brandId, selected, range);
+  const { data: snapshots = [], isFetching: snapshotsLoading, error: snapshotsError } = useWebSnapshots(brandId, selected, range);
   const webAnalysis = useWebAnalysis();
   const { capture, update, remove } = useWebMutations();
 
@@ -127,11 +127,17 @@ export default function Web() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard label="范围内快照" value={summary?.total_snapshots ?? 0} hint={rangeLabel(range)} />
-        <StatCard label="发生变化的天数" value={summary?.changed_days ?? 0} hint={`覆盖率 ${percent(summary?.change_day_rate)}`} tone="negative" />
-        <StatCard label="平均变化间隔" value={summary?.average_interval_days != null ? `${summary.average_interval_days} 天` : "—"} hint={`${summary?.changed ?? 0} 次有效变化`} />
-        <StatCard label="相对上一周期" value={comparisonLabel(summary)} hint={`${summary?.previous_period?.changed_days ?? 0} 个变化日`} tone="accent" />
+        <StatCard label="范围内快照" value={summaryLoading ? "…" : summary?.total_snapshots ?? 0} hint={summaryLoading ? "正在加载日期范围…" : rangeLabel(range)} />
+        <StatCard label="发生变化的天数" value={summaryLoading ? "…" : summary?.changed_days ?? 0} hint={summaryLoading ? "正在重新统计…" : `覆盖率 ${percent(summary?.change_day_rate)}`} tone="negative" />
+        <StatCard label="平均变化间隔" value={summaryLoading ? "…" : summary?.average_interval_days != null ? `${summary.average_interval_days} 天` : "—"} hint={summaryLoading ? "正在重新统计…" : `${summary?.changed ?? 0} 次有效变化`} />
+        <StatCard label="相对上一周期" value={summaryLoading ? "…" : comparisonLabel(summary)} hint={summaryLoading ? "正在重新统计…" : `${summary?.previous_period?.changed_days ?? 0} 个变化日`} tone="accent" />
       </div>
+
+      {(summaryError || snapshotsError) && (
+        <div className="rounded-lg px-4 py-3 text-[13px]" style={{ color: "var(--danger)", background: "var(--danger-soft, #fff1f0)", border: "1px solid color-mix(in srgb, var(--danger) 24%, transparent)" }}>
+          日期范围数据加载失败，请刷新后重试：{summaryError instanceof Error ? summaryError.message : snapshotsError instanceof Error ? snapshotsError.message : "未知错误"}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card>
@@ -202,7 +208,7 @@ export default function Web() {
         </Card>
 
         <Card className="lg:col-span-2">
-          <SnapshotTimeline snapshots={snapshots} brandId={brandId || ""} monitorId={selected} rangeText={rangeLabel(range)} />
+          <SnapshotTimeline snapshots={snapshots} loading={snapshotsLoading} brandId={brandId || ""} monitorId={selected} rangeText={rangeLabel(range)} />
         </Card>
       </div>
 
@@ -535,7 +541,7 @@ function SnapshotHistoryModal({
   );
 }
 
-function SnapshotTimeline({ snapshots, brandId, monitorId, rangeText }: { snapshots: WebSnapshot[]; brandId: string; monitorId?: string; rangeText: string }) {
+function SnapshotTimeline({ snapshots, loading, brandId, monitorId, rangeText }: { snapshots: WebSnapshot[]; loading: boolean; brandId: string; monitorId?: string; rangeText: string }) {
   const [active, setActive] = useState<WebSnapshot | null>(null);
   const [mode, setMode] = useState<SnapshotMode>("screenshot");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -586,7 +592,12 @@ function SnapshotTimeline({ snapshots, brandId, monitorId, rangeText }: { snapsh
         subtitle={`${rangeText} · 点击查看截图或交互归档`}
         action={<Button size="sm" onClick={() => { setHistoryOpen(true); setHistorySelectedId(snapshots[0]?.id); setHistoryMode("screenshot"); }}>查看更多</Button>}
       />
-      {snapshots.length ? (
+      {loading ? (
+        <div className="min-h-[220px] flex flex-col items-center justify-center gap-2 text-center">
+          <Spinner />
+          <div className="text-[13px]" style={{ color: "var(--mute)" }}>正在加载所选日期范围的快照…</div>
+        </div>
+      ) : snapshots.length ? (
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[720px] overflow-y-auto pr-1">
           {snapshots.map((snapshot) => (
             <div key={snapshot.id} className="relative panel overflow-hidden" style={{ padding: 0 }}>

@@ -57,6 +57,10 @@ async def secure_snapshot_archives(request, call_next):
     """Force archived HTML into an opaque, offline sandbox even when opened directly."""
     response = await call_next(request)
     path = request.url.path.lower()
+    comparison_image = path.startswith("/api/web/snapshots/") and path.endswith("/comparison")
+    if path.startswith("/api/") and not comparison_image:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
     if path.startswith("/snapshots/"):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     if path.startswith("/snapshots/") and path.endswith(".html"):

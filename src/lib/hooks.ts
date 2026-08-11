@@ -617,7 +617,7 @@ export function useWebMonitors(brandId?: string) {
 export function useWebSnapshots(brandId?: string, monitorId?: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["web-snapshots", brandId, monitorId, rp],
+    queryKey: ["web-snapshots", brandId, monitorId, rp.start_date, rp.end_date],
     queryFn: () => api.get<{ snapshots: WebSnapshot[] }>(`/api/web/snapshots${qs({ brand_id: brandId, monitor_id: monitorId, ...rp })}`).then((d) => d.snapshots),
     enabled: !!brandId,
   });
@@ -634,7 +634,7 @@ export function useWebSnapshotHistory(brandId?: string, monitorId?: string, enab
 export function useWebSummary(brandId?: string, monitorId?: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["web-summary", brandId, monitorId, rp],
+    queryKey: ["web-summary", brandId, monitorId, rp.start_date, rp.end_date],
     queryFn: () => api.get<WebSummary>(`/api/web/summary${qs({ brand_id: brandId, monitor_id: monitorId, ...rp })}`),
     enabled: !!brandId,
   });
