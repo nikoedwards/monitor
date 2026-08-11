@@ -8,6 +8,8 @@ import {
   useAnalyzeJd,
   useCatalogMutations,
   useEmployeeHistory,
+  useEmployeeImport,
+  useEmployeeMonitorSelection,
   useEmployeeMutations,
   useEmployees,
   useEmployeesSync,
@@ -20,7 +22,7 @@ import {
   useSettings,
 } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import type { JobPosting, Link, LinkedInEmployee } from "../lib/api";
+import type { JobPosting, Link, LinkedInEmployee, LinkedInEmployeeImportResult } from "../lib/api";
 import { fmtDate, fmtDateTime, fmtNum } from "../lib/format";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -82,7 +84,7 @@ export default function Hiring() {
       {tab === "jobs" ? (
         <JobsTab brandId={brandId!} platform={platform} setPlatform={setPlatform} summary={summary} loading={isLoading} range={range} />
       ) : (
-        <PeopleTab brandId={brandId!} />
+        <PeopleTab brandId={brandId!} onConfigureSources={() => setSourceOpen(true)} />
       )}
 
       <SourceModal open={sourceOpen} onClose={() => setSourceOpen(false)} brandId={brandId!} />
@@ -325,14 +327,38 @@ function PostingDetailModal({ postingId, onClose }: { postingId?: string; onClos
 }
 
 // ------------------------------------------------------------------- people tab
-function PeopleTab({ brandId }: { brandId: string }) {
+function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigureSources: () => void }) {
   const { data: employees = [], isLoading } = useEmployees(brandId);
   const { data: activities = [] } = useActivities(brandId);
   const sync = useEmployeesSync();
+  const employeeImport = useEmployeeImport();
+  const monitorSelection = useEmployeeMonitorSelection();
   const mutations = useEmployeeMutations();
   const [scope, setScope] = useState<"focus" | "all">("focus");
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importResult, setImportResult] = useState<LinkedInEmployeeImportResult>();
+  const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
+  const [importError, setImportError] = useState("");
   const [detailId, setDetailId] = useState<string | undefined>();
+
+  const importCompanyEmployees = async () => {
+    setImportError("");
+    try {
+      const result = await employeeImport.mutateAsync({ brandId });
+      setImportResult(result);
+      setSelectedCompanyIds(new Set(result.candidates.filter((employee) => employee.monitor).map((employee) => employee.id)));
+      setImportOpen(true);
+    } catch (err: any) {
+      setImportError(err?.message || "企业员工导入失败");
+    }
+  };
+
+  const saveMonitorSelection = async () => {
+    await monitorSelection.mutateAsync({ brandId, profileIds: [...selectedCompanyIds] });
+    setImportOpen(false);
+    setScope("focus");
+  };
 
   const focusPeople = employees.filter((employee) => employee.monitor);
   const visiblePeople = scope === "focus" ? focusPeople : employees;
@@ -364,11 +390,13 @@ function PeopleTab({ brandId }: { brandId: string }) {
                 options={[{ value: "focus", label: "仅重点" }, { value: "all", label: "全部候选" }]}
                 onChange={setScope}
               />
-              <Button onClick={() => sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即采集"}</Button>
+              <Button onClick={importCompanyEmployees} disabled={employeeImport.isPending}>{employeeImport.isPending ? "导入中…" : "导入企业员工"}</Button>
+              <Button onClick={() => sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "采集重点人员"}</Button>
               <Button variant="primary" onClick={() => setAddOpen(true)}>+ 添加重点人员</Button>
             </div>
           }
         />
+        {importError && <p className="text-[12px] mb-3" style={{ color: "var(--danger)" }}>{importError}</p>}
         {isLoading ? (
           <Spinner />
         ) : visiblePeople.length ? (
@@ -456,8 +484,120 @@ function PeopleTab({ brandId }: { brandId: string }) {
       </Card>
 
       <AddFocusPersonModal open={addOpen} onClose={() => setAddOpen(false)} brandId={brandId} />
+      <EmployeeImportModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onConfigureSources={() => { setImportOpen(false); onConfigureSources(); }}
+        result={importResult}
+        selectedIds={selectedCompanyIds}
+        setSelectedIds={setSelectedCompanyIds}
+        onSave={saveMonitorSelection}
+        saving={monitorSelection.isPending}
+      />
       <PersonDetailModal profileId={detailId} onClose={() => setDetailId(undefined)} />
     </div>
+  );
+}
+
+function EmployeeImportModal({
+  open,
+  onClose,
+  onConfigureSources,
+  result,
+  selectedIds,
+  setSelectedIds,
+  onSave,
+  saving,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onConfigureSources: () => void;
+  result?: LinkedInEmployeeImportResult;
+  selectedIds: Set<string>;
+  setSelectedIds: (value: Set<string>) => void;
+  onSave: () => Promise<void>;
+  saving: boolean;
+}) {
+  const [search, setSearch] = useState("");
+  const candidates = result?.candidates || [];
+  const query = search.trim().toLowerCase();
+  const visible = query
+    ? candidates.filter((employee) => `${employee.name || ""} ${employee.title || ""} ${employee.headline || ""} ${employee.external_id || ""}`.toLowerCase().includes(query))
+    : candidates;
+  const allVisibleSelected = visible.length > 0 && visible.every((employee) => selectedIds.has(employee.id));
+
+  const toggle = (id: string) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedIds(next);
+  };
+
+  const toggleVisible = () => {
+    const next = new Set(selectedIds);
+    visible.forEach((employee) => allVisibleSelected ? next.delete(employee.id) : next.add(employee.id));
+    setSelectedIds(next);
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="导入 LinkedIn 企业员工" width={760}>
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[13px]" style={{ color: "var(--body)" }}>
+            本次页面发现 <span className="font-medium" style={{ color: "var(--ink)" }}>{result?.profiles || 0}</span> 人，候选池共 {candidates.length} 人；已选择 {selectedIds.size} 人进入重点监控。
+          </div>
+          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索姓名或职位" className="max-w-[240px]" />
+        </div>
+
+        {result?.links === 0 && (
+          <div className="p-3 rounded-md flex items-center justify-between gap-3" style={{ background: "var(--warning-soft)", color: "var(--body)" }}>
+            <span className="text-[12px]">当前品牌还没有启用 LinkedIn 公司 People 页面采集源。</span>
+            <Button size="sm" onClick={onConfigureSources}>配置 People 页面</Button>
+          </div>
+        )}
+        {!!result?.errors && (
+          <p className="text-[12px]" style={{ color: "var(--warning)" }}>有 {result.errors} 个采集源读取失败，请检查 LinkedIn Cookie、People 页面 URL 或访问状态。</p>
+        )}
+
+        {candidates.length ? (
+          <div className="rounded-md overflow-hidden" style={{ border: "1px solid var(--hairline-strong)" }}>
+            <div className="flex items-center justify-between px-3 py-2" style={{ background: "var(--bg-soft-2)", borderBottom: "1px solid var(--hairline)" }}>
+              <label className="flex items-center gap-2 text-[12px] cursor-pointer" style={{ color: "var(--body)" }}>
+                <input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible} />
+                {allVisibleSelected ? "取消当前结果" : "选择当前结果"}
+              </label>
+              <span className="text-[11px]" style={{ color: "var(--mute)" }}>只会批量调整公司 People 页发现的员工</span>
+            </div>
+            <div className="max-h-[420px] overflow-y-auto">
+              {visible.map((employee) => (
+                <div key={employee.id} className="flex items-center gap-3 px-3 py-2.5" style={{ borderBottom: "1px solid var(--hairline)" }}>
+                  <input
+                    type="checkbox"
+                    aria-label={`选择 ${employee.name || employee.external_id || "员工"}`}
+                    checked={selectedIds.has(employee.id)}
+                    onChange={() => toggle(employee.id)}
+                  />
+                  {employee.avatar_url ? <img src={employee.avatar_url} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" /> : <div className="w-9 h-9 rounded-full shrink-0 flex items-center justify-center text-[12px]" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>{(employee.name || employee.external_id || "?").slice(0, 1).toUpperCase()}</div>}
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-medium truncate" style={{ color: "var(--ink)" }}>{employee.name || employee.external_id || "未识别姓名"}</div>
+                    <div className="text-[12px] truncate" style={{ color: "var(--mute)" }}>{employee.title || employee.headline || employee.profile_url || "LinkedIn 员工候选"}</div>
+                  </div>
+                  {employee.profile_url && <a href={employee.profile_url} onClick={(event) => event.stopPropagation()} target="_blank" rel="noreferrer" className="text-[12px]" style={{ color: "var(--accent)" }}>主页</a>}
+                </div>
+              ))}
+              {!visible.length && <div className="p-6 text-center text-[13px]" style={{ color: "var(--mute)" }}>没有匹配的员工</div>}
+            </div>
+          </div>
+        ) : (
+          <EmptyState title="暂未导入员工" hint="请先配置并启用 LinkedIn 公司 /people/ 页面；如果已经配置，检查登录 Cookie 或页面是否触发安全验证。" />
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={onSave} disabled={saving || !candidates.length}>{saving ? "保存中…" : `保存选择（${selectedIds.size}）`}</Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

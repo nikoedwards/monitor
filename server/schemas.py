@@ -190,6 +190,11 @@ class LinkedInProfileUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class LinkedInMonitorSelectionIn(BaseModel):
+    brand_id: str
+    profile_ids: list[str] = Field(default_factory=list, max_length=300)
+
+
 class CreatorCandidateImportRow(BaseModel):
     platform: Optional[str] = None
     url: Optional[str] = None

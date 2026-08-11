@@ -224,6 +224,7 @@ export interface JobPosting {
 export interface LinkedInEmployee {
   id: string;
   brand_id: string;
+  external_id?: string;
   source_type?: "company" | "manual";
   name?: string;
   headline?: string;
@@ -242,6 +243,13 @@ export interface LinkedInEmployee {
   snapshot_count: number;
   change_count: number;
   latest_snapshot?: LinkedInProfileSnapshot | null;
+}
+
+export interface LinkedInEmployeeImportResult {
+  links: number;
+  profiles: number;
+  errors: number;
+  candidates: LinkedInEmployee[];
 }
 
 export interface LinkedInProfileSnapshot {
