@@ -55,6 +55,22 @@ export function TrendChart({ data, keys, valueFormatter }: { data: any[]; keys: 
   );
 }
 
+export function MultiLineChart({ data, keys, valueFormatter }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string }) {
+  return (
+    <ResponsiveContainer width="100%" height={260}>
+      <LineChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
+        <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
+        <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} width={valueFormatter ? 52 : 40} />
+        <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
+        {keys.map((k) => (
+          <Line key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} strokeWidth={2.25} dot={false} connectNulls />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
 export function SimpleLine({ data, dataKey, name, color }: { data: any[]; dataKey: string; name: string; color: string }) {
   return (
     <ResponsiveContainer width="100%" height={200}>

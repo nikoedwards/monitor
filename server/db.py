@@ -180,6 +180,24 @@ CREATE TABLE IF NOT EXISTS records (
   created_at TEXT NOT NULL
 );
 
+-- Daily market-share inputs. Store raw App signals rather than a cohort-bound
+-- percentage so any selected brand set can be re-normalized historically.
+CREATE TABLE IF NOT EXISTS market_share_snapshots (
+  id TEXT PRIMARY KEY,
+  snapshot_date TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  country TEXT NOT NULL DEFAULT 'all',
+  app_downloads_est INTEGER NOT NULL DEFAULT 0,
+  app_downloads_low INTEGER NOT NULL DEFAULT 0,
+  app_downloads_high INTEGER NOT NULL DEFAULT 0,
+  app_download_basis TEXT NOT NULL DEFAULT 'unavailable',
+  app_reviews INTEGER NOT NULL DEFAULT 0,
+  source_updated_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (snapshot_date, brand_id, country)
+);
+
 -- Materialized creator/influencer roster, re-aggregated from creator records.
 CREATE TABLE IF NOT EXISTS creators (
   id TEXT PRIMARY KEY,
@@ -520,6 +538,7 @@ CREATE INDEX IF NOT EXISTS idx_records_brand ON records(brand_id);
 CREATE INDEX IF NOT EXISTS idx_records_dimension ON records(dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_records_occurred ON records(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_records_source ON records(source_id);
+CREATE INDEX IF NOT EXISTS idx_market_share_snapshots_scope ON market_share_snapshots(country, snapshot_date, brand_id);
 CREATE INDEX IF NOT EXISTS idx_source_brand_runs_due ON source_brand_runs(source_id, last_collect_at);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);
 CREATE INDEX IF NOT EXISTS idx_links_brand ON links(brand_id, dimension, channel);

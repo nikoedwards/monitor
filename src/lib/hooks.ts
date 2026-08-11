@@ -7,6 +7,7 @@ import {
   type Link,
   type MarketShareModelKey,
   type MarketShareResponse,
+  type MarketShareTrendResponse,
   type Product,
   type RecordItem,
   type SalesMetric,
@@ -146,14 +147,28 @@ export function useMarketShare(brandIds: string[], model: MarketShareModelKey, c
   });
 }
 
+export function useMarketShareTrend(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["market-share-trend", brandIds, model, country, rp],
+    queryFn: () => api.get<MarketShareTrendResponse>(`/api/market-share/trend${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
+    enabled: brandIds.length >= 2,
+  });
+}
+
 export function useRefreshMarketShareData() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (brandIds: string[]) => Promise.all(
-      brandIds.map((brandId) => api.post(`/api/sources/app_store_reviews/collect${qs({ brand_id: brandId })}`)),
-    ),
+    mutationFn: async (brandIds: string[]) => {
+      const result = await Promise.all(
+        brandIds.map((brandId) => api.post(`/api/sources/app_store_reviews/collect${qs({ brand_id: brandId })}`)),
+      );
+      await api.post(`/api/market-share/snapshots/refresh${qs({ brand_ids: brandIds.join(",") })}`);
+      return result;
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["market-share"] });
+      qc.invalidateQueries({ queryKey: ["market-share-trend"] });
       qc.invalidateQueries({ queryKey: ["records"] });
       qc.invalidateQueries({ queryKey: ["sources"] });
     },
