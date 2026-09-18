@@ -5,12 +5,13 @@ import json
 import re
 import sqlite3
 from collections import Counter
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
-from ..records import insert_record, record_to_dict
+from ..records import insert_record, record_to_dict, upsert_ad_observation
 from ..schemas import ImportIn, RecordIn, VocActionIn, VocActionUpdate
 from ..util import compact_key, new_id, utc_now
 from .common import build_trend, get_conn, query_records, resolve_window
@@ -73,6 +74,7 @@ def list_records(
 def create_record(payload: RecordIn, conn: sqlite3.Connection = Depends(get_conn)):
     data = payload.model_dump()
     try:
+        upsert_ad_observation(conn, data)
         record = insert_record(conn, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -90,6 +92,7 @@ def import_records(payload: ImportIn, conn: sqlite3.Connection = Depends(get_con
             row.setdefault("brand_id", payload.brand_id)
         row.setdefault("dimension", "voc")
         try:
+            upsert_ad_observation(conn, row)
             insert_record(conn, row)
             created += 1
         except ValueError:
@@ -421,6 +424,72 @@ def update_action(action_id: str, payload: VocActionUpdate, conn: sqlite3.Connec
 def delete_action(action_id: str, conn: sqlite3.Connection = Depends(get_conn)):
     conn.execute("DELETE FROM voc_actions WHERE id = ?", (action_id,))
     return {"deleted": action_id}
+
+
+def _ad_duration_days(started_at: str | None, stopped_at: str | None, end_at: str | None) -> float | None:
+    if not started_at or not (stopped_at or end_at):
+        return None
+    try:
+        start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(stopped_at or end_at).replace("Z", "+00:00"))
+        if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None: end = end.replace(tzinfo=timezone.utc)
+        return round(max(0.0, (end - start).total_seconds() / 86400), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ad_entity_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    for key in ("publisher_platforms_json", "link_urls_json", "raw_json"):
+        target = key.removesuffix("_json")
+        try: item[target] = json.loads(item.pop(key) or ("{}" if key == "raw_json" else "[]"))
+        except (TypeError, ValueError): item[target] = {} if key == "raw_json" else []
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    item.update({
+        "source": item.get("source_id"), "source_ad_id": item.get("ad_external_id"),
+        "advertiser_name": item.get("page_name"), "body": item.get("creative_body"),
+        "delivery_start": item.get("started_at"), "delivery_stop": item.get("stopped_at"),
+        "first_seen": item.get("first_seen_at"), "last_seen": item.get("last_seen_at"),
+        "status": "active" if item.get("active_status") == "active" else "stopped",
+        "platforms": item.get("publisher_platforms") or [], "creative_url": item.get("snapshot_url"),
+        "landing_url": (item.get("link_urls") or [None])[0],
+        "spend": raw.get("spend"), "impressions": raw.get("impressions"), "reach": raw.get("reach"),
+    })
+    item["duration_days"] = _ad_duration_days(item.get("started_at"), item.get("stopped_at"), item.get("last_seen_at"))
+    item["persistence_score"] = round(min(100.0, max(0.0, float(item.get("duration_days") or 0) / 30.0 * 100.0)), 1)
+    item["evidence_level"] = "B" if item.get("spend") or item.get("impressions") or item.get("reach") else "C"
+    return item
+
+
+@router.get("/marketing/ads")
+def marketing_ads(brand_id: str | None = None, days: int = 30, start_date: str | None = None, end_date: str | None = None, platform: str | None = None, source: str | None = None, status: str | None = None, q: str | None = None, limit: int = 100, conn: sqlite3.Connection = Depends(get_conn)):
+    start, end = resolve_window(days, start_date, end_date)
+    where = ["brand_id = ?", "date(first_seen_at) <= date(?)", "date(COALESCE(stopped_at, last_seen_at)) >= date(?)"]
+    params: list[object] = [brand_id, end, start]
+    if platform: where += ["platform = ?"]; params.append(platform)
+    if status == "new": where.append("date(first_seen_at) BETWEEN date(?) AND date(?)"); params += [start, end]
+    elif status in {"active", "inactive", "stopped"}: where.append("active_status = ?"); params.append("inactive" if status == "stopped" else status)
+    if source: where.append("source_id = ?"); params.append(source)
+    if q: where.append("(page_name LIKE ? OR creative_body LIKE ?)"); params += [f"%{q}%", f"%{q}%"]
+    rows = conn.execute(f"SELECT * FROM ad_entities WHERE {' AND '.join(where)} ORDER BY last_seen_at DESC LIMIT ?", (*params, max(1, min(limit, 500)))).fetchall()
+    return {"ads": [_ad_entity_dict(row) for row in rows], "start_date": start, "end_date": end}
+
+
+@router.get("/marketing/ads/summary")
+@router.get("/marketing/ads-summary")
+def marketing_ads_summary(brand_id: str | None = None, days: int = 30, start_date: str | None = None, end_date: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
+    start, end = resolve_window(days, start_date, end_date)
+    rows = conn.execute("SELECT * FROM ad_entities WHERE brand_id = ? AND date(first_seen_at) <= date(?) AND date(COALESCE(stopped_at, last_seen_at)) >= date(?) ORDER BY last_seen_at DESC", (brand_id, end, start)).fetchall()
+    ads = [_ad_entity_dict(row) for row in rows]
+    active = [a for a in ads if a.get("active_status") == "active"]
+    durations = [a["duration_days"] for a in ads if a.get("duration_days") is not None]
+    daily = [dict(row) for row in conn.execute("SELECT observed_date AS date, COUNT(*) AS total, SUM(CASE WHEN active_status = 'active' THEN 1 ELSE 0 END) AS active FROM ad_snapshots WHERE brand_id = ? AND date(observed_date) BETWEEN date(?) AND date(?) GROUP BY observed_date ORDER BY observed_date", (brand_id, start, end)).fetchall()]
+    new_by_day = Counter(str(a.get("first_seen_at") or "")[:10] for a in ads)
+    stopped_by_day = Counter(str(a.get("stopped_at") or "")[:10] for a in ads if a.get("stopped_at"))
+    for point in daily: point["new"] = new_by_day.get(point.get("date"), 0); point["stopped"] = stopped_by_day.get(point.get("date"), 0)
+    events = conn.execute("SELECT event_type, event_at, COUNT(*) AS total FROM ad_events WHERE brand_id = ? AND date(event_at) BETWEEN date(?) AND date(?) GROUP BY event_type, event_at ORDER BY event_at DESC LIMIT 8", (brand_id, start, end)).fetchall()
+    return {"total": len(ads), "active": len(active), "active_ads": len(active), "inactive": len(ads)-len(active), "stopped_ads": len(ads)-len(active), "new_ads": sum(1 for a in ads if str(a.get("first_seen_at") or "")[:10] >= start), "avg_duration_days": round(sum(durations)/len(durations), 1) if durations else None, "avg_lifetime_days": round(sum(durations)/len(durations), 1) if durations else None, "persistence_score": round(sum(a.get("persistence_score", 0) for a in ads)/len(ads), 1) if ads else 0, "evidence_level": "B" if any(a.get("evidence_level") == "B" for a in ads) else "C", "by_source": [{"source": k, "source_id": k, "total": v} for k,v in Counter(a.get("source") or "unknown" for a in ads).most_common()], "by_platform": [{"platform": k, "total": v} for k,v in Counter(a.get("platform") or "unknown" for a in ads).most_common()], "by_page": [{"page_name": k, "total": v} for k,v in Counter(a.get("page_name") or "unknown" for a in ads).most_common(12)], "by_status": [{"status": "active", "total": len(active)}, {"status": "stopped", "total": len(ads)-len(active)}], "alerts": [{"id": f"{r['event_type']}-{r['event_at']}", "type": r["event_type"], "title": f"{r['event_type']} {r['total']} 条", "detail": "来自广告库的生命周期或素材变化事件", "detected_at": r["event_at"]} for r in events], "trend": daily, "start_date": start, "end_date": end}
 
 
 # ----------------------------------------------------------- marketing summary

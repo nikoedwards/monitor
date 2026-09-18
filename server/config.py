@@ -48,6 +48,8 @@ def apply_credential_overrides(values: dict) -> None:
     keeps env + settings consistent for everything that reads ``has_credential``
     (connector status, run_collector, scheduler). Only non-empty values override.
     """
+    aliases = {"meta_access_token": "facebook_access_token"}
     for name, value in (values or {}).items():
+        name = aliases.get(name, name)
         if name in CREDENTIALS and value and str(value).strip():
             CREDENTIALS[name] = str(value).strip()

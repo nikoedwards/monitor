@@ -557,6 +557,8 @@ export interface LlmSettings {
   sellersprite_key_hint?: string;
   youtube_configured?: boolean;
   youtube_key_hint?: string;
+  meta_configured?: boolean;
+  meta_key_hint?: string;
   boss_configured?: boolean;
   boss_key_hint?: string;
   linkedin_configured?: boolean;

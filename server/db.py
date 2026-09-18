@@ -182,6 +182,58 @@ CREATE TABLE IF NOT EXISTS records (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ad_entities (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  ad_external_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'meta',
+  page_id TEXT,
+  page_name TEXT,
+  snapshot_url TEXT,
+  creative_body TEXT,
+  creative_hash TEXT,
+  started_at TEXT,
+  stopped_at TEXT,
+  active_status TEXT NOT NULL DEFAULT 'active',
+  publisher_platforms_json TEXT,
+  link_urls_json TEXT,
+  raw_json TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (brand_id, source_id, ad_external_id)
+);
+
+CREATE TABLE IF NOT EXISTS ad_snapshots (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  observed_date TEXT NOT NULL,
+  active_status TEXT NOT NULL,
+  started_at TEXT,
+  stopped_at TEXT,
+  creative_body TEXT,
+  creative_hash TEXT,
+  publisher_platforms_json TEXT,
+  metrics_json TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (entity_id, observed_date)
+);
+
+CREATE TABLE IF NOT EXISTS ad_events (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  event_at TEXT NOT NULL,
+  details_json TEXT,
+  created_at TEXT NOT NULL
+);
+
 -- Daily market-share inputs. Store raw App signals rather than a cohort-bound
 -- percentage so any selected brand set can be re-normalized historically.
 CREATE TABLE IF NOT EXISTS market_share_snapshots (
@@ -542,6 +594,12 @@ CREATE INDEX IF NOT EXISTS idx_records_brand ON records(brand_id);
 CREATE INDEX IF NOT EXISTS idx_records_dimension ON records(dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_records_occurred ON records(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_records_source ON records(source_id);
+CREATE INDEX IF NOT EXISTS idx_ad_entities_brand ON ad_entities(brand_id, platform, last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_ad_entities_status ON ad_entities(brand_id, active_status);
+CREATE INDEX IF NOT EXISTS idx_ad_snapshots_entity ON ad_snapshots(entity_id, observed_date);
+CREATE INDEX IF NOT EXISTS idx_ad_snapshots_brand ON ad_snapshots(brand_id, observed_date);
+CREATE INDEX IF NOT EXISTS idx_ad_events_entity ON ad_events(entity_id, event_at);
+CREATE INDEX IF NOT EXISTS idx_ad_events_brand ON ad_events(brand_id, event_at);
 CREATE INDEX IF NOT EXISTS idx_market_share_snapshots_scope ON market_share_snapshots(country, snapshot_date, brand_id);
 CREATE INDEX IF NOT EXISTS idx_source_brand_runs_due ON source_brand_runs(source_id, last_collect_at);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);

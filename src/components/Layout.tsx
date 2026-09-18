@@ -93,7 +93,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState("");
   useEffect(() => {
     if (open && data) {
-      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" });
+      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", boss_cookie: "", linkedin_cookie: "" });
       setSaved(false);
       setError("");
     }
@@ -148,6 +148,16 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
           <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
+            Meta Ad Library：{data?.meta_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（广告投放不会采集）</Badge>}
+            {data?.meta_configured && data?.meta_key_hint && <span>当前：{data.meta_key_hint}</span>}
+          </div>
+          <Field label={data?.meta_configured ? "Access Token（已保存，留空表示不修改）" : "Access Token（Meta 广告库必填）"} hint="也可在 Railway 环境变量中配置 META_ACCESS_TOKEN 或 FACEBOOK_ACCESS_TOKEN。">
+            <Input type="password" value={form.meta_access_token || ""} onChange={(e) => set("meta_access_token", e.target.value)} placeholder="Meta Graph API access token" />
+          </Field>
+        </div>
+
+        <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
             LinkedIn Cookie：{data?.linkedin_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（职位/员工动态不可采）</Badge>}
             {data?.linkedin_configured && data?.linkedin_key_hint && <span>当前：{data.linkedin_key_hint}</span>}
           </div>
@@ -168,11 +178,12 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               if (!payload.api_key) delete payload.api_key;
               if (!payload.sellersprite_secret_key) delete payload.sellersprite_secret_key;
               if (!payload.youtube_api_key) delete payload.youtube_api_key;
+              if (!payload.meta_access_token) delete payload.meta_access_token;
               if (!payload.boss_cookie) delete payload.boss_cookie;
               if (!payload.linkedin_cookie) delete payload.linkedin_cookie;
               try {
                 await save.mutateAsync(payload);
-                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", boss_cookie: "", linkedin_cookie: "" }));
+                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", boss_cookie: "", linkedin_cookie: "" }));
                 setSaved(true);
               } catch (e: any) {
                 setError(e?.message || "保存失败");
