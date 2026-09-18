@@ -96,6 +96,7 @@ export interface RecordItem {
   body: string;
   url?: string;
   occurred_at?: string;
+  voice_source?: string;
   sentiment?: string;
   sentiment_score?: number;
   sentiment_explanation?: {

@@ -140,6 +140,7 @@ export default function Marketing() {
   };
 
   const isAds = view === "channel" && channel === "ads";
+  const isSocial = view === "channel" && channel === "social";
   const selectedSection = view === "overview" ? "overview" : channel;
   if (isAds) {
     return <AdsChannel brandId={brandId} range={range} selectedSection={selectedSection} onSectionChange={(value) => {
@@ -518,7 +519,7 @@ function CommunityBreakdown({ groups, hidden, onToggle }: { groups: SubGroup[]; 
   );
 }
 
-function SourceBreakdown({ sources }: { sources: { source_id: string; total: number }[] }) {
+function SourceBreakdown({ sources, kind = "source" }: { sources: { source_id?: string; platform?: string; total: number }[]; kind?: "source" | "platform" }) {
   if (!sources.length) {
     return <EmptyState title="暂无数据源" hint="该渠道尚未采集到数据，配置链接或手动刷新后查看。" />;
   }
@@ -526,9 +527,9 @@ function SourceBreakdown({ sources }: { sources: { source_id: string; total: num
   return (
     <div className="space-y-2.5">
       {sources.map((s) => (
-        <div key={s.source_id}>
+        <div key={s.source_id || s.platform}>
           <div className="flex items-center justify-between text-[13px] mb-1">
-            <span style={{ color: "var(--ink)" }}>{SOURCE_LABEL[s.source_id] || s.source_id}</span>
+            <span style={{ color: "var(--ink)" }}>{kind === "platform" ? (s.platform || "unknown") : (SOURCE_LABEL[s.source_id || ""] || s.source_id || "unknown")}</span>
             <span className="tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(s.total)}</span>
           </div>
           <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
