@@ -729,81 +729,284 @@ def _discovered_app_payloads(brand: dict) -> list[dict]:
     if not app_ids:
         return []
     payloads: list[dict] = []
-    fields = (
-        "id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,"
-        "ad_snapshot_url,ad_creative_bodies,ad_creative_link_captions,"
-        "ad_creative_link_descriptions,ad_creative_link_titles,ad_creative_link_urls,"
-        "page_id,page_name,publisher_platforms,impressions,spend,"
-        "estimated_audience_size,demographic_distribution,delivery_by_region"
-    )
-    safe_fields = "id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,ad_snapshot_url,ad_creative_bodies,ad_creative_link_titles,ad_creative_link_urls,page_id,page_name,publisher_platforms"
+    def collect_market(country: str) -> list[dict]:
+        try:
+            apps = _lookup_app_store_apps(app_ids, country)
+        except (FetchError, ValueError):
+            apps = []
+        discovery = "portfolio_market_lookup"
+        if not apps:
+            apps = _search_official_app_store_apps(brand, country)
+            discovery = "storefront_brand_search"
+        return [
+            metric
+            for app in apps
+            if (metric := _app_store_metric_payload(brand, app, country, discovery=discovery))
+        ]
+
+    for _country, market_payloads in _collect_app_store_markets(collect_market):
+        payloads.extend(market_payloads)
+    return payloads
+
+
+def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM links WHERE brand_id = ? AND platform = 'app_store' AND status = 'active'",
+        (brand.get("id"),),
+    ).fetchall()
+    if not rows:
+        return _discovered_app_payloads(brand)
+    payloads, successful_links = _configured_market_metric_payloads(brand, rows)
+    for row in rows:
+        payloads.extend(_configured_review_payloads(
+            conn,
+            brand,
+            row,
+            has_metric=row["id"] in successful_links,
+        ))
+    return payloads
+
+
+# ---------------------------------------------------------------- Meta Ad Library
+def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
+    token = CREDENTIALS.get("facebook_access_token")
+    if not token:
+        return []
+    payloads: list[dict] = []
+    fields = "id,ad_creative_bodies,ad_snapshot_url,page_name,ad_delivery_start_time,publisher_platforms"
     for query in brand_queries(brand):
         url = (
             "https://graph.facebook.com/v19.0/ads_archive?"
             f"search_terms={quote_plus(query)}&ad_reached_countries=%5B%22US%22%5D"
-            f"&ad_active_status=ALL&fields={quote_plus(fields)}&limit=100&access_token={quote_plus(token)}"
+            f"&ad_active_status=ALL&fields={fields}&limit=25&access_token={quote_plus(token)}"
         )
-        # Follow Graph API paging.next until exhausted (bounded to avoid a
-        # pathological keyword returning an unbounded archive).
-        next_url = url
-        pages = 0
-        used_fallback = False
-        while next_url and pages < 20:
-            pages += 1
-            try:
-                data = fetch_json(next_url, timeout=20)
-            except FetchError:
-                # Field availability varies by API version, app review and ad
-                # category. Retry the first page with the public baseline so
-                # one restricted metric does not hide all creative data.
-                if not used_fallback and next_url == url:
-                    used_fallback = True
-                    next_url = url.replace(f"fields={quote_plus(fields)}", f"fields={quote_plus(safe_fields)}")
-                    continue
-                break
-            ads = data.get("data", []) if isinstance(data, dict) else []
-            for ad in ads:
-                if not isinstance(ad, dict):
-                    continue
-                bodies = ad.get("ad_creative_bodies") or []
-                body = clean_text(" ".join(bodies)) or "(no creative text)"
-                stop_time = ad.get("ad_delivery_stop_time")
-                status = "inactive" if stop_time else "active"
-                metrics = {
-                    "publisher_platforms": ad.get("publisher_platforms") or [],
-                    "impressions": ad.get("impressions"),
-                    "spend": ad.get("spend"),
-                    "estimated_audience_size": ad.get("estimated_audience_size"),
-                    "demographic_distribution": ad.get("demographic_distribution"),
-                    "delivery_by_region": ad.get("delivery_by_region"),
-                    "ad_creative_link_captions": ad.get("ad_creative_link_captions") or [],
-                    "ad_creative_link_descriptions": ad.get("ad_creative_link_descriptions") or [],
-                    "ad_creative_link_titles": ad.get("ad_creative_link_titles") or [],
-                    "ad_creative_link_urls": ad.get("ad_creative_link_urls") or [],
-                    "active_status": status,
-                }
-                payloads.append({
-                    "source_id": "meta_ads",
-                    "brand_id": brand.get("id"),
-                    "external_id": f"{brand.get('id')}:{ad.get('id')}",
-                    "data_type": "ad",
-                    "dimension": "marketing",
-                    "channel": "ads",
-                    "platform": "meta",
-                    "title": ad.get("page_name") or query,
-                    "author": ad.get("page_name"),
-                    "body": body,
-                    "url": ad.get("ad_snapshot_url"),
-                    "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
-                    "started_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
-                    "stopped_at": parse_rss_datetime(stop_time),
-                    "active_status": status,
-                    "metrics": metrics,
-                    "raw": ad,
-                })
-            paging = data.get("paging") if isinstance(data, dict) else None
-            next_url = paging.get("next") if isinstance(paging, dict) else None
+        try:
+            data = fetch_json(url, timeout=20)
+        except FetchError:
+            continue
+        for ad in (data.get("data", []) if isinstance(data, dict) else []):
+            bodies = ad.get("ad_creative_bodies") or []
+            body = clean_text(" ".join(bodies)) or "(no creative text)"
+            payloads.append({
+                "source_id": "meta_ads",
+                "brand_id": brand.get("id"),
+                "external_id": f"{brand.get('id')}:{ad.get('id')}",
+                "data_type": "ad",
+                "dimension": "marketing",
+                "channel": "ads",
+                "platform": "meta",
+                "title": ad.get("page_name") or query,
+                "author": ad.get("page_name"),
+                "body": body,
+                "url": ad.get("ad_snapshot_url"),
+                "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
+                "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
+                "raw": ad,
+            })
     return payloads
+
+
+# YouTube creator collection now lives in connectors/creators/youtube.py
+# (enriched with view/like/comment + subscriber counts and collaboration detection).
+
+
+# ---------------------------------------------------------------- Self-hosted community sites
+# Reddit / Discord / Facebook groups are handled by their own (native) connectors;
+# everything else configured under the community channel is treated as a website.
+COMMUNITY_NATIVE_PLATFORMS = {
+    "reddit", "discord", "discord_community", "facebook_group", "facebook_groups",
+}
+
+
+def _parse_iso(value) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _discourse_replies(root: str, topic_id, topic_title: str, topic_url: str, topic_ext: str, brand: dict, link_id, host: str) -> list[dict]:
+    """Top-level replies of a Discourse topic (post_stream minus the original post)."""
+    try:
+        detail = fetch_json(f"{root}/t/{topic_id}.json", timeout=16)
+    except (FetchError, ValueError):
+        return []
+    posts = (((detail or {}).get("post_stream") or {}).get("posts")) or []
+    out: list[dict] = []
+    for post in posts[1:11]:  # skip the original post; cap replies to bound volume
+        pid = post.get("id")
+        body = html_fragment_to_text(post.get("cooked")) or ""
+        if not body:
+            continue
+        out.append({
+            "source_id": "community_site",
+            "brand_id": brand.get("id"),
+            "link_id": link_id,
+            "external_id": f"{topic_ext}:p{pid}",
+            "data_type": "community_reply",
+            "dimension": "marketing",
+            "channel": "community",
+            "platform": "discourse",
+            "title": f"回复：{topic_title}",
+            "author": clean_text(post.get("username") or post.get("name")),
+            "body": body,
+            "url": topic_url,
+            "occurred_at": _parse_iso(post.get("created_at")),
+            "metrics": {"parent_external_id": topic_ext, "reply_to_post_number": post.get("reply_to_post_number")},
+            "raw": {"post_id": pid, "topic_id": topic_id, "site": root},
+        })
+    return out
+
+
+def _discourse_payloads(url: str, brand: dict, link_id) -> list[dict]:
+    """Discourse forums expose a clean JSON API; `/latest.json` lists recent topics,
+    and `/t/{id}.json` yields the topic's posts (we keep the replies as community_reply)."""
+    root = root_url(url).rstrip("/")
+    try:
+        data = fetch_json(f"{root}/latest.json", timeout=16)
+    except (FetchError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    topics = ((data.get("topic_list") or {}).get("topics")) or []
+    host = host_key(root)
+    payloads: list[dict] = []
+    for index, topic in enumerate(topics[:25]):
+        topic_id = topic.get("id")
+        slug = topic.get("slug")
+        topic_url = f"{root}/t/{slug}/{topic_id}" if slug and topic_id else root
+        title = clean_text(topic.get("title")) or "Forum topic"
+        topic_ext = f"{brand.get('id')}:discourse:{host}:{topic_id}"
+        payloads.append({
+            "source_id": "community_site",
+            "brand_id": brand.get("id"),
+            "link_id": link_id,
+            "external_id": topic_ext,
+            "data_type": "community_post",
+            "dimension": "marketing",
+            "channel": "community",
+            "platform": "discourse",
+            "title": title,
+            "body": clean_text(topic.get("excerpt")) or title,
+            "url": topic_url,
+            "occurred_at": _parse_iso(topic.get("last_posted_at") or topic.get("created_at")),
+            "metrics": {
+                "posts_count": topic.get("posts_count"),
+                "reply_count": topic.get("reply_count"),
+                "views": topic.get("views"),
+            },
+            "raw": {"topic_id": topic_id, "site": root},
+        })
+        # Pull replies for the most recent handful of topics to keep request volume bounded.
+        if index < 8 and topic_id and (topic.get("posts_count") or 0) > 1:
+            payloads.extend(_discourse_replies(root, topic_id, title, topic_url, topic_ext, brand, link_id, host))
+    return payloads
+
+
+def _candidate_feeds(url: str) -> list[str]:
+    root = root_url(url).rstrip("/")
+    base = url.rstrip("/")
+    candidates = [
+        f"{root}/latest.rss",
+        f"{base}/feed",
+        f"{base}.rss",
+        f"{base}/rss",
+        f"{root}/feed",
+        f"{root}/rss",
+        f"{root}/index.xml",
+    ]
+    seen, result = set(), []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            result.append(candidate)
+    return result
+
+
+def _rss_payloads(url: str, brand: dict, link_id) -> list[dict]:
+    """Most forums / community platforms expose RSS; probe common feed locations."""
+    host = host_key(url)
+    for feed_url in _candidate_feeds(url):
+        try:
+            raw = fetch_bytes(feed_url, accept="application/rss+xml,application/atom+xml", timeout=14)
+            items = parse_rss(raw, limit=25)
+        except FetchError:
+            continue
+        except Exception:
+            continue
+        if not items:
+            continue
+        payloads: list[dict] = []
+        for item in items:
+            link = item.get("url")
+            if not link:
+                continue
+            payloads.append({
+                "source_id": "community_site",
+                "brand_id": brand.get("id"),
+                "link_id": link_id,
+                "external_id": f"{brand.get('id')}:community:{host}:{item.get('guid') or link}",
+                "data_type": "community_post",
+                "dimension": "marketing",
+                "channel": "community",
+                "platform": "forum",
+                "title": item.get("title") or "Community post",
+                "body": item.get("description") or item.get("title") or "",
+                "url": link,
+                "occurred_at": item.get("published_at"),
+                "raw": {"feed": feed_url},
+            })
+        if payloads:
+            return payloads
+    return []
+
+
+def _next_data_apollo(html: str) -> dict | None:
+    """Extract a Next.js `__NEXT_DATA__` Apollo normalized cache from page HTML."""
+    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html or "", re.S)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1))
+    except (ValueError, TypeError):
+        return None
+    apollo = ((data.get("props") or {}).get("apolloState")) or {}
+    if isinstance(apollo, dict) and isinstance(apollo.get("data"), dict):
+        apollo = apollo["data"]
+    return apollo if isinstance(apollo, dict) else None
+
+
+def _frill_latest_url(final_url: str, apollo: dict | None, root: str) -> str | None:
+    """Return the board's public Ideas URL with Frill's "Latest Ideas" sort selected."""
+    parsed = urlparse(final_url or "")
+    path = parsed.path.rstrip("/")
+    if not re.fullmatch(r"/b/[^/]+/[^/]+", path):
+        board = next(
+            (
+                value
+                for value in (apollo or {}).values()
+                if isinstance(value, dict)
+                and value.get("__typename") == "Board"
+                and value.get("idx")
+                and value.get("slug")
+            ),
+            None,
+        )
+        if not board:
+            return None
+        board_id = str(board["idx"])
+        if board_id.startswith("board_"):
+            board_id = board_id.removeprefix("board_")
+        path = f"/b/{board_id}/{board['slug']}"
+        parsed = urlparse(root + path)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["sortBy"] = "created_at"
+    return urlunparse(parsed._replace(path=path, query=urlencode(query), fragment=""))
 
 
 def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:

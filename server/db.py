@@ -182,59 +182,24 @@ CREATE TABLE IF NOT EXISTS records (
   created_at TEXT NOT NULL
 );
 
--- Stable ad registry and daily observations.  Records remain the unified
--- content stream; these tables retain ad lifecycle state that records
--- intentionally de-duplicate away.
-CREATE TABLE IF NOT EXISTS ad_entities (
+-- Daily market-share inputs. Store raw App signals rather than a cohort-bound
+-- percentage so any selected brand set can be re-normalized historically.
+CREATE TABLE IF NOT EXISTS market_share_snapshots (
   id TEXT PRIMARY KEY,
+  snapshot_date TEXT NOT NULL,
   brand_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  ad_external_id TEXT NOT NULL,
-  platform TEXT NOT NULL DEFAULT 'meta',
-  page_id TEXT,
-  page_name TEXT,
-  snapshot_url TEXT,
-  creative_body TEXT,
-  creative_hash TEXT,
-  started_at TEXT,
-  stopped_at TEXT,
-  active_status TEXT NOT NULL DEFAULT 'active',
-  publisher_platforms_json TEXT,
-  link_urls_json TEXT,
-  raw_json TEXT,
-  first_seen_at TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL,
+  country TEXT NOT NULL DEFAULT 'all',
+  app_downloads_est INTEGER NOT NULL DEFAULT 0,
+  app_downloads_low INTEGER NOT NULL DEFAULT 0,
+  app_downloads_high INTEGER NOT NULL DEFAULT 0,
+  app_download_basis TEXT NOT NULL DEFAULT 'unavailable',
+  app_reviews INTEGER NOT NULL DEFAULT 0,
+  app_rating REAL,
+  app_store_apps INTEGER NOT NULL DEFAULT 0,
+  source_updated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE (brand_id, source_id, ad_external_id)
-);
-
-CREATE TABLE IF NOT EXISTS ad_snapshots (
-  id TEXT PRIMARY KEY,
-  entity_id TEXT NOT NULL,
-  brand_id TEXT NOT NULL,
-  observed_at TEXT NOT NULL,
-  observed_date TEXT NOT NULL,
-  active_status TEXT NOT NULL,
-  started_at TEXT,
-  stopped_at TEXT,
-  creative_body TEXT,
-  creative_hash TEXT,
-  publisher_platforms_json TEXT,
-  metrics_json TEXT,
-  raw_json TEXT,
-  created_at TEXT NOT NULL,
-  UNIQUE (entity_id, observed_date)
-);
-
-CREATE TABLE IF NOT EXISTS ad_events (
-  id TEXT PRIMARY KEY,
-  entity_id TEXT NOT NULL,
-  brand_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  event_at TEXT NOT NULL,
-  details_json TEXT,
-  created_at TEXT NOT NULL
+  UNIQUE (snapshot_date, brand_id, country)
 );
 
 -- Materialized creator/influencer roster, re-aggregated from creator records.
@@ -577,12 +542,8 @@ CREATE INDEX IF NOT EXISTS idx_records_brand ON records(brand_id);
 CREATE INDEX IF NOT EXISTS idx_records_dimension ON records(dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_records_occurred ON records(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_records_source ON records(source_id);
-CREATE INDEX IF NOT EXISTS idx_ad_entities_brand ON ad_entities(brand_id, platform, last_seen_at);
-CREATE INDEX IF NOT EXISTS idx_ad_entities_status ON ad_entities(brand_id, active_status);
-CREATE INDEX IF NOT EXISTS idx_ad_snapshots_entity ON ad_snapshots(entity_id, observed_date);
-CREATE INDEX IF NOT EXISTS idx_ad_snapshots_brand ON ad_snapshots(brand_id, observed_date);
-CREATE INDEX IF NOT EXISTS idx_ad_events_entity ON ad_events(entity_id, event_at);
-CREATE INDEX IF NOT EXISTS idx_ad_events_brand ON ad_events(brand_id, event_at);
+CREATE INDEX IF NOT EXISTS idx_market_share_snapshots_scope ON market_share_snapshots(country, snapshot_date, brand_id);
+CREATE INDEX IF NOT EXISTS idx_source_brand_runs_due ON source_brand_runs(source_id, last_collect_at);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);
 CREATE INDEX IF NOT EXISTS idx_links_brand ON links(brand_id, dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_sales_metrics_brand ON sales_metrics(brand_id, snapshot_date);
@@ -616,19 +577,12 @@ _DB_LOCK_RETRIES = max(1, int(os.environ.get("MONITOR_DB_LOCK_RETRIES", "6")))
 
 
 class ResilientConnection(sqlite3.Connection):
-    """SQLite connection that retries transient busy/locked operations.
-
-    Collectors perform network I/O between database statements.  A normal
-    sqlite3 connection can leave a deferred write transaction open during that
-    wait, so another request sees ``database is locked``.  Connections are put
-    in autocommit mode below, and this small retry layer handles the remaining
-    short-lived writer races without retrying unrelated SQL errors.
-    """
+    """Retry transient SQLite writer races instead of failing the request."""
 
     @staticmethod
     def _is_busy(exc: sqlite3.OperationalError) -> bool:
         message = str(exc).lower()
-        return "database is locked" in message or "database table is locked" in message or "database is busy" in message
+        return any(text in message for text in ("database is locked", "database table is locked", "database is busy"))
 
     def _retry(self, operation, *args, **kwargs):
         delay = 0.05
@@ -656,21 +610,24 @@ def connect() -> sqlite3.Connection:
     # check_same_thread=False: FastAPI may run a sync dependency's setup and the
     # path operation on different threadpool workers, so a per-request connection
     # can legitimately move across threads (never used concurrently).
-    # Autocommit is intentional: collectors fetch remote pages while using the
-    # same connection.  Leaving the default deferred transaction enabled would
-    # keep SQLite's writer lock for the whole network crawl.
+    # Keep write transactions short. Collectors perform network and browser
+    # work while they hold a connection, so sqlite's default implicit
+    # transaction can otherwise keep the database write lock for the entire
+    # crawl. Autocommit makes each statement release its lock immediately;
+    # callers that need an atomic operation can still use an explicit BEGIN.
     conn = sqlite3.connect(
         DB_PATH,
         timeout=_DB_BUSY_TIMEOUT_MS / 1000,
-        check_same_thread=False,
         isolation_level=None,
         factory=ResilientConnection,
+        check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA wal_autocheckpoint=1000")
     return conn
 
 
