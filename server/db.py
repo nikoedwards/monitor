@@ -815,9 +815,27 @@ def _backfill_brand_ids(conn: sqlite3.Connection) -> None:
         brand_id = existing["id"] if existing else new_id()
         if not existing:
             now = utc_now()
+            # Some legacy databases used a stricter brands table with required
+            # source/JSON columns. Build the insert from the columns that are
+            # actually present so record backfilling works across both schemas.
+            brand_columns = {item["name"] for item in conn.execute("PRAGMA table_info(brands)")}
+            insert_values = {
+                "id": brand_id,
+                "name": name,
+                "created_at": now,
+                "updated_at": now,
+                "source_url": "",
+                "source_kind": "legacy",
+                "monitoring_keywords_json": "[]",
+                "raw_json": "{}",
+                "social_links_json": "{}",
+                "ecommerce_links_json": "{}",
+            }
+            selected = [column for column in insert_values if column in brand_columns]
+            placeholders = ", ".join("?" for _ in selected)
             conn.execute(
-                "INSERT INTO brands (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (brand_id, name, now, now),
+                f"INSERT INTO brands ({', '.join(selected)}) VALUES ({placeholders})",
+                [insert_values[column] for column in selected],
             )
         conn.execute(
             "UPDATE records SET brand_id = ? WHERE brand = ? AND (brand_id IS NULL OR brand_id = '')",

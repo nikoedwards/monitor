@@ -11,7 +11,7 @@ import sqlite3
 
 from ...util import canonical_url, clean_text, new_id, today, utc_now
 from . import pick_provider
-from .base import ListingRef, ListingSnapshot
+from .base import ListingRef, ListingSnapshot, canonicalize_metric_changes, metric_rank_value
 
 # Channels that have an automated provider (others are manual-entry only).
 AUTOMATED_CHANNELS = ("amazon", "dtc", "other_ecom")
@@ -69,14 +69,40 @@ def _upsert_listing(conn: sqlite3.Connection, link: dict, ref: ListingRef) -> st
 def _diff_fingerprint(old_fp: dict, new_fp: dict) -> list[dict]:
     changes: list[dict] = []
     for key, new_val in new_fp.items():
-        old_val = old_fp.get(key)
+        # Fingerprints written before a field was introduced should not emit a
+        # false positive on the first capture after an upgrade.
+        if key == "rank":
+            if "rank" not in old_fp and "bsr" not in old_fp:
+                continue
+            old_val = metric_rank_value(old_fp)
+        else:
+            if key not in old_fp:
+                continue
+            old_val = old_fp.get(key)
         if old_val == new_val:
             continue
         # Skip "first time we ever saw a value" noise (None -> value on a brand-new field).
         if old_val in (None, "") and new_val in (None, ""):
             continue
         changes.append({"field": key, "from": old_val, "to": new_val})
-    return changes
+    return canonicalize_metric_changes(changes)
+
+
+def _merge_changes(existing: list[dict], current: list[dict]) -> list[dict]:
+    """Merge repeated captures from the same day into one day-level event.
+
+    A same-day refresh replaces the metric row. Preserve the first observed
+    value as ``from`` while updating ``to`` to the newest value, so a manual
+    refresh cannot erase the day's rank/rating/review log.
+    """
+    merged: dict[str, dict] = {}
+    for change in canonicalize_metric_changes([*(existing or []), *(current or [])]):
+        field = str(change.get("field") or "other")
+        if field not in merged:
+            merged[field] = {"field": field, "from": change.get("from"), "to": change.get("to")}
+        else:
+            merged[field]["to"] = change.get("to")
+    return [item for item in merged.values() if item.get("from") != item.get("to")]
 
 
 def _record_snapshot(conn: sqlite3.Connection, listing: dict, snap: ListingSnapshot) -> dict:
@@ -98,6 +124,12 @@ def _record_snapshot(conn: sqlite3.Connection, listing: dict, snap: ListingSnaps
         "SELECT * FROM sales_metrics WHERE link_id = ? AND snapshot_date = ? LIMIT 1",
         (listing["id"], day),
     ).fetchone()
+    existing_changes: list[dict] = []
+    if existing_today:
+        try:
+            existing_changes = json.loads(existing_today["changes_json"] or "[]")
+        except (TypeError, ValueError):
+            existing_changes = []
     has_existing_data = existing_today and any(
         existing_today[key] is not None
         for key in ("price", "rating", "review_count", "rank", "bsr", "units_est")
@@ -113,7 +145,10 @@ def _record_snapshot(conn: sqlite3.Connection, listing: dict, snap: ListingSnaps
         )
         return {"changed": False, "status": snap.status, "preserved": True}
 
-    # Dedupe: one metric row per listing per day.
+    # Dedupe: one metric row per listing per day. Keep a same-day event's
+    # original baseline when a refresh captures a second value.
+    changes = _merge_changes(existing_changes, changes)
+    change_score = round(len(changes) / max(1, len(new_fp)), 4)
     conn.execute(
         "DELETE FROM sales_metrics WHERE link_id = ? AND snapshot_date = ?",
         (listing["id"], day),

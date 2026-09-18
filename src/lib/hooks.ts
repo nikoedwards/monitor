@@ -11,6 +11,7 @@ import {
   type Product,
   type RecordItem,
   type SalesMetric,
+  type SalesChangeLog,
   type Source,
   type VocAction,
   type WebMonitor,
@@ -406,6 +407,20 @@ export function useSalesSummary(brandId?: string, productId?: string, range?: Ti
   });
 }
 
+export function useSalesChanges(brandId?: string, productId?: string, channel?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["sales-changes", brandId, productId, channel, rp],
+    queryFn: () => api.get<SalesChangeLog>(`/api/sales/changes${qs({
+      brand_id: brandId,
+      product_id: productId,
+      channel: channel === "all" ? undefined : channel,
+      ...rp,
+    })}`),
+    enabled: !!brandId,
+  });
+}
+
 export function useSalesMetrics(brandId?: string, channel?: string, productId?: string) {
   return useQuery({
     queryKey: ["sales-metrics", brandId, channel, productId],
@@ -437,6 +452,7 @@ function invalidateSales(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["sales-summary"] });
   qc.invalidateQueries({ queryKey: ["sales-metrics"] });
   qc.invalidateQueries({ queryKey: ["sales-listings"] });
+  qc.invalidateQueries({ queryKey: ["sales-changes"] });
 }
 
 export function useSalesMutations() {

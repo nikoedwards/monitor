@@ -9,7 +9,43 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Mapping, Optional
+
+
+def metric_rank_value(values: Mapping[str, object]):
+    """Return the canonical rank signal, preferring marketplace BSR."""
+    bsr = values.get("bsr")
+    return bsr if bsr is not None else values.get("rank")
+
+
+def canonicalize_metric_changes(changes: list[dict] | None) -> list[dict]:
+    """Collapse ``bsr``/``rank`` aliases into one authoritative rank change."""
+    normalized: list[dict] = []
+    indexes: dict[str, int] = {}
+    priorities: dict[str, int] = {}
+    for raw_change in changes or []:
+        if not isinstance(raw_change, dict):
+            continue
+        source_field = str(raw_change.get("field") or "other")
+        field = "rank" if source_field in {"rank", "bsr"} else source_field
+        change = {**raw_change, "field": field}
+        priority = 1 if source_field == "bsr" else 0
+        if field not in indexes:
+            indexes[field] = len(normalized)
+            priorities[field] = priority
+            normalized.append(change)
+            continue
+        existing = normalized[indexes[field]]
+        if existing.get("from") == change.get("from") and existing.get("to") == change.get("to"):
+            if field == "rank" and priority > priorities[field]:
+                normalized[indexes[field]] = change
+                priorities[field] = priority
+            continue
+        # Repeated captures in one day may contain multiple transitions for a
+        # field. Keep the day's original baseline and newest observed value.
+        existing["to"] = change.get("to")
+        priorities[field] = max(priorities[field], priority)
+    return normalized
 
 
 @dataclass
@@ -46,15 +82,19 @@ class ListingSnapshot:
     raw: dict = field(default_factory=dict)
 
     def fingerprint_fields(self) -> dict:
-        """Subset of fields used to detect a listing *content* change.
-
-        Price is intentionally excluded (tracked as a trend metric, not a "change").
-        """
+        """Fields whose observed changes belong in the sales monitoring log."""
         return {
             "title": self.title or "",
             "sku": self.sku or "",
             "image_url": self.image_url or "",
             "in_stock": self.in_stock,
+            "rank": self.bsr if self.bsr is not None else self.rank,
+            "rating": self.rating,
+            "review_count": self.review_count,
+            "price": self.price,
+            "currency": self.currency,
+            "units_est": self.units_est,
+            "revenue_est": self.revenue_est,
         }
 
 

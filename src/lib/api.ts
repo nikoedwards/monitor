@@ -180,6 +180,27 @@ export interface SalesListing {
   latest?: SalesMetric | null;
 }
 
+export interface SalesChangeLog {
+  range: { start: string; end: string };
+  events: {
+    date: string;
+    listing_id?: string;
+    listing_title?: string;
+    asin?: string;
+    product_id?: string;
+    product_name?: string;
+    channel?: string;
+    platform?: string;
+    event_type?: "listing_added" | "metric_change";
+    change_score: number;
+    changes: { field: string; from?: unknown; to?: unknown }[];
+  }[];
+  daily: { date: string; listing_count: number; delta: number }[];
+  total_events: number;
+  changed_listings: number;
+  field_counts: Record<string, number>;
+}
+
 export interface JobSnapshotItem {
   id: string;
   posting_id: string;
