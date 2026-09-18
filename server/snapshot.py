@@ -870,9 +870,16 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
     except Exception:
         _PLAYWRIGHT_AVAILABLE = False
         return None
+    browser = None
+    context = None
+    page = None
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--no-sandbox"])
+            browser = pw.chromium.launch(
+                headless=True,
+                timeout=20000,
+                args=["--disable-dev-shm-usage", "--no-sandbox"],
+            )
             context = browser.new_context(viewport={"width": 1440, "height": 1200})
             loaded: dict[str, tuple[str, bytes]] = {}
             navigation_error = ""
@@ -891,7 +898,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 navigation_error = ""
                 response = None
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
                 except PlaywrightTimeoutError as exc:
                     navigation_error = str(exc)[:300]
                 capture_error = _inspect_playwright_page(page, response)
@@ -928,7 +935,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 response = None
                 navigation_error = ""
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
                 except PlaywrightTimeoutError as exc:
                     navigation_error = str(exc)[:300]
                 capture_error = _inspect_playwright_page(page, response)
@@ -995,6 +1002,18 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
         raise
     except Exception as exc:
         return {"error": str(exc)[:300]}
+    finally:
+        # Navigation, page inspection, or archive serialization can fail
+        # before the normal success-path browser.close(). Always release all
+        # Playwright objects so scheduled snapshots cannot leak Chromium
+        # processes/threads and eventually stall the scheduler.
+        for resource in (page, context, browser):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                pass
     return None
 
 
