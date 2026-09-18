@@ -11,11 +11,11 @@ import { useTimeRange, rangeParams } from "../lib/timeRange";
 import { CHANNEL_LABEL, fmtNum } from "../lib/format";
 
 const CHANNELS = [
-  { value: "media", label: "媒体公关" },
   { value: "ads", label: "广告投放" },
   { value: "creators", label: "红人达人" },
-  { value: "community", label: "社群" },
+  { value: "media", label: "媒体公关" },
   { value: "social", label: "社交媒体" },
+  { value: "community", label: "社群" },
 ];
 
 const SOURCE_LABEL: Record<string, string> = {
