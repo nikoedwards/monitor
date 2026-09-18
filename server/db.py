@@ -572,7 +572,7 @@ CREATE INDEX IF NOT EXISTS idx_li_activities_profile ON linkedin_activities(prof
 """
 
 
-_DB_BUSY_TIMEOUT_MS = max(5_000, int(os.environ.get("MONITOR_DB_BUSY_TIMEOUT_MS", "30_000")))
+_DB_BUSY_TIMEOUT_MS = max(1_000, int(os.environ.get("MONITOR_DB_BUSY_TIMEOUT_MS", "5_000")))
 _DB_LOCK_RETRIES = max(1, int(os.environ.get("MONITOR_DB_LOCK_RETRIES", "6")))
 
 
