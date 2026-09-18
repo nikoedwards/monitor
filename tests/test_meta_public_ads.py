@@ -31,4 +31,5 @@ def test_meta_public_ssr_parser_and_payload():
     assert payload["external_id"] == "brand-1:123456"
     assert payload["active_status"] == "active"
     assert payload["metrics"]["thumbnail_url"] == "https://example.com/image.jpg"
+    assert payload["raw"]["thumbnail_url"] == "https://example.com/image.jpg"
     assert payload["metrics"]["ad_creative_link_urls"] == ["https://example.com/product"]

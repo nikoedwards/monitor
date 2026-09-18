@@ -856,7 +856,13 @@ def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
     stop_at = _meta_timestamp(ad.get("end_date"))
     is_active = bool(ad.get("is_active"))
     platforms = ad.get("publisher_platform") or snapshot.get("publisher_platform") or []
-    raw = {**ad, "collection_method": "meta_ad_library_public_ssr", "search_query": query}
+    raw = {
+        **ad,
+        "collection_method": "meta_ad_library_public_ssr",
+        "search_query": query,
+        "thumbnail_url": images[0] if images else None,
+        "video_url": videos[0] if videos else None,
+    }
     metrics = {
         "publisher_platforms": platforms,
         "ad_creative_link_urls": links,
