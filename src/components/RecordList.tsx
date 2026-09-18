@@ -63,6 +63,20 @@ function textValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function recordThumbnail(record: RecordItem): string | undefined {
+  if (record.channel !== "social" && record.channel !== "creators" && record.data_type !== "creator_post" && record.data_type !== "social_post") return undefined;
+  const metrics = record.metrics || {};
+  const raw = record.raw || {};
+  const keys = ["thumbnail_url", "cover_url", "image_url", "media_url", "display_url", "display_uri", "thumbnail_src"];
+  if (record.data_type === "social_post") keys.push("avatar_url");
+  for (const key of keys) {
+    const value = metrics[key] ?? raw[key];
+    const normalized = textValue(value);
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
 function collectionReason(record: RecordItem): string | undefined {
   const raw = record.raw || {};
   const query = textValue(raw.query);
@@ -217,7 +231,7 @@ function SentimentBadge({ record }: { record: RecordItem }) {
 
 function SocialThumbnail({ record }: { record: RecordItem }) {
   const [failed, setFailed] = useState(false);
-  const thumbnail = textValue(record.metrics?.thumbnail_url);
+  const thumbnail = recordThumbnail(record);
   const platform = record.platform || "social";
   const platformLabel = SOCIAL_PLATFORM_LABEL[platform] || platform;
   const instagramReel = platform === "instagram"
@@ -237,7 +251,7 @@ function SocialThumbnail({ record }: { record: RecordItem }) {
           src={thumbnail}
           alt={record.title ? `${record.title} 封面` : `${platformLabel} 内容封面`}
           loading="lazy"
-          referrerPolicy="no-referrer"
+          referrerPolicy="origin"
           onError={() => setFailed(true)}
           className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
         />
