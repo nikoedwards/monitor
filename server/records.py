@@ -155,10 +155,26 @@ def insert_record_if_new(conn: sqlite3.Connection, payload: dict) -> dict | None
     source_id = payload.get("source_id")
     if external_id:
         existing = conn.execute(
-            "SELECT id FROM records WHERE source_id = ? AND external_id = ?",
+            "SELECT id, metrics_json FROM records WHERE source_id = ? AND external_id = ?",
             (source_id, external_id),
         ).fetchone()
         if existing:
+            # A record may predate thumbnail extraction.  Refresh only the
+            # missing media field when a later sync has a usable cover, while
+            # preserving the immutable content and dedupe semantics.
+            incoming_metrics = payload.get("metrics") or {}
+            thumbnail = incoming_metrics.get("thumbnail_url") or incoming_metrics.get("cover_url")
+            if thumbnail:
+                try:
+                    stored_metrics = json.loads(existing["metrics_json"] or "{}")
+                except (TypeError, ValueError):
+                    stored_metrics = {}
+                if not stored_metrics.get("thumbnail_url"):
+                    stored_metrics["thumbnail_url"] = thumbnail
+                    conn.execute(
+                        "UPDATE records SET metrics_json = ? WHERE id = ?",
+                        (json.dumps(stored_metrics, ensure_ascii=False), existing["id"]),
+                    )
             return None
     return insert_record(conn, payload)
 

@@ -44,6 +44,75 @@ def _first(d: dict, *keys):
     return None
 
 
+def _url(value) -> str:
+    """Return a usable image URL from the provider's loose image shapes."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("url", "src", "href"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return ""
+
+
+def _thumbnail(item: dict) -> str:
+    """Extract post media from Instagram/TikTok/X response variants.
+
+    Aggregator responses are not consistent across platforms or API versions:
+    some return a flat ``display_url``/``thumbnail_url``, while Instagram may
+    nest candidates under ``image_versions2`` or ``carousel_media``.  Keep the
+    extraction defensive so a schema change only removes a preview instead of
+    dropping the whole post.
+    """
+    direct = _first(
+        item,
+        "thumbnail_url", "thumbnailUrl", "thumbnail_src", "thumbnailSrc",
+        "cover_url", "coverUrl", "display_url", "displayUrl", "display_uri",
+        "displayUri", "image_url", "imageUrl", "photo_url", "photoUrl",
+        "media_url", "mediaUrl", "thumbnail", "image", "cover", "poster",
+    )
+    found = _url(direct)
+    if found:
+        return found
+
+    for container in (
+        item.get("image_versions2"),
+        item.get("images"),
+        item.get("thumbnails"),
+        item.get("thumbnail_resources"),
+        item.get("thumbnailResources"),
+        item.get("display_resources"),
+        item.get("displayResources"),
+        item.get("video_versions"),
+    ):
+        if isinstance(container, dict):
+            candidates = container.get("candidates") or container.get("items") or []
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    found = _url(candidate)
+                    if found:
+                        return found
+            found = _url(container)
+            if found:
+                return found
+        elif isinstance(container, list):
+            for candidate in container:
+                found = _url(candidate)
+                if found:
+                    return found
+
+    carousel = item.get("carousel_media") or item.get("carouselMedia") or []
+    if isinstance(carousel, list):
+        for media in carousel:
+            if not isinstance(media, dict):
+                continue
+            found = _thumbnail(media)
+            if found:
+                return found
+    return ""
+
+
 class ThirdPartyCreatorProvider(CreatorProvider):
     """Aggregator-backed provider for platforms without a free official API."""
 
@@ -83,6 +152,8 @@ class ThirdPartyCreatorProvider(CreatorProvider):
         if not external_id:
             return None
         author = clean_text(str(_first(item, "username", "nickname", "author_name", "screen_name") or ""))
+        thumbnail_url = _thumbnail(item)
+        avatar_url = _url(_first(item, "avatar_url", "avatarUrl", "profile_pic_url", "profilePicUrl", "author_avatar"))
         return CreatorPost(
             platform=self.platform,
             external_id=external_id,
@@ -91,6 +162,8 @@ class ThirdPartyCreatorProvider(CreatorProvider):
             body=clean_text(str(_first(item, "caption", "desc", "text", "title") or "")),
             author=author,
             author_handle=clean_text(str(_first(item, "username", "screen_name", "unique_id") or "")).lower(),
+            avatar_url=avatar_url,
+            thumbnail_url=thumbnail_url,
             occurred_at=_first(item, "created_at", "create_time", "taken_at") or utc_now(),
             views=_to_int(_first(item, "play_count", "view_count", "views")),
             likes=_to_int(_first(item, "like_count", "digg_count", "likes", "favorite_count")),
