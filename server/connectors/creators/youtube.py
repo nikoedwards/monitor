@@ -76,7 +76,18 @@ class YouTubeProvider(CreatorProvider):
                 author=clean_text(snippet.get("channelTitle")),
                 author_handle=channel_id,
                 author_url=f"https://www.youtube.com/channel/{channel_id}" if channel_id else "",
+                # YouTube exposes the video preview in ``snippet.thumbnails``.
+                # Prefer the largest available rendition so the content card
+                # does not fall back to a blank cover.
                 avatar_url=((snippet.get("thumbnails", {}) or {}).get("default", {}) or {}).get("url", ""),
+                thumbnail_url=next(
+                    (
+                        ((snippet.get("thumbnails", {}) or {}).get(name, {}) or {}).get("url", "")
+                        for name in ("maxres", "standard", "high", "medium", "default")
+                        if ((snippet.get("thumbnails", {}) or {}).get(name, {}) or {}).get("url")
+                    ),
+                    "",
+                ),
                 occurred_at=snippet.get("publishedAt") or utc_now(),
                 raw={"query": query, "channel_id": channel_id},
             ))

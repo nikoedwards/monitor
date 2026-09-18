@@ -294,7 +294,7 @@ export default function Creators() {
               subtitle={selectedProduct ? "按产品归因筛选后的真实采集内容" : "按时间倒序的真实采集内容"}
               action={<Input placeholder="搜索关键词 / 达人…" value={query} onChange={(e) => setQuery(e.target.value)} className="w-56" />}
             />
-            <RecordList records={records} emptyHint="调整平台 / 关键词，或先发起一次采集。" />
+            <RecordList records={records} variant="social-cards" emptyHint="调整平台 / 关键词，或先发起一次采集。" />
           </Card>
         </>
       )}

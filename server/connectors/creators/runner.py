@@ -50,6 +50,9 @@ def _payload(brand: dict, post: CreatorPost, collab: dict, source_id: str) -> di
             "author_handle": post.author_handle,
             "author_url": post.author_url,
             "avatar_url": post.avatar_url,
+            "thumbnail_url": post.thumbnail_url,
+            # Keep a stable alias for clients that call the post image a cover.
+            "cover_url": post.thumbnail_url,
             "is_collab": collab["is_collab"],
             "is_sponsored": collab["is_sponsored"],
             "collab_type": collab["collab_type"],

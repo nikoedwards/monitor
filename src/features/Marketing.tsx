@@ -2,20 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
-import { Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
+import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
 import { MonitorStatus } from "../components/MonitorStatus";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { SmartSummary } from "../components/SmartSummary";
-import { useMarketingSummary, useRecords } from "../lib/hooks";
+import { useAds, useAdsSummary, useMarketingSummary, useRecords } from "../lib/hooks";
+import type { MarketingAd, MarketingAdsSummary } from "../lib/api";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
 import { CHANNEL_LABEL, fmtDate, fmtNum } from "../lib/format";
 
 const CHANNELS = [
-  { value: "media", label: "媒体公关" },
   { value: "ads", label: "广告投放" },
   { value: "creators", label: "红人达人" },
-  { value: "community", label: "社群" },
+  { value: "media", label: "媒体公关" },
   { value: "social", label: "社交媒体" },
+  { value: "community", label: "社群" },
 ];
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -138,20 +139,22 @@ export default function Marketing() {
     });
   };
 
+  const isAds = view === "channel" && channel === "ads";
+  const selectedSection = view === "overview" ? "overview" : channel;
+  if (isAds) {
+    return <AdsChannel brandId={brandId} range={range} selectedSection={selectedSection} onSectionChange={(value) => {
+      if (value === "overview") {
+        setView("overview");
+      } else {
+        setChannel(value);
+        setView("channel");
+      }
+    }} />;
+  }
   if (isLoading || !summary) return <Spinner />;
 
   const channelName = CHANNEL_LABEL[channel] || channel;
   const isCommunity = view === "channel" && channel === "community";
-  const isSocial = view === "channel" && channel === "social";
-  const selectedSection = view === "overview" ? "overview" : channel;
-  const socialPlatformOptions = [
-    { value: "all", label: "全部" },
-    ...(summary.by_platform || []).map((item: { platform: string }) => ({
-      value: item.platform,
-      label: PLATFORM_LABEL[item.platform] || item.platform,
-    })),
-  ];
-  const selectedSocialPlatformLabel = PLATFORM_LABEL[socialPlatform] || socialPlatform;
   const subchannelCount = (summary.by_subchannel || []).reduce((acc: number, g: any) => acc + (g.subchannels?.length || 0), 0);
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
 
@@ -311,38 +314,10 @@ export default function Marketing() {
         <SmartSummary brandId={brandId} dimension="marketing" channel={activeChannel} range={range} />
       </Card>
 
-      <div ref={contentStreamRef}>
-        <Card>
-          <SectionTitle
-            title={selectedPublication ? `${selectedPublication.name} 收录文章` : view === "channel" ? `${channelName}内容流` : "营销内容流"}
-            subtitle={selectedPublication
-              ? `当前时间范围内共收录 ${fmtNum(selectedPublicationTotal)} 篇文章`
-              : isCommunity
-                ? "勾选上方来源可在此显示/隐藏对应内容"
-                : isSocial && socialPlatform !== "all"
-                  ? `当前仅显示 ${selectedSocialPlatformLabel} 的真实采集内容`
-                  : "按渠道筛选的真实采集内容"}
-            action={selectedPublication
-              ? <Button size="sm" onClick={() => setSelectedPublication(null)}>清除筛选</Button>
-              : isSocial
-                ? <SegmentGroup value={socialPlatform} options={socialPlatformOptions} onChange={setSocialPlatform} />
-                : undefined}
-          />
-          {recordsLoading ? (
-            <Spinner />
-          ) : (
-            <RecordList
-              records={shownRecords}
-              variant={isSocial ? "social-cards" : "list"}
-              emptyHint={selectedPublication
-                ? "当前时间范围内暂无该媒体的收录文章。"
-                : isSocial && socialPlatform !== "all"
-                  ? `当前时间范围内暂无 ${selectedSocialPlatformLabel} 内容。`
-                  : "在数据源页发起媒体 / 广告 / 红人 / 社群 / 社媒账号采集后查看。"}
-            />
-          )}
-        </Card>
-      </div>
+      <Card>
+        <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
+        <RecordList records={shownRecords} variant={channel === "social" || channel === "creators" ? "social-cards" : "list"} emptyHint="在数据源页发起媒体 / 广告 / 红人 / 社群采集后查看。" />
+      </Card>
 
       <PublicationDetailModal
         open={publicationDetailOpen}
@@ -543,41 +518,285 @@ function CommunityBreakdown({ groups, hidden, onToggle }: { groups: SubGroup[]; 
   );
 }
 
-type SourceBreakdownItem = { source_id?: string; platform?: string; total: number };
-
-function SourceBreakdown({
-  sources,
-  kind = "source",
-}: {
-  sources: SourceBreakdownItem[];
-  kind?: "source" | "platform";
-}) {
+function SourceBreakdown({ sources }: { sources: { source_id: string; total: number }[] }) {
   if (!sources.length) {
-    return (
-      <EmptyState
-        title={kind === "platform" ? "暂无平台数据" : "暂无数据源"}
-        hint="该渠道尚未采集到数据，配置链接或手动刷新后查看。"
-      />
-    );
+    return <EmptyState title="暂无数据源" hint="该渠道尚未采集到数据，配置链接或手动刷新后查看。" />;
   }
   const max = Math.max(...sources.map((s) => s.total), 1);
   return (
     <div className="space-y-2.5">
-      {sources.map((s) => {
-        const key = kind === "platform" ? s.platform || "unknown" : s.source_id || "unknown";
-        const label = kind === "platform" ? PLATFORM_LABEL[key] || key : SOURCE_LABEL[key] || key;
-        return (
-          <div key={key}>
-            <div className="flex items-center justify-between text-[13px] mb-1">
-              <span style={{ color: "var(--ink)" }}>{label}</span>
-              <span className="tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(s.total)}</span>
-            </div>
-            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-              <div className="h-full rounded-full" style={{ width: `${(s.total / max) * 100}%`, background: "var(--accent)" }} />
-            </div>
+      {sources.map((s) => (
+        <div key={s.source_id}>
+          <div className="flex items-center justify-between text-[13px] mb-1">
+            <span style={{ color: "var(--ink)" }}>{SOURCE_LABEL[s.source_id] || s.source_id}</span>
+            <span className="tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(s.total)}</span>
           </div>
-        );
-      })}
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+            <div className="h-full rounded-full" style={{ width: `${(s.total / max) * 100}%`, background: "var(--accent)" }} />
+          </div>
+        </div>
+      ))}
     </div>
   );
+}
+
+type AdsChannelProps = {
+  brandId?: string;
+  range: ReturnType<typeof useTimeRange>[0];
+  selectedSection: string;
+  onSectionChange: (value: string) => void;
+};
+
+const AD_STATUS_OPTIONS = [
+  { value: "all", label: "全部" },
+  { value: "active", label: "活跃" },
+  { value: "new", label: "新发现" },
+  { value: "stopped", label: "已停止" },
+];
+
+const AD_SOURCE_LABEL: Record<string, string> = {
+  meta: "Meta Ad Library",
+  meta_ads: "Meta Ad Library",
+  google: "Google Ads Transparency",
+  google_ads: "Google Ads Transparency",
+  manual: "手动导入",
+};
+
+function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsChannelProps) {
+  const [status, setStatus] = useState("all");
+  const [source, setSource] = useState("all");
+  const [sort, setSort] = useState<"duration" | "recent" | "score">("duration");
+  const [selectedAd, setSelectedAd] = useState<MarketingAd | null>(null);
+  const { data: summary, isLoading: summaryLoading } = useAdsSummary(brandId, range);
+  const { data: fetchedAds = [], isLoading: adsLoading } = useAds(brandId, range, {
+    status: status === "all" ? undefined : status,
+    source: source === "all" ? undefined : source,
+    sort,
+    limit: 60,
+  });
+
+  const ads = [...fetchedAds].sort((a, b) => {
+    if (sort === "recent") return dateValue(b.last_seen || b.delivery_start) - dateValue(a.last_seen || a.delivery_start);
+    if (sort === "score") return (b.persistence_score || 0) - (a.persistence_score || 0);
+    return (b.duration_days ?? b.active_days ?? 0) - (a.duration_days ?? a.active_days ?? 0);
+  });
+  const safeSummary: MarketingAdsSummary = summary || {};
+  const sourceOptions = (safeSummary.by_source || []).map((item) => {
+    const value = item.source || item.source_id || "unknown";
+    return { value, label: AD_SOURCE_LABEL[value] || value };
+  });
+  const trend = (safeSummary.trend || []).map((point) => ({
+    date: point.date,
+    active: point.active || 0,
+    total: point.total || 0,
+    new: point.new || 0,
+    stopped: point.stopped || 0,
+  }));
+  const hasLifecycleTrend = (safeSummary.trend || []).some((point) => point.new !== undefined || point.stopped !== undefined);
+  const isLoading = summaryLoading || adsLoading;
+
+  return (
+    <div className="space-y-6">
+      <SectionTitle
+        title="广告投放监控"
+        subtitle="跟踪公开广告库中的创意、投放周期与变化信号；持续时长仅作为投放稳定度代理"
+        action={<div className="flex flex-wrap items-center gap-2"><TimeRangePicker /><MonitorStatus brandId={brandId} dimension="marketing" /></div>}
+      />
+
+      <div className="flex flex-wrap items-center gap-3">
+        <SegmentGroup
+          value={selectedSection as any}
+          options={[{ value: "overview", label: "总览" }, ...CHANNELS]}
+          onChange={onSectionChange}
+        />
+      </div>
+
+      {isLoading && !summary && !ads.length ? <Spinner /> : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <StatCard label="活跃广告" value={fmtNum(safeSummary.active_ads ?? countAds(ads, "active"))} tone="accent" hint="最近一次快照仍可见" />
+            <StatCard label="新发现" value={fmtNum(safeSummary.new_ads ?? countAds(ads, "new"))} />
+            <StatCard label="平均持续" value={`${Math.round(safeSummary.avg_duration_days ?? safeSummary.avg_lifetime_days ?? averageDuration(ads))} 天`} hint="同一广告的首次/最近发现" />
+            <StatCard label="投放稳定度" value={`${Math.round(safeSummary.persistence_score ?? averageScore(ads))}`} hint="0–100，持续性弱代理" />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <Card className="lg:col-span-2">
+              <SectionTitle title="广告活跃趋势" subtitle="按采集快照记录的活跃、新发现与停止" hint="广告库通常不提供竞品转化数据，趋势用于判断投放节奏，不代表 ROI。" />
+              {trend.length ? (
+                <TrendChart data={trend} keys={hasLifecycleTrend ? [
+                  { key: "active", name: "活跃", color: "var(--accent)" },
+                  { key: "new", name: "新发现", color: "var(--violet)" },
+                  { key: "stopped", name: "停止", color: "var(--danger)" },
+                ] : [
+                  { key: "active", name: "活跃", color: "var(--accent)" },
+                  { key: "total", name: "快照总量", color: "var(--violet)" },
+                ]} />
+              ) : <EmptyState title="暂无趋势数据" hint="完成至少一次广告库采集后，系统会在这里记录变化。" />}
+            </Card>
+            <Card>
+              <SectionTitle title="变化提醒" subtitle="需要优先查看的广告事件" />
+              {safeSummary.alerts?.length ? (
+                <div className="space-y-3">
+                  {safeSummary.alerts.slice(0, 5).map((alert, index) => (
+                    <div key={alert.id || `${alert.type}-${index}`} className="rounded-md p-3" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+                      <div className="flex items-start justify-between gap-2">
+                        <Badge tone={alert.type.toLowerCase().includes("stop") ? "warning" : "accent"}>{alert.type}</Badge>
+                        {alert.detected_at && <span className="text-[11px] shrink-0" style={{ color: "var(--mute)" }}>{formatDate(alert.detected_at)}</span>}
+                      </div>
+                      <div className="text-[13px] font-medium mt-2" style={{ color: "var(--ink)" }}>{alert.title}</div>
+                      {alert.detail && <div className="text-[12px] mt-1 leading-relaxed" style={{ color: "var(--mute)" }}>{alert.detail}</div>}
+                    </div>
+                  ))}
+                </div>
+              ) : <EmptyState title="暂无异常变化" hint="新广告、停止投放或素材变化会在这里提示。" />}
+            </Card>
+          </div>
+
+          <Card>
+            <SectionTitle
+              title="广告素材"
+              subtitle="按广告主、素材版本和投放周期查看公开广告快照"
+              action={<div className="flex flex-wrap items-center gap-2">
+                <SegmentGroup value={status as any} options={AD_STATUS_OPTIONS as any} onChange={setStatus} />
+                <select value={source} onChange={(event) => setSource(event.target.value)} className="h-7 px-2 text-[12px] rounded-md" style={{ background: "var(--bg-soft)", color: "var(--body)", border: "1px solid var(--hairline-strong)" }}>
+                  <option value="all">全部来源</option>
+                  {sourceOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+                <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)} className="h-7 px-2 text-[12px] rounded-md" style={{ background: "var(--bg-soft)", color: "var(--body)", border: "1px solid var(--hairline-strong)" }}>
+                  <option value="duration">按持续时间</option>
+                  <option value="recent">按最近发现</option>
+                  <option value="score">按稳定度</option>
+                </select>
+              </div>}
+            />
+            {ads.length ? (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                {ads.map((ad) => <AdCard key={ad.id || ad.source_ad_id} ad={ad} onOpen={() => setSelectedAd(ad)} />)}
+              </div>
+            ) : (
+              <EmptyState title="暂无广告数据" hint="请先在数据源页配置 Meta Ad Library 或 Google Ads Transparency 的广告主/关键词，再发起采集。" />
+            )}
+          </Card>
+        </>
+      )}
+
+      <AdDetailModal ad={selectedAd} onClose={() => setSelectedAd(null)} />
+    </div>
+  );
+}
+
+function AdCard({ ad, onOpen }: { ad: MarketingAd; onOpen: () => void }) {
+  const advertiser = ad.advertiser_name || ad.advertiser || ad.page_name || "未知广告主";
+  const status = normalizeAdStatus(ad.status || ad.lifecycle);
+  const duration = ad.duration_days ?? ad.active_days;
+  const score = ad.persistence_score;
+  // Snapshot links are webpages on Meta/Google, not image URLs; only use a
+  // media/thumbnail URL in an <img> and keep the source link below.
+  const preview = ad.thumbnail_url || ad.media_url;
+  return (
+    <button onClick={onOpen} className="text-left rounded-lg p-3 transition-colors cursor-pointer w-full" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+      <div className="flex gap-3">
+        <div className="w-24 h-20 rounded-md shrink-0 overflow-hidden flex items-center justify-center" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
+          {preview ? <img src={preview} alt="" className="w-full h-full object-cover" loading="lazy" /> : <span className="text-[11px]" style={{ color: "var(--mute)" }}>无预览</span>}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="truncate text-[13px] font-medium" style={{ color: "var(--ink)" }}>{advertiser}</div>
+            <Badge tone={status === "active" ? "positive" : status === "stopped" ? "warning" : "neutral"}>{adStatusLabel(status)}</Badge>
+          </div>
+          <div className="text-[12px] mt-1 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>{ad.title || ad.body || ad.description || "暂无文案"}</div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] mt-2" style={{ color: "var(--mute)" }}>
+            <span>{AD_SOURCE_LABEL[ad.source || ""] || ad.source || "广告库"}</span>
+            {duration !== undefined && <span>持续 {duration} 天</span>}
+            {score !== undefined && <span>稳定度 {Math.round(score)}</span>}
+            {(ad.countries?.length || ad.country) && <span>{ad.countries?.length ? `${ad.countries.length} 个地区` : ad.country}</span>}
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-2 mt-3 pt-2 text-[11px]" style={{ borderTop: "1px solid var(--hairline)", color: "var(--mute)" }}>
+        <span>{ad.first_seen ? `首次 ${formatDate(ad.first_seen)}` : "首次发现待确认"}</span>
+        <span>{ad.last_seen ? `最近 ${formatDate(ad.last_seen)}` : "暂无最近时间"}</span>
+      </div>
+    </button>
+  );
+}
+
+function AdDetailModal({ ad, onClose }: { ad: MarketingAd | null; onClose: () => void }) {
+  if (!ad) return null;
+  const advertiser = ad.advertiser_name || ad.advertiser || ad.page_name || "未知广告主";
+  const score = ad.persistence_score;
+  const duration = ad.duration_days ?? ad.active_days;
+  return (
+    <Modal open={!!ad} onClose={onClose} title="广告详情" width={760}>
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[16px] font-semibold" style={{ color: "var(--ink)" }}>{advertiser}</div>
+            <div className="text-[12px] mt-1" style={{ color: "var(--mute)" }}>{AD_SOURCE_LABEL[ad.source || ""] || ad.source || "公开广告库"} · {ad.source_ad_id || ad.id}</div>
+          </div>
+          <Badge tone={normalizeAdStatus(ad.status || ad.lifecycle) === "active" ? "positive" : "warning"}>{adStatusLabel(normalizeAdStatus(ad.status || ad.lifecycle))}</Badge>
+        </div>
+        {(ad.thumbnail_url || ad.media_url) && <img src={ad.thumbnail_url || ad.media_url} alt="广告素材预览" className="w-full max-h-64 object-contain rounded-md" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }} />}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <MiniMetric label="持续天数" value={duration !== undefined ? `${duration} 天` : "—"} />
+          <MiniMetric label="投放稳定度" value={score !== undefined ? `${Math.round(score)}/100` : "—"} />
+          <MiniMetric label="创意变体" value={ad.variants !== undefined ? String(ad.variants) : "—"} />
+          <MiniMetric label="覆盖平台" value={ad.platforms?.length ? String(ad.platforms.length) : ad.platform || "—"} />
+        </div>
+        <div className="rounded-md p-3 text-[13px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--body)" }}>
+          {ad.body || ad.description || ad.title || "暂无广告文案"}
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[12px]" style={{ color: "var(--mute)" }}>
+          <div><span style={{ color: "var(--body)" }}>首次发现：</span>{formatDate(ad.first_seen)}</div>
+          <div><span style={{ color: "var(--body)" }}>最近发现：</span>{formatDate(ad.last_seen)}</div>
+          <div><span style={{ color: "var(--body)" }}>投放开始：</span>{formatDate(ad.delivery_start)}</div>
+          <div><span style={{ color: "var(--body)" }}>投放结束：</span>{formatDate(ad.delivery_stop)}</div>
+        </div>
+        {ad.landing_url && <a href={ad.landing_url} target="_blank" rel="noreferrer" className="text-[13px] underline break-all" style={{ color: "var(--accent)" }}>{ad.landing_url}</a>}
+        {(ad.snapshot_url || ad.creative_url) && <div><a href={ad.snapshot_url || ad.creative_url} target="_blank" rel="noreferrer" className="text-[13px] underline" style={{ color: "var(--accent)" }}>打开广告库原始快照 ↗</a></div>}
+      </div>
+    </Modal>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-md p-2.5" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}><div className="text-[11px]" style={{ color: "var(--mute)" }}>{label}</div><div className="text-[15px] font-semibold mt-0.5" style={{ color: "var(--ink)" }}>{value}</div></div>;
+}
+
+function countAds(ads: MarketingAd[], status: string) {
+  return ads.filter((ad) => normalizeAdStatus(ad.status || ad.lifecycle) === status).length;
+}
+
+function averageDuration(ads: MarketingAd[]) {
+  const values = ads.map((ad) => ad.duration_days ?? ad.active_days).filter((value): value is number => typeof value === "number");
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function averageScore(ads: MarketingAd[]) {
+  const values = ads.map((ad) => ad.persistence_score).filter((value): value is number => typeof value === "number");
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function normalizeAdStatus(value?: string) {
+  const normalized = (value || "active").toLowerCase();
+  if (normalized.includes("stop") || normalized.includes("pause") || normalized.includes("inactive")) return "stopped";
+  if (normalized.includes("new")) return "new";
+  return "active";
+}
+
+function adStatusLabel(value: string) {
+  return value === "stopped" ? "已停止" : value === "new" ? "新发现" : "活跃";
+}
+
+function dateValue(value?: string) {
+  if (!value) return 0;
+  const date = new Date(value).getTime();
+  return Number.isFinite(date) ? date : 0;
+}
+
+function formatDate(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value.slice(0, 10) : date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
 }

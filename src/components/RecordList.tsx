@@ -12,30 +12,6 @@ const TIER_LABEL: Record<string, string> = {
   unknown: "未知",
 };
 
-const COLLECTION_SOURCE_LABEL: Record<string, string> = {
-  google_news: "Google News（RSS 定时采集）",
-  google_web_search: "Google 普通网页搜索补漏（定时任务）",
-  reddit_search: "Reddit 采集",
-  community_site: "社区站点采集",
-  meta_ads: "Meta 广告采集",
-  youtube_search: "YouTube 搜索采集",
-  social_accounts: "官方社媒账号采集",
-  app_store_reviews: "App Store 评论采集",
-  instagram_listening: "Instagram 红人采集",
-  tiktok_listening: "TikTok 红人采集",
-  x_search: "X 红人采集",
-  manual_csv: "手动导入",
-};
-
-const VOICE_SOURCE_LABEL: Record<string, string> = {
-  sales_reviews: "销售渠道评论",
-  marketing_videos: "营销视频",
-  social_posts_comments: "社交帖子与评论",
-  creator_comments: "红人视频与评论",
-  app_reviews: "应用商店评论",
-  manual_feedback: "手动反馈",
-};
-
 const SOCIAL_PLATFORM_LABEL: Record<string, string> = {
   youtube: "YouTube",
   instagram: "Instagram",
@@ -53,54 +29,6 @@ const SOCIAL_PLATFORM_BACKGROUND: Record<string, string> = {
   facebook: "linear-gradient(135deg, #1877f2, #0b4aa2)",
   linkedin: "linear-gradient(135deg, #0a66c2, #06427d)",
 };
-
-function collectionSourceLabel(sourceId?: string): string | undefined {
-  if (!sourceId) return undefined;
-  return COLLECTION_SOURCE_LABEL[sourceId] || sourceId;
-}
-
-function textValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function collectionReason(record: RecordItem): string | undefined {
-  const raw = record.raw || {};
-  const query = textValue(raw.query);
-  if (record.source_id === "google_news") {
-    const matchedIn = textValue(raw.matched_in);
-    const matchedText = textValue(raw.matched_text);
-    const matchedQuery = textValue(raw.matched_query) || query;
-    if (matchedText) {
-      return `收录原因：Google News RSS 使用关键词「${query || matchedQuery}」发现，并在${matchedIn === "title" ? "标题" : "摘要"}命中「${matchedText}」后通过品牌相关性校验。`;
-    }
-    return matchedQuery
-      ? `收录原因：Google News RSS 使用关键词「${matchedQuery}」发现；该历史记录已按当前标题/摘要品牌关键词规则复核通过。`
-      : "收录原因：Google News RSS 历史记录；已按当前标题/摘要品牌关键词规则复核通过。";
-  }
-  if (record.source_id === "google_web_search") {
-    return query
-      ? `收录原因：定时普通网页搜索补漏以关键词「${query}」发现，并按任务规则核验后收录。`
-      : "收录原因：由定时普通网页搜索补漏任务核验后收录；该历史记录未保存触发关键词。";
-  }
-  if (record.source_id === "reddit_search") {
-    const matchedIn = textValue(raw.matched_in);
-    const matchedText = textValue(raw.matched_text);
-    const subreddit = textValue(raw.subreddit);
-    const scope = textValue(raw.scope);
-    if (query) {
-      const evidence = matchedText
-        ? `，并在${matchedIn === "title" ? "标题" : "正文"}命中「${matchedText}」`
-        : "；历史记录已按当前标题/正文关键词规则复核";
-      return `收录原因：Reddit 使用品牌主名称「${query}」进行全站搜索${evidence}后收录。`;
-    }
-    if (subreddit || scope?.startsWith("subreddit:")) {
-      const name = subreddit || scope?.slice("subreddit:".length);
-      return `收录原因：来自已配置的 Reddit 官方大本营 r/${name}；按发布时间顺序直接收录，不要求帖子命中关键词。`;
-    }
-    return "收录原因：Reddit 社群采集；该历史记录未保存触发关键词。";
-  }
-  return record.source_id ? `收录原因：${collectionSourceLabel(record.source_id) || record.source_id}` : undefined;
-}
 
 function hostOf(url?: string): string {
   if (!url) return "";
@@ -134,6 +62,121 @@ function SourceIcon({ url, platform, domain }: { url?: string; platform?: string
     >
       {letter}
     </span>
+  );
+}
+
+function recordThumbnail(record: RecordItem): string {
+  // Creator connectors use thumbnail_url for the post itself.  Keep the
+  // aliases here so older records and providers that call it a cover/image
+  // continue to render after the backend starts returning the normalized key.
+  if (record.channel !== "social" && record.channel !== "creators" && record.data_type !== "creator_post" && record.data_type !== "social_post") return "";
+  const metrics = record.metrics || {};
+  const raw = record.raw || {};
+  const keys = ["thumbnail_url", "cover_url", "image_url", "media_url", "display_url", "display_uri", "thumbnail_src"];
+  // Older social collectors temporarily stored the post cover in avatar_url.
+  // Keep that compatibility path for social_post only; creator_post avatars
+  // are real profile images and should never be stretched as a cover.
+  if (record.data_type === "social_post") keys.push("avatar_url");
+  for (const key of keys) {
+    const value = metrics[key] ?? raw[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function RecordThumbnail({ record }: { record: RecordItem }) {
+  const [failed, setFailed] = useState(false);
+  const url = recordThumbnail(record);
+  if (!url || failed) return null;
+  return (
+    <img
+      src={url}
+      alt=""
+      loading="lazy"
+      referrerPolicy="origin"
+      onError={() => setFailed(true)}
+      className="w-28 h-16 rounded object-cover shrink-0"
+      style={{ border: "1px solid var(--hairline)", background: "var(--bg-soft)" }}
+    />
+  );
+}
+
+function metricNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function SocialMeta({ metrics }: { metrics: Record<string, unknown> }) {
+  const parts: string[] = [];
+  const views = metricNumber(metrics.views);
+  const likes = metricNumber(metrics.likes);
+  const comments = metricNumber(metrics.comments);
+  const engagement = metricNumber(metrics.engagement);
+  const engagementRate = metricNumber(metrics.engagement_rate);
+  if (views !== undefined) parts.push(`播放 ${fmtNum(views)}`);
+  if (likes !== undefined) parts.push(`点赞 ${fmtNum(likes)}`);
+  if (comments !== undefined) parts.push(`评论 ${fmtNum(comments)}`);
+  if (engagement !== undefined) parts.push(`互动 ${fmtNum(engagement)}`);
+  if (engagementRate !== undefined) parts.push(`互动率 ${(engagementRate * 100).toFixed(2)}%`);
+  if (!parts.length) return null;
+  return <div className="flex items-center gap-2 mt-1.5 text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>{parts.join("  ·  ")}</div>;
+}
+
+function SocialThumbnail({ record }: { record: RecordItem }) {
+  const [failed, setFailed] = useState(false);
+  const thumbnail = recordThumbnail(record);
+  const platform = record.platform || "social";
+  const label = SOCIAL_PLATFORM_LABEL[platform] || platform;
+  const isReel = platform === "instagram" && (record.raw?.is_video === true || record.raw?.post_type === "clips");
+  const aspectClass = platform === "tiktok" || isReel ? "aspect-[9/16]" : platform === "instagram" ? "aspect-[4/5]" : "aspect-video";
+  const media = (
+    <div className={`relative overflow-hidden ${aspectClass}`} style={{ background: SOCIAL_PLATFORM_BACKGROUND[platform] || "linear-gradient(135deg, #475569, #0f172a)" }}>
+      {thumbnail && !failed ? (
+        <img
+          src={thumbnail}
+          alt={record.title ? `${record.title} 封面` : `${label} 内容封面`}
+          loading="lazy"
+          referrerPolicy="origin"
+          onError={() => setFailed(true)}
+          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+        />
+      ) : (
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
+          <span className="text-[30px] font-semibold tracking-tight">{label}</span>
+          <span className="mt-1 text-[12px] opacity-75">暂无可用封面</span>
+        </div>
+      )}
+      <span className="absolute left-3 top-3 rounded-md px-2 py-1 text-[11px] font-semibold" style={{ background: "rgba(0, 0, 0, 0.68)", color: "white", backdropFilter: "blur(6px)" }}>{label}</span>
+    </div>
+  );
+  if (!record.url) return media;
+  return <a href={record.url} target="_blank" rel="noreferrer" className="group block" aria-label={`打开 ${label} 原内容`}>{media}</a>;
+}
+
+function SocialRecordCard({ record }: { record: RecordItem }) {
+  const title = (record.title || record.body || "社交媒体内容").trim();
+  const body = (record.body || "").trim();
+  return (
+    <article className="panel overflow-hidden flex min-h-full flex-col">
+      <SocialThumbnail record={record} />
+      <div className="flex flex-1 flex-col p-4">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <SentimentBadge record={record} />
+          {record.intent && <span className="text-[12px]" style={{ color: "var(--mute)" }}>{record.intent}</span>}
+        </div>
+        <h3 className="line-clamp-2 text-[15px] font-semibold leading-snug" style={{ color: "var(--ink)" }}>
+          {record.url ? <a href={record.url} target="_blank" rel="noreferrer" className="hover:underline">{title}</a> : title}
+        </h3>
+        {body && body !== title && <p className="mt-2 line-clamp-3 text-[13px] leading-relaxed" style={{ color: "var(--body)" }}>{body}</p>}
+        {record.metrics && <SocialMeta metrics={record.metrics} />}
+        {record.topics.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-1.5">{record.topics.slice(0, 4).map((topic) => <span key={topic} className="rounded px-1.5 py-0.5 text-[11px]" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>#{topic}</span>)}</div>}
+        <div className="mt-auto flex items-center justify-between gap-3 pt-4 text-[12px]" style={{ color: "var(--mute)" }}>
+          <span className="truncate">{record.author || (record.metrics?.author_handle as string) || "官方账号"}</span>
+          <span className="shrink-0 whitespace-nowrap">{fmtDateTime(record.occurred_at)}</span>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -215,116 +258,22 @@ function SentimentBadge({ record }: { record: RecordItem }) {
   );
 }
 
-function SocialThumbnail({ record }: { record: RecordItem }) {
-  const [failed, setFailed] = useState(false);
-  const thumbnail = textValue(record.metrics?.thumbnail_url);
-  const platform = record.platform || "social";
-  const platformLabel = SOCIAL_PLATFORM_LABEL[platform] || platform;
-  const instagramReel = platform === "instagram"
-    && (record.raw?.is_video === true || record.raw?.post_type === "clips");
-  const aspectClass = platform === "tiktok" || instagramReel
-    ? "aspect-[9/16]"
-    : platform === "instagram"
-      ? "aspect-[4/5]"
-      : "aspect-video";
-  const media = (
-    <div
-      className={`relative overflow-hidden ${aspectClass}`}
-      style={{ background: SOCIAL_PLATFORM_BACKGROUND[platform] || "linear-gradient(135deg, #475569, #0f172a)" }}
-    >
-      {thumbnail && !failed ? (
-        <img
-          src={thumbnail}
-          alt={record.title ? `${record.title} 封面` : `${platformLabel} 内容封面`}
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          onError={() => setFailed(true)}
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-        />
-      ) : (
-        <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
-          <span className="text-[30px] font-semibold tracking-tight">{platformLabel}</span>
-          <span className="mt-1 text-[12px] opacity-75">暂无可用封面</span>
-        </div>
-      )}
-      <span
-        className="absolute left-3 top-3 rounded-md px-2 py-1 text-[11px] font-semibold"
-        style={{ background: "rgba(0, 0, 0, 0.68)", color: "white", backdropFilter: "blur(6px)" }}
-      >
-        {platformLabel}
-      </span>
-    </div>
-  );
-  if (!record.url) return media;
-  return (
-    <a href={record.url} target="_blank" rel="noreferrer" className="group block" aria-label={`打开 ${platformLabel} 原内容`}>
-      {media}
-    </a>
-  );
-}
-
-function SocialRecordCard({ record }: { record: RecordItem }) {
-  const title = (record.title || record.body || "社交媒体内容").trim();
-  const body = (record.body || "").trim();
-  const showBody = body && body !== title;
-  return (
-    <article className="panel mb-4 break-inside-avoid overflow-hidden flex flex-col">
-      <SocialThumbnail record={record} />
-      <div className="flex flex-1 flex-col p-4">
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <SentimentBadge record={record} />
-          {record.intent && <span className="text-[12px]" style={{ color: "var(--mute)" }}>{record.intent}</span>}
-        </div>
-        <h3 className="line-clamp-2 text-[15px] font-semibold leading-snug" style={{ color: "var(--ink)" }}>
-          {record.url ? (
-            <a href={record.url} target="_blank" rel="noreferrer" className="hover:underline">{title}</a>
-          ) : title}
-        </h3>
-        {showBody && <p className="mt-2 line-clamp-3 text-[13px] leading-relaxed" style={{ color: "var(--body)" }}>{body}</p>}
-        {record.metrics && <SocialMeta metrics={record.metrics} />}
-        {record.topics.length > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-1.5">
-            {record.topics.slice(0, 4).map((topic) => (
-              <span key={topic} className="rounded px-1.5 py-0.5 text-[11px]" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>#{topic}</span>
-            ))}
-          </div>
-        )}
-        <div className="mt-auto flex items-center justify-between gap-3 pt-4 text-[12px]" style={{ color: "var(--mute)" }}>
-          <span className="truncate">{record.author || (record.metrics?.author_handle as string) || "官方账号"}</span>
-          <span className="shrink-0 whitespace-nowrap">{fmtDateTime(record.occurred_at)}</span>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-export function RecordList({
-  records,
-  emptyHint,
-  variant = "list",
-}: {
-  records: RecordItem[];
-  emptyHint?: string;
-  variant?: "list" | "social-cards";
-}) {
+export function RecordList({ records, emptyHint, variant = "list" }: { records: RecordItem[]; emptyHint?: string; variant?: "list" | "social-cards" }) {
   if (!records.length) {
     return <EmptyState title="暂无数据" hint={emptyHint || "在数据源页发起一次采集，或手动录入后再查看。"} />;
   }
   if (variant === "social-cards") {
-    return (
-      <div className="columns-1 gap-4 md:columns-2 xl:columns-3">
-        {records.map((record) => <SocialRecordCard key={record.id} record={record} />)}
-      </div>
-    );
+    return <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">{records.map((record) => <SocialRecordCard key={record.id} record={record} />)}</div>;
   }
   return (
     <div className="space-y-2">
       {records.map((r) => {
         const isReply = r.data_type === "community_reply";
         return (
-        <div key={r.id} className="panel p-4" style={isReply ? { borderLeft: "2px solid var(--accent)" } : undefined}>
-          <div className="flex items-start gap-3">
+          <div key={r.id} className="panel p-4" style={isReply ? { borderLeft: "2px solid var(--accent)" } : undefined}>
+            <div className="flex items-start gap-3">
             <SourceIcon url={r.url} platform={r.platform} domain={(r.metrics?.publication_domain as string) || undefined} />
+            <RecordThumbnail record={r} />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap mb-1">
                 {isReply && <Badge tone="accent">回复</Badge>}

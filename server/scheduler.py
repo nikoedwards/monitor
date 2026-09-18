@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+import logging
 
 from .config import SCHEDULER_ENABLED, SCHEDULER_SECONDS, WEB_SCHEDULER_SECONDS
 from .connectors.base import run_collector
@@ -13,32 +13,8 @@ from .db import db
 from .util import today
 
 _started = False
+_start_lock = threading.Lock()
 logger = logging.getLogger(__name__)
-
-
-def _cadence_delta(cadence: str) -> timedelta:
-    value = (cadence or "daily").lower()
-    if value == "hourly":
-        return timedelta(hours=1)
-    if value == "weekly":
-        return timedelta(days=7)
-    return timedelta(days=1)
-
-
-def _collector_is_due(conn, source_id: str, brand_id: str, cadence: str, now: datetime) -> bool:
-    row = conn.execute(
-        "SELECT last_collect_at FROM source_brand_runs WHERE source_id = ? AND brand_id = ?",
-        (source_id, brand_id),
-    ).fetchone()
-    if not row or not row["last_collect_at"]:
-        return True
-    try:
-        last = datetime.fromisoformat(row["last_collect_at"].replace("Z", "+00:00"))
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return True
-    return now >= last.astimezone(timezone.utc) + _cadence_delta(cadence)
 
 
 def _run_due_collections() -> None:
@@ -56,8 +32,7 @@ def _run_due_collections() -> None:
                         continue
                     run_collector(conn, spec, brand)
             except Exception:
-                # run_collector already records errors per source; keep loop alive.
-                logger.exception("Collector failed for %s / %s", spec.id, brand.get("id"))
+                logger.exception("Scheduled collection failed: source=%s brand=%s", spec.id, brand.get("id"))
                 continue
 
 
@@ -86,7 +61,7 @@ def _run_due_sales() -> None:
             with db() as conn:
                 run_sales_collection(conn, brand)
         except Exception:
-            logger.exception("Sales collection failed for %s", brand.get("id"))
+            logger.exception("Scheduled sales collection failed: brand=%s", brand.get("id"))
             continue
 
 
@@ -164,12 +139,13 @@ def _run_due_web_snapshots() -> None:
                 elif monitor_is_due(monitor, "check", now):
                     check_monitor(conn, monitor)
         except Exception:
-            logger.exception("Web monitor scheduler failed for %s", monitor.get("id"))
+            logger.exception("Scheduled web snapshot failed: monitor=%s", monitor.get("id"))
             continue
 
 
 def _collection_loop() -> None:
     while True:
+        started = time.monotonic()
         try:
             _run_due_collections()
             _run_due_sales()
@@ -186,17 +162,28 @@ def _web_snapshot_loop() -> None:
         try:
             _run_due_web_snapshots()
         except Exception:
-            logger.exception("Web snapshot scheduler cycle failed")
-        time.sleep(max(30, WEB_SCHEDULER_SECONDS))
+            # Keep the daemon alive, but leave an actionable traceback in the
+            # Railway logs instead of making a failed scheduler look healthy.
+            logger.exception("Scheduler cycle failed")
+        finally:
+            logger.info("Scheduler cycle finished in %.1fs", time.monotonic() - started)
+        time.sleep(max(60, SCHEDULER_SECONDS))
 
 
 def start_scheduler() -> None:
     global _started
-    if _started or not SCHEDULER_ENABLED:
+    if not SCHEDULER_ENABLED:
+        logger.warning("Scheduler disabled by MONITOR_SCHEDULER=0")
         return
-    _started = True
-    for target, name in (
-        (_collection_loop, "monitor-collections"),
-        (_web_snapshot_loop, "monitor-web-snapshots"),
-    ):
-        threading.Thread(target=target, name=name, daemon=True).start()
+    with _start_lock:
+        if _started:
+            return
+        _started = True
+        try:
+            thread = threading.Thread(target=_loop, name="monitor-scheduler", daemon=True)
+            thread.start()
+        except RuntimeError:
+            # A thread creation failure should be visible; do not silently mark
+            # the service as healthy while all scheduled collection is stopped.
+            _started = False
+            logger.exception("Unable to start scheduler thread")

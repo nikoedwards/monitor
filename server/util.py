@@ -166,6 +166,13 @@ def parse_rss_datetime(value: str | None) -> str:
     if not value:
         return utc_now()
     try:
+        # Graph APIs commonly return ISO-8601 while RSS uses RFC-2822.
+        iso = str(value).replace("Z", "+00:00")
+        if "T" in iso:
+            parsed = datetime.fromisoformat(iso)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
         parsed = parsedate_to_datetime(value)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)

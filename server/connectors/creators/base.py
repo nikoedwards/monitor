@@ -48,6 +48,10 @@ class CreatorPost:
     author_handle: str = ""       # @handle / channel id (stable key)
     author_url: str = ""
     avatar_url: str = ""
+    # Preview image for the post/video itself.  This is intentionally separate
+    # from ``avatar_url`` (which identifies the creator) because third-party
+    # providers commonly return both values.
+    thumbnail_url: str = ""
     occurred_at: Optional[str] = None
     views: Optional[int] = None
     likes: Optional[int] = None

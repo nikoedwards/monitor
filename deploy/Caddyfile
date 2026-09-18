@@ -1,0 +1,6 @@
+# DOMAIN is read from the .env file by the Caddy container.
+# Point DNS for DOMAIN to this VPS before enabling the proxy profile.
+{$DOMAIN} {
+    encode gzip zstd
+    reverse_proxy monitor:8790
+}
