@@ -114,7 +114,16 @@ def spa(full_path: str):
 
 def main() -> None:
     print(f"Monitor Intelligence Hub running at http://{HOST}:{PORT}")
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    # Bound concurrent connections so scanner traffic cannot exhaust the
+    # process thread budget and starve the background collectors.
+    uvicorn.run(
+        app,
+        host=HOST,
+        port=PORT,
+        log_level="info",
+        limit_concurrency=100,
+        timeout_keep_alive=5,
+    )
 
 
 if __name__ == "__main__":

@@ -66,9 +66,16 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResu
         return None
 
     result = RenderResult(method="playwright")
+    browser = None
+    context = None
+    page = None
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            # Anti-bot pages can leave navigation waiting indefinitely. Keep
+            # each browser attempt bounded and always close every resource in
+            # the finally block below so repeated scheduled runs cannot leak
+            # Chromium processes/threads until the container is exhausted.
+            browser = pw.chromium.launch(headless=True, timeout=20000)
             context = browser.new_context(
                 viewport={"width": 1440, "height": 1600},
                 user_agent=(
@@ -83,7 +90,7 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResu
                 except Exception:
                     pass
             page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
             if wait_ms:
                 page.wait_for_timeout(wait_ms)
             result.html = page.content()
@@ -102,7 +109,6 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResu
                 ) or {}
             except Exception:
                 result.meta = {}
-            browser.close()
         _PLAYWRIGHT_AVAILABLE = True
         result.text = extract_visible_text(result.html)
         return result
@@ -110,6 +116,14 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResu
         result.status = "error"
         result.error = str(exc)[:300]
         return result
+    finally:
+        for resource in (page, context, browser):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                pass
 
 
 def _render_http(url: str) -> RenderResult:

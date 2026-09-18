@@ -575,11 +575,22 @@ def connect() -> sqlite3.Connection:
     # check_same_thread=False: FastAPI may run a sync dependency's setup and the
     # path operation on different threadpool workers, so a per-request connection
     # can legitimately move across threads (never used concurrently).
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    # Keep write transactions short. Collectors perform network and browser
+    # work while they hold a connection, so sqlite's default implicit
+    # transaction can otherwise keep the database write lock for the entire
+    # crawl. Autocommit makes each statement release its lock immediately;
+    # callers that need an atomic operation can still use an explicit BEGIN.
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        isolation_level=None,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA wal_autocheckpoint=1000")
     return conn
 
 

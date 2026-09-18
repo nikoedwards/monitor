@@ -57,6 +57,7 @@ def _run_due_collections() -> None:
                     run_collector(conn, spec, brand)
             except Exception:
                 # run_collector already records errors per source; keep loop alive.
+                logger.exception("Collector failed for %s / %s", spec.id, brand.get("id"))
                 continue
 
 
@@ -85,6 +86,7 @@ def _run_due_sales() -> None:
             with db() as conn:
                 run_sales_collection(conn, brand)
         except Exception:
+            logger.exception("Sales collection failed for %s", brand.get("id"))
             continue
 
 
