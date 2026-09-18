@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+backups
+data
+dist
+node_modules
+__pycache__
+*.pyc
+*.log
+deploy
+tests
+hetzner.html

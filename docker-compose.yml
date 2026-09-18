@@ -1,0 +1,60 @@
+services:
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: monitor-intelligence-hub:local
+    # Copy .env.example to .env before starting. Keep secrets out of git.
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8790
+    # Keep the application private when Caddy is enabled. Set
+    # APP_BIND_ADDRESS=0.0.0.0 if direct access is required instead.
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8790}:8790"
+    volumes:
+      # SQLite, PNG screenshots and HTML archives survive image rebuilds.
+      - ./data:/app/data
+    # Chromium is more reliable with a larger shared-memory mount.
+    shm_size: "1gb"
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8790/api/health', timeout=5)
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Optional public HTTPS front end. Start with:
+  #   docker compose --profile proxy up -d
+  # DOMAIN must be a DNS name pointing to this VPS for automatic TLS.
+  caddy:
+    image: caddy:2-alpine
+    profiles: [proxy]
+    env_file:
+      - .env
+    depends_on:
+      monitor:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
