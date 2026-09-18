@@ -120,8 +120,11 @@ def _rows_to_links(rows: Iterable[dict[str, Any]]) -> list[HiringLink]:
     links: list[HiringLink] = []
     for row in rows:
         url = _canonical_url(row.get("url") or "")
-        platform = (row.get("platform") or row.get("channel") or "").lower()
-        if not url or not _is_boss_url(url) or platform not in {"", "boss"}:
+        # Treat the host as the source of truth.  Older Monitor rows may have
+        # been saved with a blank/legacy platform value even though the URL is
+        # a BOSS page; dropping those rows would make the scheduled worker
+        # silently skip a valid source.
+        if not url or not _is_boss_url(url):
             continue
         links.append(
             HiringLink(
@@ -321,6 +324,7 @@ async def _collect_link(
         if listing.page_status == "blocked":
             return listing
         jobs: list[dict[str, Any]] = []
+        detail_blocked = False
         for detail_url in detail_urls[:max_jobs]:
             detail_page = await context.new_page()
             try:
@@ -337,6 +341,7 @@ async def _collect_link(
                             "访问职位详情时遇到登录或安全验证。",
                             [],
                         )
+                    detail_blocked = True
                     break
                 job = result.get("job") or {}
                 if job.get("url"):
@@ -350,6 +355,10 @@ async def _collect_link(
             if detail_delay_ms:
                 await page.wait_for_timeout(detail_delay_ms)
         listing.jobs = jobs
+        if detail_blocked:
+            listing.page_status = "blocked"
+            listing.page_error = "访问职位详情时遇到登录或安全验证；已保留本次成功采集的职位。"
+            return listing
         if not jobs and listing.page_status == "ok":
             listing.page_status = "partial"
             listing.page_error = "列表页可访问，但详情页没有成功采集职位。"
