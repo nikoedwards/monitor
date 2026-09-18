@@ -148,10 +148,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
           <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
-            Meta Ad Library：{data?.meta_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（广告投放不会采集）</Badge>}
+            Meta Ad Library：{data?.meta_configured ? <Badge tone="positive">API 已配置</Badge> : <Badge tone="positive">公开页面抓取</Badge>}
             {data?.meta_configured && data?.meta_key_hint && <span>当前：{data.meta_key_hint}</span>}
           </div>
-          <Field label={data?.meta_configured ? "Access Token（已保存，留空表示不修改）" : "Access Token（Meta 广告库必填）"} hint="也可在 Railway 环境变量中配置 META_ACCESS_TOKEN 或 FACEBOOK_ACCESS_TOKEN。">
+          <Field label={data?.meta_configured ? "Access Token（已保存，留空表示不修改）" : "Access Token（可选，公开页面抓取无需填写）"} hint="不填也会抓取 Meta Ad Library 公开页面；填写 META_ACCESS_TOKEN 或 FACEBOOK_ACCESS_TOKEN 后优先使用官方 API。">
             <Input type="password" value={form.meta_access_token || ""} onChange={(e) => set("meta_access_token", e.target.value)} placeholder="Meta Graph API access token" />
           </Field>
         </div>

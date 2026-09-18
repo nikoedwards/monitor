@@ -768,42 +768,210 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------- Meta Ad Library
+_META_PUBLIC_URL = "https://www.facebook.com/ads/library/"
+_META_PUBLIC_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _meta_timestamp(value) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _meta_public_ads_from_html(html: str) -> list[dict]:
+    """Extract Meta's server-rendered Ad Library results from application JSON."""
+    scripts = re.findall(
+        r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>',
+        html or "",
+        flags=re.I | re.S,
+    )
+    ads: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            ad_id = value.get("ad_archive_id")
+            if ad_id and isinstance(value.get("snapshot"), dict) and str(ad_id) not in seen:
+                seen.add(str(ad_id))
+                ads.append(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    for raw in scripts:
+        try:
+            walk(json.loads(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return ads
+
+
+def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
+    snapshot = ad.get("snapshot") or {}
+    cards = snapshot.get("cards") or []
+    if not isinstance(cards, list):
+        cards = []
+    body_data = snapshot.get("body") or {}
+    body = clean_text(body_data.get("text") if isinstance(body_data, dict) else body_data)
+    if not body and cards:
+        body = clean_text(" ".join(str(card.get("body") or "") for card in cards if isinstance(card, dict)))
+    title = clean_text(snapshot.get("title")) or clean_text(body)[:160]
+    page_name = clean_text(ad.get("page_name") or snapshot.get("page_name"))
+    ad_id = clean_text(ad.get("ad_archive_id"))
+    if not ad_id:
+        return None
+    images: list[str] = []
+    videos: list[str] = []
+    links: list[str] = []
+    media_items = list(cards)
+    for key in ("images", "videos", "extra_images", "extra_videos"):
+        value = snapshot.get(key) or []
+        if isinstance(value, list):
+            media_items.extend(item for item in value if isinstance(item, dict))
+    for card in media_items:
+        if not isinstance(card, dict):
+            continue
+        for key in ("resized_image_url", "original_image_url", "video_preview_image_url"):
+            value = clean_text(card.get(key))
+            if value and value not in images:
+                images.append(value)
+        for key in ("video_hd_url", "video_sd_url"):
+            value = clean_text(card.get(key))
+            if value and value not in videos:
+                videos.append(value)
+        value = clean_text(card.get("link_url"))
+        if value and value not in links:
+            links.append(value)
+    for key in ("link_url", "caption"):
+        value = clean_text(snapshot.get(key))
+        if value.startswith("http") and value not in links:
+            links.append(value)
+    start_at = _meta_timestamp(ad.get("start_date"))
+    stop_at = _meta_timestamp(ad.get("end_date"))
+    is_active = bool(ad.get("is_active"))
+    platforms = ad.get("publisher_platform") or snapshot.get("publisher_platform") or []
+    raw = {**ad, "collection_method": "meta_ad_library_public_ssr", "search_query": query}
+    metrics = {
+        "publisher_platforms": platforms,
+        "ad_creative_link_urls": links,
+        "thumbnail_url": images[0] if images else None,
+        "video_url": videos[0] if videos else None,
+        "impressions": ad.get("impressions_with_index"),
+        "spend": ad.get("spend"),
+        "reach": ad.get("reach_estimate"),
+        "page_id": ad.get("page_id") or snapshot.get("page_id"),
+        "page_like_count": snapshot.get("page_like_count"),
+        "cta_type": snapshot.get("cta_type"),
+    }
+    return {
+        "source_id": "meta_ads",
+        "brand_id": brand.get("id"),
+        "external_id": f"{brand.get('id')}:{ad_id}",
+        "data_type": "ad",
+        "dimension": "marketing",
+        "channel": "ads",
+        "platform": "meta",
+        "title": page_name or title or query,
+        "author": page_name,
+        "body": body or title or "(no creative text)",
+        "url": f"https://www.facebook.com/ads/library/?id={quote_plus(ad_id)}",
+        "occurred_at": start_at or utc_now(),
+        "started_at": start_at,
+        "stopped_at": stop_at if not is_active else None,
+        "active_status": "active" if is_active else "inactive",
+        "metrics": metrics,
+        "raw": raw,
+    }
+
+
+def _collect_meta_public_ads(brand: dict) -> list[dict]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise FetchError("Meta 公开广告抓取需要 Playwright/Chromium") from exc
+
+    payloads: list[dict] = []
+    seen: set[str] = set()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+        )
+        context = browser.new_context(locale="en-US", user_agent=_META_PUBLIC_USER_AGENT, viewport={"width": 1366, "height": 900})
+        page = context.new_page()
+        try:
+            for query in brand_queries(brand)[:4]:
+                params = urlencode({
+                    "active_status": "all",
+                    "ad_type": "all",
+                    "country": "US",
+                    "q": query,
+                    "search_type": "keyword_unordered",
+                })
+                try:
+                    page.goto(f"{_META_PUBLIC_URL}?{params}", wait_until="domcontentloaded", timeout=90_000)
+                    page.wait_for_timeout(4_500)
+                    html = page.content()
+                except Exception:
+                    continue
+                for ad in _meta_public_ads_from_html(html):
+                    ad_id = str(ad.get("ad_archive_id"))
+                    if ad_id in seen:
+                        continue
+                    payload = _meta_public_payload(ad, brand, query)
+                    if payload:
+                        seen.add(ad_id)
+                        payloads.append(payload)
+        finally:
+            try:
+                context.close()
+            finally:
+                browser.close()
+    return payloads
+
+
 def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     token = CREDENTIALS.get("facebook_access_token")
-    if not token:
-        return []
-    payloads: list[dict] = []
-    fields = "id,ad_creative_bodies,ad_snapshot_url,page_name,ad_delivery_start_time,publisher_platforms"
-    for query in brand_queries(brand):
-        url = (
-            "https://graph.facebook.com/v19.0/ads_archive?"
-            f"search_terms={quote_plus(query)}&ad_reached_countries=%5B%22US%22%5D"
-            f"&ad_active_status=ALL&fields={fields}&limit=25&access_token={quote_plus(token)}"
-        )
-        try:
-            data = fetch_json(url, timeout=20)
-        except FetchError:
-            continue
-        for ad in (data.get("data", []) if isinstance(data, dict) else []):
-            bodies = ad.get("ad_creative_bodies") or []
-            body = clean_text(" ".join(bodies)) or "(no creative text)"
-            payloads.append({
-                "source_id": "meta_ads",
-                "brand_id": brand.get("id"),
-                "external_id": f"{brand.get('id')}:{ad.get('id')}",
-                "data_type": "ad",
-                "dimension": "marketing",
-                "channel": "ads",
-                "platform": "meta",
-                "title": ad.get("page_name") or query,
-                "author": ad.get("page_name"),
-                "body": body,
-                "url": ad.get("ad_snapshot_url"),
-                "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
-                "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
-                "raw": ad,
-            })
-    return payloads
+    if token:
+        payloads: list[dict] = []
+        fields = "id,ad_creative_bodies,ad_snapshot_url,page_name,ad_delivery_start_time,publisher_platforms"
+        for query in brand_queries(brand):
+            url = (
+                "https://graph.facebook.com/v19.0/ads_archive?"
+                f"search_terms={quote_plus(query)}&ad_reached_countries=%5B%22US%22%5D"
+                f"&ad_active_status=ALL&fields={fields}&limit=25&access_token={quote_plus(token)}"
+            )
+            try:
+                data = fetch_json(url, timeout=20)
+            except FetchError:
+                continue
+            for ad in (data.get("data", []) if isinstance(data, dict) else []):
+                bodies = ad.get("ad_creative_bodies") or []
+                body = clean_text(" ".join(bodies)) or "(no creative text)"
+                payloads.append({
+                    "source_id": "meta_ads",
+                    "brand_id": brand.get("id"),
+                    "external_id": f"{brand.get('id')}:{ad.get('id')}",
+                    "data_type": "ad",
+                    "dimension": "marketing",
+                    "channel": "ads",
+                    "platform": "meta",
+                    "title": ad.get("page_name") or query,
+                    "author": ad.get("page_name"),
+                    "body": body,
+                    "url": ad.get("ad_snapshot_url"),
+                    "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
+                    "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
+                    "raw": ad,
+                })
+        return payloads
+    return _collect_meta_public_ads(brand)
 
 
 # YouTube creator collection now lives in connectors/creators/youtube.py

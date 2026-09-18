@@ -45,7 +45,7 @@ def upsert_ad_observation(conn: sqlite3.Connection, payload: dict) -> dict | Non
              first_seen_at, last_seen_at, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (entity_id, brand_id, source_id, external_id, payload.get("platform") or "meta",
-             raw.get("page_id"), payload.get("author") or raw.get("page_name"), payload.get("url"),
+             raw.get("page_id") or metrics.get("page_id"), payload.get("author") or raw.get("page_name"), payload.get("url"),
              body, creative_hash, started_at, stopped_at, status,
              json.dumps(platforms, ensure_ascii=False), json.dumps(link_urls, ensure_ascii=False),
              json.dumps(raw, ensure_ascii=False), observed_at, observed_at, now, now),
@@ -65,7 +65,7 @@ def upsert_ad_observation(conn: sqlite3.Connection, payload: dict) -> dict | Non
                creative_body = ?, creative_hash = ?, started_at = COALESCE(?, started_at),
                stopped_at = ?, active_status = ?, publisher_platforms_json = ?,
                link_urls_json = ?, raw_json = ?, last_seen_at = ?, updated_at = ? WHERE id = ?""",
-            (raw.get("page_id"), payload.get("author") or raw.get("page_name"), payload.get("url"),
+            (raw.get("page_id") or metrics.get("page_id"), payload.get("author") or raw.get("page_name"), payload.get("url"),
              body, creative_hash, started_at, stopped_at, status,
              json.dumps(platforms, ensure_ascii=False), json.dumps(link_urls, ensure_ascii=False),
              json.dumps(raw, ensure_ascii=False), observed_at, now, entity_id),
