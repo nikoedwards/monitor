@@ -49,6 +49,18 @@ class CreatorThumbnailTests(unittest.TestCase):
         self.assertIsNotNone(post)
         self.assertEqual(post.thumbnail_url, "https://cdn.example/carousel.jpg")
 
+    def test_normalizes_wrapped_media_image(self):
+        post = self.provider._normalize(
+            {
+                "id": "post-4",
+                "username": "creator",
+                "media": {"image_versions2": {"candidates": [{"url": "https://cdn.example/wrapped.jpg"}]}},
+            },
+            "plaud",
+        )
+        self.assertIsNotNone(post)
+        self.assertEqual(post.thumbnail_url, "https://cdn.example/wrapped.jpg")
+
     def test_payload_persists_thumbnail_for_cards(self):
         payload = _payload(
             {"id": "brand-1"},

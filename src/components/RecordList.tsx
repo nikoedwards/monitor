@@ -63,6 +63,13 @@ function textValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function thumbnailSrc(url?: string): string | undefined {
+  const normalized = textValue(url);
+  if (!normalized) return undefined;
+  if (normalized.startsWith("/") || normalized.startsWith("data:") || normalized.startsWith("blob:")) return normalized;
+  return `/api/media/thumbnail?url=${encodeURIComponent(normalized)}`;
+}
+
 function recordThumbnail(record: RecordItem): string | undefined {
   if (record.channel !== "social" && record.channel !== "creators" && record.data_type !== "creator_post" && record.data_type !== "social_post") return undefined;
   const metrics = record.metrics || {};
@@ -73,6 +80,9 @@ function recordThumbnail(record: RecordItem): string | undefined {
     const value = metrics[key] ?? raw[key];
     const normalized = textValue(value);
     if (normalized) return normalized;
+  }
+  if ((record.platform === "instagram" || record.platform === "tiktok" || record.platform === "x") && textValue(record.url)) {
+    return textValue(record.url);
   }
   return undefined;
 }
@@ -231,7 +241,7 @@ function SentimentBadge({ record }: { record: RecordItem }) {
 
 function SocialThumbnail({ record }: { record: RecordItem }) {
   const [failed, setFailed] = useState(false);
-  const thumbnail = recordThumbnail(record);
+  const thumbnail = thumbnailSrc(recordThumbnail(record));
   const platform = record.platform || "social";
   const platformLabel = SOCIAL_PLATFORM_LABEL[platform] || platform;
   const instagramReel = platform === "instagram"

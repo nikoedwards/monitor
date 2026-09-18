@@ -60,8 +60,17 @@ def _open(request: Request, timeout: int):
     return urlopen(request, timeout=timeout)
 
 
-def fetch_bytes(url: str, *, accept: str = "*/*", timeout: int = 16, max_bytes: int = 3_000_000) -> bytes:
-    request = Request(normalize_url(url), headers={"User-Agent": USER_AGENT, "Accept": accept})
+def fetch_bytes(
+    url: str,
+    *,
+    accept: str = "*/*",
+    timeout: int = 16,
+    max_bytes: int = 3_000_000,
+    headers: dict | None = None,
+) -> bytes:
+    request_headers = {"User-Agent": USER_AGENT, "Accept": accept}
+    request_headers.update(headers or {})
+    request = Request(normalize_url(url), headers=request_headers)
     try:
         with _open(request, timeout) as response:
             return response.read(max_bytes)

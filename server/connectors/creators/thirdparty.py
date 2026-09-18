@@ -56,7 +56,7 @@ def _url(value) -> str:
     return ""
 
 
-def _thumbnail(item: dict) -> str:
+def _thumbnail(item: dict, _depth: int = 0) -> str:
     """Extract post media from Instagram/TikTok/X response variants.
 
     Aggregator responses are not consistent across platforms or API versions:
@@ -107,9 +107,26 @@ def _thumbnail(item: dict) -> str:
         for media in carousel:
             if not isinstance(media, dict):
                 continue
-            found = _thumbnail(media)
+            found = _thumbnail(media, _depth + 1)
             if found:
                 return found
+
+    # Some aggregator versions wrap the actual post under ``media``, ``node``,
+    # ``post`` or ``data``. Keep this bounded so malformed payloads cannot
+    # recurse forever while still covering the common Instagram shapes.
+    if _depth < 3:
+        for key in ("media", "post", "node", "item", "data", "result"):
+            nested = item.get(key)
+            if isinstance(nested, dict):
+                found = _thumbnail(nested, _depth + 1)
+                if found:
+                    return found
+            elif isinstance(nested, list):
+                for child in nested:
+                    if isinstance(child, dict):
+                        found = _thumbnail(child, _depth + 1)
+                        if found:
+                            return found
     return ""
 
 
@@ -170,5 +187,7 @@ class ThirdPartyCreatorProvider(CreatorProvider):
             comments=_to_int(_first(item, "comment_count", "comments", "reply_count")),
             shares=_to_int(_first(item, "share_count", "reshare_count", "retweet_count")),
             follower_count=_to_int(_first(item, "follower_count", "followers")),
-            raw={"query": query, "provider": self.name},
+            # Keep the normalized provider payload so a later API shape change
+            # can still recover a cover URL at read time without losing data.
+            raw={"query": query, "provider": self.name, **item},
         )

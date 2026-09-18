@@ -18,6 +18,7 @@ from .config import DIST, HOST, PORT, SNAPSHOT_DIR, apply_credential_overrides
 from .connectors.registry import sync_to_db
 from .db import db, init_db
 from .domains import brands, content, creators, hiring, insights, market_share, sales, settings, sources, web
+from . import media
 from .scheduler import start_scheduler
 from .snapshot import upgrade_snapshot_archives
 
@@ -58,7 +59,7 @@ async def secure_snapshot_archives(request, call_next):
     response = await call_next(request)
     path = request.url.path.lower()
     comparison_image = path.startswith("/api/web/snapshots/") and path.endswith("/comparison")
-    if path.startswith("/api/") and not comparison_image:
+    if path.startswith("/api/") and not comparison_image and not path.startswith("/api/media/thumbnail"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
     if path.startswith("/snapshots/"):
@@ -74,7 +75,7 @@ async def secure_snapshot_archives(request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
-for module in (brands, content, creators, sales, web, sources, insights, market_share, hiring, settings):
+for module in (brands, content, creators, sales, web, sources, insights, market_share, hiring, settings, media):
     app.include_router(module.router)
 
 
