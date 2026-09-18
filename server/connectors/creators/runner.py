@@ -68,15 +68,15 @@ def _collect_platform(conn: sqlite3.Connection, brand: dict, platform: str) -> l
         return []
     # YouTube search is quota-expensive. Reserve half the small query budget for
     # catalog products instead of letting a long brand-keyword list crowd them out.
-    queries = brand_queries(brand)[:6]
-    product_queries = creator_product_queries(conn, brand.get("id") or "", limit=6)
+    queries = brand_queries(brand)[:4]
+    product_queries = creator_product_queries(conn, brand.get("id") or "", limit=4)
     seen = {query.strip().lower() for query in queries}
     for query in product_queries:
         key = query.strip().lower()
         if key and key not in seen:
             seen.add(key)
             queries.append(query)
-        if len(queries) >= 12:
+        if len(queries) >= 8:
             break
     if not queries:
         return []

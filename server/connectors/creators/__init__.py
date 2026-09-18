@@ -1,16 +1,12 @@
-"""Creator provider registry: pick the right adapter per platform.
-
-YouTube keyword discovery uses the official Data API when a key is configured.
-Instagram/TikTok/X global keyword discovery has no reliable free provider; their
-known official account URLs are collected separately by ``social_accounts``.
-"""
+"""Creator provider registry for API and logged-out public-web collection."""
 from __future__ import annotations
 
 import sqlite3
 
 from ...config import CREDENTIALS
 from .base import PLATFORM_LABELS, PLATFORMS, CreatorPost, CreatorProvider, detect_collaboration
-from .youtube import YouTubeProvider
+from .public_search import PublicSearchCreatorProvider
+from .youtube import YouTubeProvider, YouTubePublicProvider
 
 __all__ = [
     "PLATFORMS",
@@ -33,5 +29,7 @@ def creator_credential(conn: sqlite3.Connection, key: str) -> str:
 def pick_provider(platform: str, conn: sqlite3.Connection) -> CreatorProvider | None:
     if platform == "youtube":
         key = creator_credential(conn, "youtube_api_key")
-        return YouTubeProvider(key) if key else None
+        return YouTubeProvider(key) if key else YouTubePublicProvider()
+    if platform in {"instagram", "tiktok"}:
+        return PublicSearchCreatorProvider(platform)
     return None

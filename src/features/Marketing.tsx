@@ -4,6 +4,7 @@ import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
 import { MonitorStatus } from "../components/MonitorStatus";
+import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { SmartSummary } from "../components/SmartSummary";
 import { useAds, useAdsSummary, useMarketingSummary, useRecords } from "../lib/hooks";
@@ -166,6 +167,7 @@ export default function Marketing() {
         subtitle="媒体公关、广告、红人、社群与社交声量"
         action={<div className="flex flex-wrap items-center gap-2"><TimeRangePicker /><MonitorStatus brandId={brandId} dimension="marketing" /></div>}
       />
+      {channel === "creators" && <CreatorSourceStatus brandId={brandId} />}
 
       <div className="flex flex-wrap items-center gap-3">
         <SegmentGroup
@@ -317,7 +319,13 @@ export default function Marketing() {
 
       <Card>
         <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
-        <RecordList records={shownRecords} variant={channel === "social" || channel === "creators" ? "social-cards" : "list"} emptyHint="在数据源页发起媒体 / 广告 / 红人 / 社群采集后查看。" />
+        <RecordList
+          records={shownRecords}
+          variant={channel === "social" || channel === "creators" ? "social-cards" : "list"}
+          emptyHint={channel === "creators"
+            ? "红人关键词采集每天搜索公开内容；品牌官方账号内容请看「社交媒体」，手动导入的红人只进入候选池。"
+            : "在数据源页发起媒体 / 广告 / 红人 / 社群采集后查看。"}
+        />
       </Card>
 
       <PublicationDetailModal

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from ..config import has_credential
@@ -58,7 +59,23 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
         _update_brand_run(conn, spec.id, brand.get("id"), status="needs_credential", error=result["error"], added=0)
         return result
     try:
-        payloads = spec.collect(conn, brand) or []
+        # Give time-sensitive collectors the exact window represented by their
+        # cadence. Search-engine freshness flags are only hints, so creator
+        # providers also use this lower bound for a strict publication-time
+        # check before a record can be persisted.
+        cadence = (spec.cadence or "daily").lower()
+        window = {
+            "hourly": timedelta(hours=1),
+            "weekly": timedelta(days=7),
+        }.get(cadence, timedelta(days=1))
+        collector_brand = {
+            **brand,
+            "_collection_cadence": cadence,
+            "_collection_since": (
+                datetime.now(timezone.utc) - window
+            ).replace(microsecond=0).isoformat(),
+        }
+        payloads = spec.collect(conn, collector_brand) or []
         created = 0
         for payload in payloads:
             payload.setdefault("source_id", spec.id)
