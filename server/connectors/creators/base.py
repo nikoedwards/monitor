@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
@@ -78,6 +79,50 @@ class CreatorProvider:
 
     def collect(self, conn: sqlite3.Connection, brand: dict, queries: list[str]) -> list[CreatorPost]:
         raise NotImplementedError
+
+
+def collection_since(brand: dict, *, now: datetime | None = None) -> datetime:
+    """Return the lower bound for the current scheduled creator collection.
+
+    The scheduler injects ``_collection_since`` into the brand context.  Keeping
+    a cadence fallback here also makes providers safe when called directly in a
+    test or from an explicit manual sync.
+    """
+    current = now or datetime.now(timezone.utc)
+    raw = brand.get("_collection_since") if isinstance(brand, dict) else None
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            pass
+    cadence = str((brand or {}).get("_collection_cadence") or "daily").lower()
+    delta = {"hourly": timedelta(hours=1), "weekly": timedelta(days=7)}.get(
+        cadence, timedelta(days=1)
+    )
+    return current.astimezone(timezone.utc) - delta
+
+
+def occurred_in_collection_window(post: CreatorPost, brand: dict, *, now: datetime | None = None) -> bool:
+    """Require a parseable publication time inside the current cadence window."""
+    if not post.occurred_at:
+        return False
+    try:
+        occurred = datetime.fromisoformat(str(post.occurred_at).replace("Z", "+00:00"))
+        if occurred.tzinfo is None:
+            occurred = occurred.replace(tzinfo=timezone.utc)
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        published = occurred.astimezone(timezone.utc)
+        return collection_since(brand, now=current) <= published <= current + timedelta(minutes=5)
+    except (TypeError, ValueError):
+        return False
+
+
+def recent_creator_posts(posts: list[CreatorPost], brand: dict) -> list[CreatorPost]:
+    """Drop historical or undated search results before persistence."""
+    return [post for post in posts if occurred_in_collection_window(post, brand)]
 
 
 # ----------------------------------------------------------- collaboration NLP

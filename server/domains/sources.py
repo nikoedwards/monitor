@@ -59,11 +59,21 @@ def monitoring_status(
     """Per-dimension monitoring status: which connectors run, last/next run, scheduler mode."""
     specs = [s for s in REGISTRY if s.dimension == dimension]
     rows = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM sources").fetchall()}
+    brand_runs: dict[str, dict] = {}
+    if brand_id:
+        brand_runs = {
+            r["source_id"]: dict(r)
+            for r in conn.execute(
+                "SELECT * FROM source_brand_runs WHERE brand_id = ?",
+                (brand_id,),
+            ).fetchall()
+        }
     items: list[dict] = []
     last_run: datetime | None = None
     for spec in specs:
         row = rows.get(spec.id, {})
-        last_collect_at = row.get("last_collect_at")
+        run = brand_runs.get(spec.id, {})
+        last_collect_at = run.get("last_collect_at") if brand_id else row.get("last_collect_at")
         parsed = _parse_dt(last_collect_at)
         if parsed and (last_run is None or parsed > last_run):
             last_run = parsed
@@ -75,8 +85,9 @@ def monitoring_status(
             "status": spec.status,
             "cadence": spec.cadence,
             "last_collect_at": last_collect_at,
-            "last_status": row.get("last_status"),
-            "item_count": row.get("item_count") or 0,
+            "last_status": run.get("last_status") if brand_id else row.get("last_status"),
+            "last_error": (run.get("last_error") if brand_id else row.get("last_error")) or "",
+            "item_count": (run.get("item_count") or 0) if brand_id else (row.get("item_count") or 0),
         })
 
     interval = SCHEDULER_SECONDS

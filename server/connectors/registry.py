@@ -72,20 +72,21 @@ REGISTRY: list[ConnectorSpec] = [
     ),
     ConnectorSpec(
         id="youtube_search", name="YouTube 红人", category="creators", dimension="marketing",
-        tier=2, vendor="Google", sync_mode="scheduled", cadence="daily",
-        credential_key="youtube_api_key",
-        notes="YouTube Data API 搜索品牌相关视频,补充播放/点赞/评论与订阅数,并做合作识别;需 API key。",
+        tier=1, vendor="YouTube / yt-dlp", sync_mode="scheduled", cadence="daily",
+        notes="优先使用 YouTube Data API；未配置 API key 时使用公开搜索，按品牌关键词抓取近期视频。",
         collect=creator_runner.collect_youtube,
     ),
     ConnectorSpec(
         id="instagram_listening", name="Instagram 红人关键词发现", category="creators", dimension="marketing",
-        tier=3, vendor="Public Web", sync_mode="manual", cadence="daily",
-        notes="免费方案仅采集品牌已配置的公开官方账号；全站关键词发现暂无稳定免费接口。",
+        tier=1, vendor="Bing / Public Web", sync_mode="scheduled", cadence="daily",
+        notes="通过 Bing 公开搜索发现 Instagram 公开达人主页，再采集公开内容；不需要 API key。",
+        collect=creator_runner.collect_instagram,
     ),
     ConnectorSpec(
         id="tiktok_listening", name="TikTok 红人关键词发现", category="creators", dimension="marketing",
-        tier=3, vendor="Public Web", sync_mode="manual", cadence="daily",
-        notes="免费方案仅采集品牌已配置的公开官方账号；全站关键词发现暂无稳定免费接口。",
+        tier=1, vendor="Bing / yt-dlp", sync_mode="scheduled", cadence="daily",
+        notes="通过 Bing 公开搜索发现 TikTok 公开达人主页，再用 yt-dlp 采集公开内容；不需要 API key。",
+        collect=creator_runner.collect_tiktok,
     ),
     ConnectorSpec(
         id="x_search", name="X 红人关键词发现", category="creators", dimension="marketing",

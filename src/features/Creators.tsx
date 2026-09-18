@@ -5,6 +5,7 @@ import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
+import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
 import { CreatorCuration } from "./CreatorCuration";
 import { useBrands, useCreatorsReport, useCreatorsRoster, useCreatorsSummary, useCreatorsSync, useProducts, useRecords } from "../lib/hooks";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
@@ -212,6 +213,7 @@ export default function Creators() {
           </div>
         }
       />
+      <CreatorSourceStatus brandId={brandId} />
 
       {sync.data && (
         <div className="text-[13px] p-2 rounded-md" style={{ background: "var(--bg-soft-2)", color: "var(--body)" }}>
@@ -233,7 +235,7 @@ export default function Creators() {
       {empty ? (
         <EmptyState
           title={selectedProduct ? `${selectedProduct.name} 暂无红人数据` : "红人达人板块暂无数据"}
-          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "YouTube 配置免费 Data API key 后可做全站关键词发现；Instagram / TikTok 的免费自采目前用于品牌管理中已配置的公开官方账号。"}
+          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "无需 API key；系统每天按品牌关键词搜索 YouTube、TikTok 和 Instagram 的公开内容，并只保留最近一天发布的结果。"}
           action={<Button variant="primary" onClick={runSync} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即同步"}</Button>}
         />
       ) : (
