@@ -1,7 +1,9 @@
 """SQLite data layer: brand-rooted schema, migrations, and seed data."""
 from __future__ import annotations
 
+import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -570,6 +572,39 @@ CREATE INDEX IF NOT EXISTS idx_li_activities_profile ON linkedin_activities(prof
 """
 
 
+_DB_BUSY_TIMEOUT_MS = max(5_000, int(os.environ.get("MONITOR_DB_BUSY_TIMEOUT_MS", "30_000")))
+_DB_LOCK_RETRIES = max(1, int(os.environ.get("MONITOR_DB_LOCK_RETRIES", "6")))
+
+
+class ResilientConnection(sqlite3.Connection):
+    """Retry transient SQLite writer races instead of failing the request."""
+
+    @staticmethod
+    def _is_busy(exc: sqlite3.OperationalError) -> bool:
+        message = str(exc).lower()
+        return any(text in message for text in ("database is locked", "database table is locked", "database is busy"))
+
+    def _retry(self, operation, *args, **kwargs):
+        delay = 0.05
+        for attempt in range(_DB_LOCK_RETRIES):
+            try:
+                return operation(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not self._is_busy(exc) or attempt >= _DB_LOCK_RETRIES - 1:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 1.0)
+
+    def execute(self, sql, parameters=()):
+        return self._retry(super().execute, sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        return self._retry(super().executemany, sql, seq_of_parameters)
+
+    def executescript(self, sql_script):
+        return self._retry(super().executescript, sql_script)
+
+
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # check_same_thread=False: FastAPI may run a sync dependency's setup and the
@@ -582,14 +617,16 @@ def connect() -> sqlite3.Connection:
     # callers that need an atomic operation can still use an explicit BEGIN.
     conn = sqlite3.connect(
         DB_PATH,
-        timeout=30,
+        timeout=_DB_BUSY_TIMEOUT_MS / 1000,
         isolation_level=None,
+        factory=ResilientConnection,
         check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA wal_autocheckpoint=1000")
     return conn
 
@@ -600,6 +637,9 @@ def db() -> Iterator[sqlite3.Connection]:
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
