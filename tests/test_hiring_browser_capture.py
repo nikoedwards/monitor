@@ -1,7 +1,9 @@
 import sqlite3
 import unittest
+import json
+from unittest.mock import patch
 
-from server.connectors.hiring.runner import ingest_browser_hiring_capture
+from server.connectors.hiring.runner import ingest_browser_hiring_capture, run_hiring_collection
 from server.db import SCHEMA, _cleanup_fake_boss_login_postings
 from server.util import utc_now
 
@@ -48,6 +50,41 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         self.assertEqual(link["cadence"], "manual")
         snapshot = self.conn.execute("SELECT * FROM job_snapshots").fetchone()
         self.assertEqual(snapshot["is_open"], 1)
+        config = json.loads(link["config_json"] or "{}")
+        self.assertTrue(config["browser_automation"])
+
+    def test_boss_browser_source_is_skipped_by_cookie_runner(self):
+        self.capture()
+        result = run_hiring_collection(self.conn, self.brand)
+        self.assertEqual(result["links"], 0)
+        self.assertEqual(result["captured"], 0)
+
+    def test_linkedin_source_still_uses_cookie_runner(self):
+        now = utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO links (id, brand_id, dimension, channel, platform, url, canonical_url,
+                cadence, status, config_json, created_at, updated_at)
+            VALUES ('linkedin-link', ?, 'hiring', 'linkedin', 'linkedin',
+                'https://www.linkedin.com/company/example/jobs/',
+                'https://www.linkedin.com/company/example/jobs/', 'daily', 'active', '{}', ?, ?)
+            """,
+            (self.brand["id"], now, now),
+        )
+
+        class _Provider:
+            def expand(self, conn, link):
+                return []
+
+            def fetch(self, conn, posting):
+                raise AssertionError("no postings should be fetched")
+
+        with patch("server.connectors.hiring.runner.pick_provider", return_value=_Provider()) as pick:
+            result = run_hiring_collection(self.conn, self.brand)
+
+        self.assertEqual(result["links"], 1)
+        pick.assert_called_once()
+        self.assertEqual(pick.call_args.args[0], "linkedin")
 
     def test_partial_list_capture_preserves_existing_jd(self):
         self.capture()

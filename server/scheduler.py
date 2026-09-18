@@ -102,6 +102,8 @@ def _run_due_hiring() -> None:
                 SELECT platform FROM links
                 WHERE brand_id = ? AND dimension = 'hiring' AND status = 'active'
                       AND url IS NOT NULL AND url != ''
+                      AND lower(COALESCE(platform, '')) != 'boss'
+                      AND lower(COALESCE(url, '')) NOT LIKE '%zhipin.com%'
                       AND (last_collect_at IS NULL OR substr(last_collect_at, 1, 10) < ?)
                 """,
                 (brand["id"], today()),

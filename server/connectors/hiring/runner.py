@@ -35,6 +35,26 @@ def _link_platform(link: dict) -> str:
     return (link.get("platform") or link.get("channel") or "").lower()
 
 
+def _uses_browser_worker(link: dict) -> bool:
+    """Return whether a link is owned by the local browser worker.
+
+    BOSS is always browser-managed. LinkedIn keeps its existing Cookie/provider
+    path, including manually captured LinkedIn pages.
+    """
+    if _link_platform(link) == "boss":
+        return True
+    host = (urlparse(link.get("url") or "").hostname or "").lower()
+    return host == "zhipin.com" or host.endswith(".zhipin.com")
+
+
+def _link_config(link: dict) -> dict:
+    try:
+        value = json.loads(link.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _upsert_posting(conn: sqlite3.Connection, link: dict, ref: JobRef) -> str:
     now = utc_now()
     canon = canonical_url(ref.url)
@@ -179,7 +199,17 @@ def _browser_capture_link(
         (brand_id, platform, canon),
     ).fetchone()
     if exact:
-        return dict(exact)
+        link = dict(exact)
+        if platform == "boss":
+            config = _link_config(link)
+            config["browser_automation"] = True
+            config.setdefault("browser_capture", True)
+            conn.execute(
+                "UPDATE links SET config_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(config, ensure_ascii=False), utc_now(), link["id"]),
+            )
+            link["config_json"] = json.dumps(config, ensure_ascii=False)
+        return link
 
     label = _BROWSER_CAPTURE_LABEL[platform]
     helper = conn.execute(
@@ -191,7 +221,17 @@ def _browser_capture_link(
         (brand_id, platform, label),
     ).fetchone()
     if helper:
-        return dict(helper)
+        link = dict(helper)
+        if platform == "boss":
+            config = _link_config(link)
+            config["browser_automation"] = True
+            config.setdefault("browser_capture", True)
+            conn.execute(
+                "UPDATE links SET config_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(config, ensure_ascii=False), utc_now(), link["id"]),
+            )
+            link["config_json"] = json.dumps(config, ensure_ascii=False)
+        return link
 
     now = utc_now()
     link_id = new_id()
@@ -204,7 +244,11 @@ def _browser_capture_link(
         (
             link_id, brand_id, platform, platform, source_url, canon, label,
             json.dumps(
-                {"browser_capture": True, "first_source_title": clean_text(source_title)},
+                {
+                    "browser_capture": True,
+                    "browser_automation": platform == "boss",
+                    "first_source_title": clean_text(source_title),
+                },
                 ensure_ascii=False,
             ),
             now, now,
@@ -335,6 +379,8 @@ def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | 
 
     for row in links:
         link = dict(row)
+        if _uses_browser_worker(link):
+            continue
         platform = _link_platform(link)
         provider = pick_provider(platform, conn)
         if provider is None:
@@ -390,6 +436,12 @@ def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | 
 
     for row in postings:
         posting = dict(row)
+        source_link = conn.execute(
+            "SELECT config_json, platform, url FROM links WHERE id = ?",
+            (posting.get("link_id"),),
+        ).fetchone()
+        if source_link and _uses_browser_worker(dict(source_link)):
+            continue
         provider = pick_provider(posting.get("platform"), conn)
         if provider is None:
             continue

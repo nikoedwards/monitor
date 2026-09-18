@@ -58,11 +58,11 @@ export default function Hiring() {
       <SectionTitle
         title="招聘监控"
         subtitle="监控 Boss 直聘 / LinkedIn 职位与 JD，并以重点人员变化补充判断企业投入方向"
-        hint="Boss 直聘 / LinkedIn 反爬严格，需在设置中配置登录 Cookie；抓取 LinkedIn 个人公开页面与动态可能违反其服务条款，请自行评估合规与账号风险。"
+        hint="BOSS 直聘通过本机已登录浏览器每天采集；LinkedIn 职位继续使用设置中的登录 Cookie。抓取 LinkedIn 个人公开页面与动态可能违反其服务条款，请自行评估合规与账号风险。"
         action={
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
-            <Button onClick={() => brandId && sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即采集职位"}</Button>
+            <Button onClick={() => brandId && sync.mutate({ brandId })} disabled={sync.isPending}>{sync.isPending ? "同步中…" : "立即同步 LinkedIn"}</Button>
             <Button variant="primary" onClick={() => setSourceOpen(true)}>+ 配置采集源</Button>
           </div>
         }
@@ -119,7 +119,7 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
               ]}
             />
           ) : (
-            <EmptyState title="暂无招聘时序" hint="配置采集源并采集后展示。Boss/LinkedIn 需在设置中填写 Cookie。" />
+            <EmptyState title="暂无招聘时序" hint="配置采集源并采集后展示。BOSS 需要先完成本机浏览器登录；LinkedIn 需在设置中填写 Cookie。" />
           )}
         </Card>
         <Card>
@@ -716,8 +716,8 @@ function SourceModal({ open, onClose, brandId }: { open: boolean; onClose: () =>
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-3 p-3 rounded-md" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
           <div>
-            <div className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>BOSS 打开 F12 就刷新 / 后台采集被拦截？</div>
-            <div className="text-[12px] mt-0.5" style={{ color: "var(--mute)" }}>安装浏览器助手，从正常登录的当前页面一键入库，不需要复制 Cookie。</div>
+            <div className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>BOSS 使用本机已登录浏览器每日采集</div>
+            <div className="text-[12px] mt-0.5" style={{ color: "var(--mute)" }}>首次需在专用浏览器中人工登录；浏览器助手仍可用于手动补采当前页面。</div>
           </div>
           <a
             href="/api/hiring/browser-helper.zip"
