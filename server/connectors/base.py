@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from ..config import has_credential
-from ..records import insert_record_if_new
+from ..records import insert_record_if_new, upsert_ad_observation
 from ..util import utc_now
 
 # A collector takes a db connection + a brand dict and returns record payloads.
@@ -60,6 +60,9 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
         created = 0
         for payload in payloads:
             payload.setdefault("source_id", spec.id)
+            # Ad records are de-duplicated in the unified stream, so retain a
+            # daily lifecycle snapshot before the normal insert-if-new path.
+            upsert_ad_observation(conn, payload)
             if insert_record_if_new(conn, payload) is not None:
                 created += 1
         result["created"] = created

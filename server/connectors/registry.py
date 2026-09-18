@@ -64,6 +64,11 @@ REGISTRY: list[ConnectorSpec] = [
         collect=collectors.collect_meta_ads,
     ),
     ConnectorSpec(
+        id="google_ads_transparency", name="Google Ads Transparency", category="ads", dimension="marketing",
+        tier=3, vendor="Google", sync_mode="manual", cadence="daily",
+        notes="Google Ads Transparency Center 暂无稳定公开批量 API；首期支持浏览器快照 / CSV 导入，保留原始链接与抓取时间。",
+    ),
+    ConnectorSpec(
         id="youtube_search", name="YouTube 红人", category="creators", dimension="marketing",
         tier=2, vendor="Google", sync_mode="scheduled", cadence="daily",
         credential_key="youtube_api_key",

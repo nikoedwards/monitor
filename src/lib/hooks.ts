@@ -14,6 +14,8 @@ import {
   type WebAiAnalysis,
   type WebSnapshot,
   type WebSummary,
+  type MarketingAd,
+  type MarketingAdsSummary,
 } from "./api";
 import { rangeParams, type TimeRange } from "./timeRange";
 
@@ -190,6 +192,33 @@ export function useMarketingSummary(brandId?: string, channel?: string, range?: 
     queryKey: ["marketing-summary", brandId, channel, rp],
     queryFn: () => api.get<any>(`/api/marketing/summary${qs({ brand_id: brandId, channel, ...rp })}`),
     enabled: !!brandId,
+  });
+}
+
+// Ad-library monitoring has a denormalized summary and a card-friendly list.
+// Keep these separate from the generic marketing records so a missing ad
+// source does not make the rest of the marketing page unusable.
+export function useAdsSummary(brandId?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["marketing-ads-summary", brandId, rp],
+    queryFn: () => api.get<MarketingAdsSummary>(`/api/marketing/ads-summary${qs({ brand_id: brandId, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 60_000,
+  });
+}
+
+export function useAds(brandId?: string, range?: TimeRange, filters?: Record<string, unknown>) {
+  const rp = rangeParams(range);
+  const params = { brand_id: brandId, ...rp, ...(filters || {}) };
+  return useQuery({
+    queryKey: ["marketing-ads", params],
+    queryFn: () =>
+      api.get<{ ads: MarketingAd[] } | MarketingAd[]>(`/api/marketing/ads${qs(params)}`).then((data) =>
+        Array.isArray(data) ? data : data.ads || [],
+      ),
+    enabled: !!brandId,
+    staleTime: 60_000,
   });
 }
 

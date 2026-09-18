@@ -108,6 +108,7 @@ export interface RecordItem {
   intent?: string;
   topics: string[];
   metrics: Record<string, unknown>;
+  raw?: Record<string, unknown>;
 }
 
 export interface Source {
@@ -288,6 +289,62 @@ export interface TrendPoint {
   date: string;
   total: number;
   negative: number;
+}
+
+// Public ad-library monitoring models.  The backend keeps source-specific
+// fields in `raw`; these normalized fields are enough for the dashboard.
+export interface MarketingAd {
+  id: string;
+  source?: string;
+  source_ad_id?: string;
+  advertiser?: string;
+  advertiser_name?: string;
+  page_name?: string;
+  country?: string;
+  countries?: string[];
+  platform?: string;
+  platforms?: string[];
+  status?: string;
+  lifecycle?: string;
+  title?: string;
+  body?: string;
+  description?: string;
+  creative_url?: string;
+  media_url?: string;
+  thumbnail_url?: string;
+  landing_url?: string;
+  snapshot_url?: string;
+  first_seen?: string;
+  last_seen?: string;
+  delivery_start?: string;
+  delivery_stop?: string;
+  duration_days?: number;
+  active_days?: number;
+  persistence_score?: number;
+  evidence_level?: string;
+  spend?: number | null;
+  impressions?: number | null;
+  reach?: number | null;
+  creative_changes?: number;
+  variants?: number;
+  raw?: Record<string, unknown>;
+}
+
+export interface MarketingAdsSummary {
+  total_ads?: number;
+  active_ads?: number;
+  new_ads?: number;
+  stopped_ads?: number;
+  changed_ads?: number;
+  avg_duration_days?: number;
+  avg_lifetime_days?: number;
+  persistence_score?: number;
+  evidence_level?: string;
+  last_sync_at?: string;
+  trend?: { date: string; active?: number; new?: number; stopped?: number; total?: number }[];
+  by_source?: { source?: string; source_id?: string; total: number }[];
+  by_status?: { status: string; total: number }[];
+  alerts?: { id?: string; type: string; title: string; detail?: string; detected_at?: string; ad_id?: string }[];
 }
 
 export interface LlmSettings {

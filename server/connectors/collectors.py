@@ -434,36 +434,80 @@ def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     if not token:
         return []
     payloads: list[dict] = []
-    fields = "id,ad_creative_bodies,ad_snapshot_url,page_name,ad_delivery_start_time,publisher_platforms"
+    fields = (
+        "id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,"
+        "ad_snapshot_url,ad_creative_bodies,ad_creative_link_captions,"
+        "ad_creative_link_descriptions,ad_creative_link_titles,ad_creative_link_urls,"
+        "page_id,page_name,publisher_platforms,impressions,spend,"
+        "estimated_audience_size,demographic_distribution,delivery_by_region"
+    )
+    safe_fields = "id,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,ad_snapshot_url,ad_creative_bodies,ad_creative_link_titles,ad_creative_link_urls,page_id,page_name,publisher_platforms"
     for query in brand_queries(brand):
         url = (
             "https://graph.facebook.com/v19.0/ads_archive?"
             f"search_terms={quote_plus(query)}&ad_reached_countries=%5B%22US%22%5D"
-            f"&ad_active_status=ALL&fields={fields}&limit=25&access_token={quote_plus(token)}"
+            f"&ad_active_status=ALL&fields={quote_plus(fields)}&limit=100&access_token={quote_plus(token)}"
         )
-        try:
-            data = fetch_json(url, timeout=20)
-        except FetchError:
-            continue
-        for ad in (data.get("data", []) if isinstance(data, dict) else []):
-            bodies = ad.get("ad_creative_bodies") or []
-            body = clean_text(" ".join(bodies)) or "(no creative text)"
-            payloads.append({
-                "source_id": "meta_ads",
-                "brand_id": brand.get("id"),
-                "external_id": f"{brand.get('id')}:{ad.get('id')}",
-                "data_type": "ad",
-                "dimension": "marketing",
-                "channel": "ads",
-                "platform": "meta",
-                "title": ad.get("page_name") or query,
-                "author": ad.get("page_name"),
-                "body": body,
-                "url": ad.get("ad_snapshot_url"),
-                "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
-                "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
-                "raw": ad,
-            })
+        # Follow Graph API paging.next until exhausted (bounded to avoid a
+        # pathological keyword returning an unbounded archive).
+        next_url = url
+        pages = 0
+        used_fallback = False
+        while next_url and pages < 20:
+            pages += 1
+            try:
+                data = fetch_json(next_url, timeout=20)
+            except FetchError:
+                # Field availability varies by API version, app review and ad
+                # category. Retry the first page with the public baseline so
+                # one restricted metric does not hide all creative data.
+                if not used_fallback and next_url == url:
+                    used_fallback = True
+                    next_url = url.replace(f"fields={quote_plus(fields)}", f"fields={quote_plus(safe_fields)}")
+                    continue
+                break
+            ads = data.get("data", []) if isinstance(data, dict) else []
+            for ad in ads:
+                if not isinstance(ad, dict):
+                    continue
+                bodies = ad.get("ad_creative_bodies") or []
+                body = clean_text(" ".join(bodies)) or "(no creative text)"
+                stop_time = ad.get("ad_delivery_stop_time")
+                status = "inactive" if stop_time else "active"
+                metrics = {
+                    "publisher_platforms": ad.get("publisher_platforms") or [],
+                    "impressions": ad.get("impressions"),
+                    "spend": ad.get("spend"),
+                    "estimated_audience_size": ad.get("estimated_audience_size"),
+                    "demographic_distribution": ad.get("demographic_distribution"),
+                    "delivery_by_region": ad.get("delivery_by_region"),
+                    "ad_creative_link_captions": ad.get("ad_creative_link_captions") or [],
+                    "ad_creative_link_descriptions": ad.get("ad_creative_link_descriptions") or [],
+                    "ad_creative_link_titles": ad.get("ad_creative_link_titles") or [],
+                    "ad_creative_link_urls": ad.get("ad_creative_link_urls") or [],
+                    "active_status": status,
+                }
+                payloads.append({
+                    "source_id": "meta_ads",
+                    "brand_id": brand.get("id"),
+                    "external_id": f"{brand.get('id')}:{ad.get('id')}",
+                    "data_type": "ad",
+                    "dimension": "marketing",
+                    "channel": "ads",
+                    "platform": "meta",
+                    "title": ad.get("page_name") or query,
+                    "author": ad.get("page_name"),
+                    "body": body,
+                    "url": ad.get("ad_snapshot_url"),
+                    "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
+                    "started_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
+                    "stopped_at": parse_rss_datetime(stop_time),
+                    "active_status": status,
+                    "metrics": metrics,
+                    "raw": ad,
+                })
+            paging = data.get("paging") if isinstance(data, dict) else None
+            next_url = paging.get("next") if isinstance(paging, dict) else None
     return payloads
 
 

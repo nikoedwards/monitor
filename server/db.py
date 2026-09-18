@@ -1,7 +1,9 @@
 """SQLite data layer: brand-rooted schema, migrations, and seed data."""
 from __future__ import annotations
 
+import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -170,6 +172,61 @@ CREATE TABLE IF NOT EXISTS records (
   created_at TEXT NOT NULL
 );
 
+-- Stable ad registry and daily observations.  Records remain the unified
+-- content stream; these tables retain ad lifecycle state that records
+-- intentionally de-duplicate away.
+CREATE TABLE IF NOT EXISTS ad_entities (
+  id TEXT PRIMARY KEY,
+  brand_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  ad_external_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'meta',
+  page_id TEXT,
+  page_name TEXT,
+  snapshot_url TEXT,
+  creative_body TEXT,
+  creative_hash TEXT,
+  started_at TEXT,
+  stopped_at TEXT,
+  active_status TEXT NOT NULL DEFAULT 'active',
+  publisher_platforms_json TEXT,
+  link_urls_json TEXT,
+  raw_json TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (brand_id, source_id, ad_external_id)
+);
+
+CREATE TABLE IF NOT EXISTS ad_snapshots (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  observed_date TEXT NOT NULL,
+  active_status TEXT NOT NULL,
+  started_at TEXT,
+  stopped_at TEXT,
+  creative_body TEXT,
+  creative_hash TEXT,
+  publisher_platforms_json TEXT,
+  metrics_json TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (entity_id, observed_date)
+);
+
+CREATE TABLE IF NOT EXISTS ad_events (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL,
+  brand_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  event_at TEXT NOT NULL,
+  details_json TEXT,
+  created_at TEXT NOT NULL
+);
+
 -- Materialized creator/influencer roster, re-aggregated from creator records.
 CREATE TABLE IF NOT EXISTS creators (
   id TEXT PRIMARY KEY,
@@ -317,6 +374,12 @@ CREATE INDEX IF NOT EXISTS idx_records_brand ON records(brand_id);
 CREATE INDEX IF NOT EXISTS idx_records_dimension ON records(dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_records_occurred ON records(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_records_source ON records(source_id);
+CREATE INDEX IF NOT EXISTS idx_ad_entities_brand ON ad_entities(brand_id, platform, last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_ad_entities_status ON ad_entities(brand_id, active_status);
+CREATE INDEX IF NOT EXISTS idx_ad_snapshots_entity ON ad_snapshots(entity_id, observed_date);
+CREATE INDEX IF NOT EXISTS idx_ad_snapshots_brand ON ad_snapshots(brand_id, observed_date);
+CREATE INDEX IF NOT EXISTS idx_ad_events_entity ON ad_events(entity_id, event_at);
+CREATE INDEX IF NOT EXISTS idx_ad_events_brand ON ad_events(brand_id, event_at);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);
 CREATE INDEX IF NOT EXISTS idx_links_brand ON links(brand_id, dimension, channel);
 CREATE INDEX IF NOT EXISTS idx_sales_metrics_brand ON sales_metrics(brand_id, snapshot_date);
@@ -330,16 +393,66 @@ CREATE INDEX IF NOT EXISTS idx_creators_brand ON creators(brand_id, platform);
 """
 
 
+_DB_BUSY_TIMEOUT_MS = max(1_000, int(os.environ.get("MONITOR_DB_BUSY_TIMEOUT_MS", "5_000")))
+_DB_LOCK_RETRIES = max(1, int(os.environ.get("MONITOR_DB_LOCK_RETRIES", "6")))
+
+
+class ResilientConnection(sqlite3.Connection):
+    """SQLite connection that retries transient busy/locked operations.
+
+    Collectors perform network I/O between database statements.  A normal
+    sqlite3 connection can leave a deferred write transaction open during that
+    wait, so another request sees ``database is locked``.  Connections are put
+    in autocommit mode below, and this small retry layer handles the remaining
+    short-lived writer races without retrying unrelated SQL errors.
+    """
+
+    @staticmethod
+    def _is_busy(exc: sqlite3.OperationalError) -> bool:
+        message = str(exc).lower()
+        return "database is locked" in message or "database table is locked" in message or "database is busy" in message
+
+    def _retry(self, operation, *args, **kwargs):
+        delay = 0.05
+        for attempt in range(_DB_LOCK_RETRIES):
+            try:
+                return operation(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not self._is_busy(exc) or attempt >= _DB_LOCK_RETRIES - 1:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 1.0)
+
+    def execute(self, sql, parameters=()):
+        return self._retry(super().execute, sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        return self._retry(super().executemany, sql, seq_of_parameters)
+
+    def executescript(self, sql_script):
+        return self._retry(super().executescript, sql_script)
+
+
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # check_same_thread=False: FastAPI may run a sync dependency's setup and the
     # path operation on different threadpool workers, so a per-request connection
     # can legitimately move across threads (never used concurrently).
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    # Autocommit is intentional: collectors fetch remote pages while using the
+    # same connection.  Leaving the default deferred transaction enabled would
+    # keep SQLite's writer lock for the whole network crawl.
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=_DB_BUSY_TIMEOUT_MS / 1000,
+        check_same_thread=False,
+        isolation_level=None,
+        factory=ResilientConnection,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
     return conn
 
 
@@ -349,6 +462,9 @@ def db() -> Iterator[sqlite3.Connection]:
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
