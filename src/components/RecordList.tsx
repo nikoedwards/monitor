@@ -202,6 +202,15 @@ function CreatorEvidenceDetails({ record }: { record: RecordItem }) {
   const status = String(record.raw?.transcript_status || evidence.transcript_status || "");
   const note = String(evidence.analysis_note || "");
   const variantTarget = matches.find((item) => item.match_rule === "automatic_caption_alias")?.matched_query;
+  const scopeLabel = matches.length
+    ? "局部字幕片段（可定位）"
+    : String(evidence.scope || "") === "title_and_description"
+      ? "标题 + 简介（未确认完整视频）"
+      : String(evidence.scope || "") === "title"
+        ? "标题（未确认完整视频）"
+        : String(evidence.scope || "") === "description"
+          ? "简介（未确认完整视频）"
+          : "公开元数据（未确认完整视频）";
   return (
     <details className="mt-3 rounded-md" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
       <summary className="cursor-pointer select-none px-2.5 py-2 text-[12px]" style={{ color: "var(--body)" }}>
@@ -210,6 +219,7 @@ function CreatorEvidenceDetails({ record }: { record: RecordItem }) {
       </summary>
       <div className="space-y-2 px-2.5 pb-2.5 text-[12px] leading-relaxed" style={{ color: "var(--mute)" }}>
         {locations.length > 0 && <div><span style={{ color: "var(--body)" }}>命中位置：</span>{locations.join("、")}</div>}
+        <div><span style={{ color: "var(--body)" }}>证据范围：</span>{scopeLabel}</div>
         {terms.length > 0 && <div><span style={{ color: "var(--body)" }}>命中词：</span>{terms.join("、")}</div>}
         {Array.isArray(evidence.matched_queries) && evidence.matched_queries.length > 0 && (
           <div><span style={{ color: "var(--body)" }}>搜索入口：</span>{evidence.matched_queries.map((item) => String(item)).join("、")}</div>
