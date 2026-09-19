@@ -7,14 +7,18 @@ creator's subscriber count. Requires a ``youtube_api_key`` credential.
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
-from ...fetchers import FetchError, fetch_json
+from ...fetchers import FetchError, fetch_json, fetch_text
 from ...util import clean_text
 from .base import CreatorPost, CreatorProvider, collection_since, recent_creator_posts
+from .evidence import parse_transcript_payload, transcript_matches
 
 _API = "https://www.googleapis.com/youtube/v3"
+_MAX_TRANSCRIPT_VIDEOS = 4
+_PREFERRED_CAPTION_LANGS = ("zh-Hans", "zh", "en", "en-US", "en-GB")
 
 
 def _to_int(value) -> int | None:
@@ -152,7 +156,6 @@ class YouTubePublicProvider(CreatorProvider):
         self.max_results = max(1, min(max_results, 12))
 
     def collect(self, conn: sqlite3.Connection, brand: dict, queries: list[str]) -> list[CreatorPost]:
-        del conn
         try:
             import yt_dlp
         except ImportError as exc:
@@ -160,6 +163,14 @@ class YouTubePublicProvider(CreatorProvider):
         posts: dict[str, CreatorPost] = {}
         failures: list[str] = []
         successful_queries = 0
+        product_terms: list[str] = []
+        try:
+            from .products import load_product_signals
+            for product in load_product_signals(conn, brand.get("id") or ""):
+                product_terms.extend(str(signal.get("value") or "") for signal in product.get("signals", []) if isinstance(signal, dict) and signal.get("value"))
+        except (sqlite3.OperationalError, TypeError, ValueError):
+            pass
+        transcript_budget = _MAX_TRANSCRIPT_VIDEOS
         options = {
             "quiet": True,
             "no_warnings": True,
@@ -187,13 +198,80 @@ class YouTubePublicProvider(CreatorProvider):
                         continue
                     for item in (result or {}).get("entries") or []:
                         post = self._normalize(item, query)
-                        if post and post.external_id not in posts:
+                        if not post:
+                            continue
+                        existing = posts.get(post.external_id)
+                        if existing is None:
+                            post.raw["matched_queries"] = [query]
+                            if transcript_budget > 0:
+                                post.raw.update(self._transcript_evidence(item, self._transcript_terms(brand, query, product_terms)))
+                                transcript_budget -= 1
+                            else:
+                                post.raw["transcript_status"] = "not_checked_budget"
                             posts[post.external_id] = post
+                        else:
+                            matched = existing.raw.setdefault("matched_queries", [])
+                            if query not in matched:
+                                matched.append(query)
         except Exception as exc:
             raise FetchError(f"YouTube 公开搜索失败：{str(exc)[:240]}") from exc
         if successful_queries == 0 and failures:
             raise FetchError(f"YouTube 公开搜索失败：{failures[0]}")
         return recent_creator_posts(list(posts.values()), brand)
+
+    @staticmethod
+    def _transcript_terms(brand: dict, query: str, product_terms: list[str] | None = None) -> list[str]:
+        values = [clean_text(brand.get("name")), clean_text(query)]
+        keywords = brand.get("monitoring_keywords") or brand.get("monitoring_keywords_json")
+        if isinstance(keywords, str):
+            try:
+                keywords = json.loads(keywords or "[]")
+            except (TypeError, ValueError):
+                keywords = []
+        values.extend(clean_text(item) for item in (keywords or []))
+        values.extend(clean_text(item) for item in (product_terms or []))
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            key = value.casefold()
+            if value and key not in seen:
+                seen.add(key)
+                result.append(value)
+        return result[:24]
+
+    @staticmethod
+    def _caption_source(item: dict) -> tuple[str, str, str] | None:
+        for key, source in (("subtitles", "manual_subtitle"), ("automatic_captions", "automatic_caption")):
+            tracks = item.get(key)
+            if not isinstance(tracks, dict):
+                continue
+            languages = list(_PREFERRED_CAPTION_LANGS) + [lang for lang in tracks if lang not in _PREFERRED_CAPTION_LANGS]
+            for language in languages:
+                formats = tracks.get(language)
+                if isinstance(formats, dict):
+                    formats = [formats]
+                if not isinstance(formats, list):
+                    continue
+                ordered = sorted((fmt for fmt in formats if isinstance(fmt, dict)), key=lambda fmt: (str(fmt.get("ext") or "") not in {"vtt", "json3", "srv3"}, str(fmt.get("ext") or "")))
+                for fmt in ordered:
+                    value = clean_text(fmt.get("url") or fmt.get("data") or fmt.get("content"))
+                    if value:
+                        return value, source, clean_text(fmt.get("ext"))
+        return None
+
+    @classmethod
+    def _transcript_evidence(cls, item: dict, terms: list[str]) -> dict:
+        track = cls._caption_source(item)
+        if not track:
+            return {"transcript_status": "unavailable"}
+        value, source, extension = track
+        try:
+            text = fetch_text(value, accept="text/vtt,application/json,text/plain,*/*", timeout=12) if value.startswith(("http://", "https://")) else value
+            cues = parse_transcript_payload(text, source=source, limit=500)
+            matches = transcript_matches(cues, terms, limit=12)
+        except (FetchError, OSError, ValueError, TypeError):
+            return {"transcript_status": "error", "transcript_source": source}
+        return {"transcript_status": "matched" if matches else "available_no_match", "transcript_source": source, "transcript_format": extension or "vtt", "transcript_cue_count": len(cues), "transcript_matches": matches}
 
     @staticmethod
     def _normalize(item: dict, query: str) -> CreatorPost | None:
@@ -234,5 +312,8 @@ class YouTubePublicProvider(CreatorProvider):
             views=_to_int(item.get("view_count")),
             likes=_to_int(item.get("like_count")),
             comments=_to_int(item.get("comment_count")),
-            raw={"query": query, "collection_method": "youtube_public_ytdlp"},
+            raw={"query": query, "collection_method": "youtube_public_ytdlp", "description": description,
+                 "tags": [clean_text(tag) for tag in (item.get("tags") or []) if clean_text(tag)],
+                 "categories": [clean_text(category) for category in (item.get("categories") or []) if clean_text(category)],
+                 "duration_seconds": _to_int(item.get("duration"))},
         )

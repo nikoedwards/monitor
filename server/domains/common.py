@@ -11,6 +11,8 @@ from fastapi import HTTPException
 from ..db import db as _db
 from ..records import record_to_dict
 from ..relevance import google_news_record_is_relevant, reddit_search_record_is_relevant
+from ..connectors.creators.evidence import enrich_creator_record_evidence
+from ..connectors.creators.products import load_product_signals, match_record_to_products
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:
@@ -115,6 +117,8 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
     )
     records: list[dict] = []
     brand_names: dict[str, str] = {}
+    creator_brands: dict[str, dict] = {}
+    creator_products: dict[str, list[dict]] = {}
     for row in rows:
         if row["source_id"] in {"google_news", "reddit_search"}:
             try:
@@ -141,7 +145,27 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
                 relevance_record, brand_name
             ):
                 continue
-        records.append(record_to_dict(row))
+        item = record_to_dict(row)
+        if row["channel"] == "creators" or row["data_type"] == "creator_post":
+            brand_id = row["brand_id"] or ""
+            if brand_id:
+                if brand_id not in creator_brands:
+                    try:
+                        brand_row = conn.execute("SELECT id, name, monitoring_keywords_json FROM brands WHERE id = ?", (brand_id,)).fetchone()
+                    except sqlite3.OperationalError:
+                        brand_row = None
+                    creator_brands[brand_id] = dict(brand_row) if brand_row else {"id": brand_id}
+                if brand_id not in creator_products:
+                    try:
+                        creator_products[brand_id] = load_product_signals(conn, brand_id)
+                    except sqlite3.OperationalError:
+                        creator_products[brand_id] = []
+                try:
+                    product_matches = match_record_to_products(item, creator_products.get(brand_id, []))
+                except (TypeError, ValueError):
+                    product_matches = []
+                item = enrich_creator_record_evidence(item, brand=creator_brands.get(brand_id), product_matches=product_matches)
+        records.append(item)
         if len(records) >= requested:
             break
     return records
