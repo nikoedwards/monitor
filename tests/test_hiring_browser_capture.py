@@ -1,11 +1,13 @@
 import sqlite3
 import unittest
 import json
+from urllib.error import URLError
 from unittest.mock import patch
 
 from server.connectors.hiring.runner import ingest_browser_hiring_capture, run_hiring_collection
 from server.db import SCHEMA, _cleanup_fake_boss_login_postings
 from server.util import utc_now
+from tools.boss_browser_worker import CaptureResult, _post_capture, _rows_to_links
 
 
 class HiringBrowserCaptureTests(unittest.TestCase):
@@ -115,6 +117,66 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) AS c FROM job_postings").fetchone()["c"], 0)
         self.assertEqual(self.conn.execute("SELECT * FROM links").fetchone()["last_status"], "blocked")
+
+    def test_blocked_page_preserves_jobs_captured_before_challenge(self):
+        result = self.capture(page_status="blocked", page_error="详情页安全验证")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["captured"], 1)
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) AS c FROM job_postings").fetchone()["c"], 1)
+        link = self.conn.execute("SELECT * FROM links").fetchone()
+        self.assertEqual(link["last_status"], "blocked")
+        self.assertIn("安全验证", link["last_error"])
+
+    def test_local_api_failure_falls_back_to_direct_database_ingestion(self):
+        capture = CaptureResult(
+            source_url="https://www.zhipin.com/gongsi/example.html",
+            source_title="Example 招聘",
+            page_status="ok",
+            page_error="",
+            jobs=[{
+                "url": "https://www.zhipin.com/job_detail/abc123.html",
+                "title": "产品经理",
+                "city": "深圳",
+                "jd_text": "负责 AI 产品规划",
+                "is_open": True,
+            }],
+        )
+        with (
+            patch("tools.boss_browser_worker.urlopen", side_effect=URLError("offline")),
+            patch("tools.boss_browser_worker.connect", return_value=self.conn),
+        ):
+            result = _post_capture("http://127.0.0.1:8790", capture, self.brand["id"])
+        self.assertEqual(result["delivery"], "direct_db")
+        self.assertEqual(result["captured"], 1)
+
+    def test_zhipin_url_is_accepted_even_with_legacy_platform_value(self):
+        links = _rows_to_links([{
+            "id": "boss-link",
+            "brand_id": self.brand["id"],
+            "url": "https://www.zhipin.com/gongsi/example.html",
+            "platform": "legacy",
+        }])
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].platform, "boss")
+
+    def test_browser_capture_reuses_legacy_zhipin_link(self):
+        now = utc_now()
+        source_url = "https://www.zhipin.com/gongsi/example.html"
+        self.conn.execute(
+            """
+            INSERT INTO links (id, brand_id, dimension, channel, platform, url, canonical_url,
+                status, config_json, created_at, updated_at)
+            VALUES ('legacy-boss', ?, 'hiring', 'legacy', 'legacy', ?, ?, 'active', '{}', ?, ?)
+            """,
+            (self.brand["id"], source_url, source_url, now, now),
+        )
+        result = self.capture()
+        self.assertEqual(result["captured"], 1)
+        link = self.conn.execute("SELECT * FROM links WHERE id = 'legacy-boss'").fetchone()
+        self.assertEqual(link["platform"], "boss")
+        self.assertEqual(link["channel"], "boss")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) AS c FROM links").fetchone()["c"], 1)
 
     def test_non_job_url_is_rejected(self):
         result = self.capture(jobs=[{"url": "https://www.zhipin.com/web/user/", "title": "登录", "is_open": True}])

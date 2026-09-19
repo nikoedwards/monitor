@@ -63,6 +63,10 @@ CLOSED_MARKERS = ("职位已下线", "停止招聘", "职位不存在", "已结�
 JOB_DETAIL_PATH = "/job_detail/"
 
 
+class _MonitorUnavailable(RuntimeError):
+    """The configured Monitor endpoint could not be reached."""
+
+
 @dataclass(frozen=True)
 class HiringLink:
     id: str
@@ -144,7 +148,12 @@ def _read_links_from_api(base_url: str, brand_id: str | None, link_id: str | Non
     try:
         with urlopen(Request(endpoint, headers={"Accept": "application/json"}), timeout=20) as response:
             data = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
-    except (HTTPError, URLError, ValueError) as exc:
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"Monitor API HTTP {exc.code}: {detail}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise _MonitorUnavailable(f"无法连接 Monitor API {endpoint}: {exc}") from exc
+    except ValueError as exc:
         raise RuntimeError(f"无法从 Monitor API 读取招聘链接 {endpoint}: {exc}") from exc
     rows = data.get("links") if isinstance(data, dict) else None
     if not isinstance(rows, list):
@@ -195,7 +204,7 @@ def _read_links_from_db(brand_id: str | None, link_id: str | None) -> list[Hirin
 def _read_links(base_url: str, brand_id: str | None, link_id: str | None) -> list[HiringLink]:
     try:
         return _read_links_from_api(base_url, brand_id, link_id)
-    except RuntimeError:
+    except _MonitorUnavailable:
         host = (urlsplit(base_url).hostname or "").lower()
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise
@@ -225,7 +234,40 @@ def _post_capture(base_url: str, capture: CaptureResult, brand_id: str) -> dict[
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"Monitor API HTTP {exc.code}: {detail}") from exc
-    except URLError as exc:
+    except (URLError, TimeoutError, OSError) as exc:
+        # The Codex cron may run while the local SPA/API is closed.  Keep the
+        # scheduled worker self-contained by applying the same ingestion
+        # routine directly to the local SQLite database when the target is a
+        # local Monitor address.  Remote API failures remain hard failures so
+        # a misconfigured deployment cannot silently write to another DB.
+        host = (urlsplit(base_url).hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            try:
+                from server.connectors.hiring.runner import ingest_browser_hiring_capture
+
+                conn = connect()
+                try:
+                    brand = conn.execute("SELECT * FROM brands WHERE id = ? LIMIT 1", (brand_id,)).fetchone()
+                    if not brand:
+                        raise RuntimeError(f"本地 Monitor 中不存在品牌 {brand_id}。")
+                    result = ingest_browser_hiring_capture(
+                        conn,
+                        dict(brand),
+                        platform="boss",
+                        source_url=capture.source_url,
+                        source_title=capture.source_title,
+                        page_status=capture.page_status,
+                        page_error=capture.page_error,
+                        jobs=capture.jobs,
+                    )
+                    conn.commit()
+                    return {**result, "delivery": "direct_db"}
+                finally:
+                    conn.close()
+            except Exception as direct_exc:
+                raise RuntimeError(
+                    f"无法连接 Monitor API {endpoint}，且本地数据库写入失败：{direct_exc}"
+                ) from direct_exc
         raise RuntimeError(f"无法连接 Monitor API {endpoint}: {exc.reason}") from exc
 
 

@@ -190,14 +190,39 @@ def _browser_capture_link(
     source_title: str = "",
 ) -> dict:
     canon = canonical_url(source_url)
+    platform_clause = "platform = ?"
+    platform_params: tuple = (platform,)
+    if platform == "boss":
+        # Older rows may have a blank or legacy platform value even though the
+        # URL is a BOSS source. Reuse that configured row instead of creating a
+        # paused duplicate when the local worker falls back to direct DB mode.
+        platform_clause = "(platform = ? OR lower(COALESCE(url, '')) LIKE '%zhipin.com%')"
+        platform_params = (platform,)
     exact = conn.execute(
-        """
+        f"""
         SELECT * FROM links
-        WHERE brand_id = ? AND dimension = 'hiring' AND platform = ? AND canonical_url = ?
+        WHERE brand_id = ? AND dimension = 'hiring' AND {platform_clause} AND canonical_url = ?
         LIMIT 1
         """,
-        (brand_id, platform, canon),
+        (brand_id, *platform_params, canon),
     ).fetchone()
+    if not exact and platform == "boss":
+        # Legacy rows sometimes stored the non-canonical URL in both URL
+        # columns. Compare a normalized value in Python before creating a new
+        # helper source so those rows are upgraded in place.
+        candidates = conn.execute(
+            """
+            SELECT * FROM links
+            WHERE brand_id = ? AND dimension = 'hiring'
+              AND lower(COALESCE(url, '')) LIKE '%zhipin.com%'
+            ORDER BY created_at
+            """,
+            (brand_id,),
+        ).fetchall()
+        for candidate in candidates:
+            if canonical_url(candidate["url"] or "") == canon:
+                exact = candidate
+                break
     if exact:
         link = dict(exact)
         if platform == "boss":
@@ -205,10 +230,16 @@ def _browser_capture_link(
             config["browser_automation"] = True
             config.setdefault("browser_capture", True)
             conn.execute(
-                "UPDATE links SET config_json = ?, updated_at = ? WHERE id = ?",
+                """
+                UPDATE links
+                SET channel = 'boss', platform = 'boss', config_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
                 (json.dumps(config, ensure_ascii=False), utc_now(), link["id"]),
             )
             link["config_json"] = json.dumps(config, ensure_ascii=False)
+            link["channel"] = "boss"
+            link["platform"] = "boss"
         return link
 
     label = _BROWSER_CAPTURE_LABEL[platform]
@@ -292,7 +323,8 @@ def ingest_browser_hiring_capture(
 
     link = _browser_capture_link(conn, brand["id"], platform, source_url, source_title)
     now = utc_now()
-    if page_status == "blocked":
+    blocked_capture = page_status == "blocked"
+    if blocked_capture and not jobs:
         error = clean_text(page_error) or "页面需要登录或安全验证，请在浏览器中完成后重新采集。"
         conn.execute(
             "UPDATE links SET last_collect_at = ?, last_status = 'blocked', last_error = ?, updated_at = ? WHERE id = ?",
@@ -300,7 +332,14 @@ def ingest_browser_hiring_capture(
         )
         return {"link_id": link["id"], "captured": 0, "changed": 0, "closed": 0, "errors": 1, "status": "blocked"}
 
-    summary = {"link_id": link["id"], "captured": 0, "changed": 0, "closed": 0, "errors": 0, "status": "ok"}
+    summary = {
+        "link_id": link["id"],
+        "captured": 0,
+        "changed": 0,
+        "closed": 0,
+        "errors": 1 if blocked_capture else 0,
+        "status": "blocked" if blocked_capture else "ok",
+    }
     seen: set[str] = set()
     for item in jobs or []:
         url = (item.get("url") or "").strip()
@@ -352,8 +391,12 @@ def ingest_browser_hiring_capture(
         summary["changed"] += int(result["changed"])
         summary["closed"] += int(result["job_status"] == "closed")
 
-    link_status = "ok" if summary["captured"] else "partial"
-    link_error = "" if summary["captured"] else "当前页面没有发现可识别的职位；请打开职位列表或职位详情页后重试。"
+    if blocked_capture:
+        link_status = "blocked"
+        link_error = clean_text(page_error) or "访问职位详情时遇到登录或安全验证，请人工处理后重试。"
+    else:
+        link_status = "ok" if summary["captured"] else "partial"
+        link_error = "" if summary["captured"] else "当前页面没有发现可识别的职位；请打开职位列表或职位详情页后重试。"
     conn.execute(
         "UPDATE links SET last_collect_at = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
         (now, link_status, link_error, now, link["id"]),

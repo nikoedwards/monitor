@@ -9,7 +9,7 @@ pip install playwright
 python -m playwright install chromium
 ```
 
-Monitor API 默认使用 `http://127.0.0.1:8790`。如果 Monitor 部署在线上，可设置 `MONITOR_BASE_URL`，或传入 `--base-url https://...`。worker 会从该 Monitor 读取 active BOSS 招聘链接并把结果提交回同一地址；本机 API 暂时不可用时会回退读取本地数据库。
+Monitor API 默认使用 `http://127.0.0.1:8790`。如果 Monitor 部署在线上，可设置 `MONITOR_BASE_URL`，或传入 `--base-url https://...`。worker 会从该 Monitor 读取 active BOSS 招聘链接并把结果提交回同一地址；本机 API 暂时不可用时会回退读取本地数据库，并直接写入同一个本地 SQLite 数据库，不要求定时任务同时启动 Web 服务。
 
 在品牌管理中配置 `dimension=hiring`、`platform=boss` 的 BOSS 链接。尚未配置链接时也可以先执行首次登录命令，worker 会打开 BOSS 首页并保存专用 profile。
 
