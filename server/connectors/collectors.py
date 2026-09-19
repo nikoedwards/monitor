@@ -962,11 +962,14 @@ def _google_advertiser_suggestions(query: str) -> list[dict]:
 def _google_name_matches_query(name: str, query: str, brand_name: str | None = None) -> bool:
     """Keep advertiser suggestions that plausibly represent the monitored brand."""
     candidates = [clean_text(query), clean_text(brand_name)]
-    normalized_name = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    # ``\w`` keeps Unicode letters/digits, so Chinese or accented advertiser
+    # names can still be matched without relying on an unsafe first-result
+    # fallback from SearchSuggestions.
+    normalized_name = re.sub(r"[_\W]+", " ", (name or "").casefold()).strip()
     if not normalized_name:
         return False
     for candidate in candidates:
-        normalized = re.sub(r"[^a-z0-9]+", " ", (candidate or "").lower()).strip()
+        normalized = re.sub(r"[_\W]+", " ", (candidate or "").casefold()).strip()
         if not normalized:
             continue
         if normalized_name == normalized or normalized_name.startswith(f"{normalized} "):
@@ -1118,12 +1121,10 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
             for advertiser in suggestions
             if _google_name_matches_query(advertiser.get("name", ""), query, brand.get("name"))
         ]
-        # If the endpoint returns exactly one suggestion, it is safe to use it
-        # as the public advertiser match even when punctuation/localization
-        # prevents the normalized name check.  With multiple suggestions, do
-        # not silently attach a neighboring advertiser to this brand query.
-        if not matching and len(suggestions) == 1:
-            matching = suggestions
+        # Do not attach an arbitrary suggestion when the advertiser name does
+        # not match the monitored brand. Google sometimes returns a single
+        # generic result for product-like queries; treating that as a match
+        # pollutes the lifecycle table with unrelated advertisers.
         for advertiser in matching:
             advertiser_id = advertiser.get("id")
             if not advertiser_id or advertiser_id in seen_advertisers:
