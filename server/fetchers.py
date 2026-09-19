@@ -166,13 +166,17 @@ def fetch_form_json(
         raise FetchError(f"Invalid JSON response from {urlparse(url).hostname or url}") from exc
 
 
-def fetch_page(input_url: str, *, timeout: int = 18) -> dict:
+def fetch_page(
+    input_url: str,
+    *,
+    timeout: int = 18,
+    headers: dict | None = None,
+) -> dict:
     """Fetch a page and return parsed metadata + visible text."""
     url = normalize_url(input_url)
-    request = Request(
-        url,
-        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
-    )
+    request_headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    request_headers.update(headers or {})
+    request = Request(url, headers=request_headers)
     try:
         with _open(request, timeout) as response:
             final_url = response.geturl()

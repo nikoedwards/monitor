@@ -21,13 +21,38 @@ CHANNELS = ["amazon", "dtc", "other_ecom", "offline"]
 
 def metric_to_dict(row: sqlite3.Row) -> dict:
     item = dict(row)
-    item.pop("raw_json", None)
+    raw_json = item.pop("raw_json", None)
+    raw = {}
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                raw = parsed
+        except (TypeError, ValueError):
+            raw = {}
+    # Estimate metadata is stored in dedicated columns when available and in
+    # raw_json for older databases/providers. Expose one stable API shape.
+    for key in ("estimate_method", "estimate_confidence", "estimate_period_days"):
+        if item.get(key) is None and raw.get(key) is not None:
+            item[key] = raw[key]
+    item["estimate_basis"] = raw.get("estimate_basis") if isinstance(raw.get("estimate_basis"), dict) else None
     item["in_stock"] = bool(item["in_stock"]) if item.get("in_stock") is not None else None
     item["changes"] = json.loads(item.pop("changes_json", None) or "[]")
     return item
 
 
-_LEGACY_CHANGE_FIELDS = ("rating", "review_count", "price", "units_est", "revenue_est", "in_stock")
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return columns for a table, including compatibility test/legacy schemas."""
+    try:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+_LEGACY_CHANGE_FIELDS = (
+    "rating", "review_count", "price", "units_est", "revenue_est", "in_stock",
+    "category_rank", "subcategory_rank",
+)
 
 
 def _metric_changes(previous: dict | None, current: dict) -> list[dict]:
@@ -43,8 +68,27 @@ def _metric_changes(previous: dict | None, current: dict) -> list[dict]:
         return changes
     known = {str(change.get("field")) for change in changes}
     old_rank, new_rank = metric_rank_value(previous), metric_rank_value(current)
-    if "rank" not in known and old_rank != new_rank and not (old_rank is None and new_rank is None):
-        changes.append({"field": "rank", "from": old_rank, "to": new_rank})
+    has_explicit_category = (
+        current.get("category_rank") is not None
+        or previous.get("category_rank") is not None
+    )
+    if "rank" not in known and "category_rank" not in known and old_rank != new_rank and not (old_rank is None and new_rank is None):
+        if has_explicit_category:
+            # When a legacy snapshot only has `rank`/`bsr`, use that value as
+            # the baseline for the first explicit category-rank snapshot.
+            # This keeps the migration event meaningful instead of reporting
+            # a misleading ``None -> new`` transition.
+            old_category = previous.get("category_rank")
+            new_category = current.get("category_rank")
+            if old_category is None:
+                old_category = old_rank
+            if new_category is None:
+                new_category = new_rank
+            if old_category != new_category and not (old_category is None and new_category is None):
+                changes.append({"field": "category_rank", "from": old_category, "to": new_category})
+                known.add("category_rank")
+        else:
+            changes.append({"field": "rank", "from": old_rank, "to": new_rank})
     for field in _LEGACY_CHANGE_FIELDS:
         if field in known:
             continue
@@ -94,20 +138,38 @@ def list_metrics(
 @router.post("/metrics", status_code=201)
 def add_metric(payload: SalesMetricIn, conn: sqlite3.Connection = Depends(get_conn)):
     metric_id = new_id()
+    values = {
+        "id": metric_id,
+        "link_id": payload.link_id,
+        "brand_id": payload.brand_id,
+        "product_id": payload.product_id,
+        "snapshot_date": payload.snapshot_date or today(),
+        "channel": payload.channel,
+        "platform": payload.platform,
+        "price": payload.price,
+        "currency": payload.currency,
+        "review_count": payload.review_count,
+        "rating": payload.rating,
+        "rank": payload.rank,
+        "category_rank": payload.category_rank,
+        "subcategory_rank": payload.subcategory_rank,
+        "category_name": payload.category_name,
+        "subcategory_name": payload.subcategory_name,
+        "units_est": payload.units_est,
+        "revenue_est": payload.revenue_est,
+        "estimate_method": payload.estimate_method,
+        "estimate_confidence": payload.estimate_confidence,
+        "estimate_period_days": payload.estimate_period_days,
+        "in_stock": None if payload.in_stock is None else int(payload.in_stock),
+        "source": payload.source,
+        "created_at": utc_now(),
+    }
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sales_metrics)")}
+    selected = [key for key in values if key in columns]
+    placeholders = ", ".join("?" for _ in selected)
     conn.execute(
-        """
-        INSERT INTO sales_metrics (id, link_id, brand_id, product_id, snapshot_date, channel,
-            platform, price, currency, review_count, rating, rank, units_est, revenue_est,
-            in_stock, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            metric_id, payload.link_id, payload.brand_id, payload.product_id,
-            payload.snapshot_date or today(), payload.channel, payload.platform, payload.price,
-            payload.currency, payload.review_count, payload.rating, payload.rank,
-            payload.units_est, payload.revenue_est,
-            None if payload.in_stock is None else int(payload.in_stock), payload.source, utc_now(),
-        ),
+        f"INSERT INTO sales_metrics ({', '.join(selected)}) VALUES ({placeholders})",
+        [values[key] for key in selected],
     )
     return metric_to_dict(conn.execute("SELECT * FROM sales_metrics WHERE id = ?", (metric_id,)).fetchone())
 
@@ -598,7 +660,17 @@ def sales_summary(
             summary_previous_by_listing[previous_key] = previous_metric
 
     by_channel: dict[str, dict] = {
-        c: {"channel": c, "revenue": 0.0, "units": 0, "data_points": 0, "latest_listings": 0, "revenue_points": 0, "units_points": 0}
+        c: {
+            "channel": c,
+            "revenue": 0.0,
+            "units": 0,
+            "data_points": 0,
+            "latest_listings": 0,
+            "configured_links": 0,
+            "configured_listings": 0,
+            "revenue_points": 0,
+            "units_points": 0,
+        }
         for c in CHANNELS
     }
     # Keep the revenue/unit series for the existing sales chart, but also
@@ -612,6 +684,10 @@ def sales_summary(
             "units": 0,
             "rank_sum": 0.0,
             "rank_count": 0,
+            "category_rank_sum": 0.0,
+            "category_rank_count": 0,
+            "subcategory_rank_sum": 0.0,
+            "subcategory_rank_count": 0,
             "rating_sum": 0.0,
             "rating_count": 0,
             "review_count": 0,
@@ -620,7 +696,16 @@ def sales_summary(
             "changed_listings": set(),
         }
     )
-    product_map: dict[str, dict] = defaultdict(lambda: {"product_id": None, "revenue": 0.0, "units": 0, "listings": 0})
+    product_map: dict[str, dict] = defaultdict(
+        lambda: {
+            "product_id": None,
+            "revenue": 0.0,
+            "units": 0,
+            "listings": 0,
+            "category_rank_avg": None,
+            "subcategory_rank_avg": None,
+        }
+    )
 
     # The latest row per listing is the only meaningful value for a global
     # snapshot (summing ranks/ratings across all historical rows is invalid).
@@ -637,6 +722,8 @@ def sales_summary(
                 "units": 0,
                 "data_points": 0,
                 "latest_listings": 0,
+                "configured_links": 0,
+                "configured_listings": 0,
                 "revenue_points": 0,
                 "units_points": 0,
             },
@@ -657,10 +744,18 @@ def sales_summary(
         if effective_changes:
             day["changed_listings"].add(listing_key)
             changed_listing_keys.add(listing_key)
-        rank = m.get("bsr") if m.get("bsr") is not None else m.get("rank")
-        if rank is not None:
-            day["rank_sum"] += rank
+        category_rank = m.get("category_rank")
+        if category_rank is None:
+            category_rank = m.get("bsr") if m.get("bsr") is not None else m.get("rank")
+        subcategory_rank = m.get("subcategory_rank")
+        if category_rank is not None:
+            day["rank_sum"] += category_rank
             day["rank_count"] += 1
+            day["category_rank_sum"] += category_rank
+            day["category_rank_count"] += 1
+        if subcategory_rank is not None:
+            day["subcategory_rank_sum"] += subcategory_rank
+            day["subcategory_rank_count"] += 1
         if m.get("rating") is not None:
             day["rating_sum"] += m["rating"]
             day["rating_count"] += 1
@@ -693,13 +788,21 @@ def sales_summary(
     # estimates, so products with scraped data do not appear as empty zeros.
     for pid, bucket in product_map.items():
         product_rows = [m for m in latest_by_listing.values() if (m.get("product_id") or "__unmapped__") == pid]
-        ranks = [m.get("bsr") if m.get("bsr") is not None else m.get("rank") for m in product_rows]
+        ranks = [
+            m.get("category_rank")
+            if m.get("category_rank") is not None
+            else (m.get("bsr") if m.get("bsr") is not None else m.get("rank"))
+            for m in product_rows
+        ]
         ranks = [value for value in ranks if value is not None]
+        subcategory_ranks = [m.get("subcategory_rank") for m in product_rows if m.get("subcategory_rank") is not None]
         ratings = [m["rating"] for m in product_rows if m.get("rating") is not None]
         reviews = [m["review_count"] for m in product_rows if m.get("review_count") is not None]
         product_metrics = [m for m in metrics if (m.get("product_id") or "__unmapped__") == pid]
         bucket["listings"] = len(product_rows)
         bucket["rank_avg"] = round(sum(ranks) / len(ranks), 2) if ranks else None
+        bucket["category_rank_avg"] = bucket["rank_avg"]
+        bucket["subcategory_rank_avg"] = round(sum(subcategory_ranks) / len(subcategory_ranks), 2) if subcategory_ranks else None
         bucket["rating_avg"] = round(sum(ratings) / len(ratings), 2) if ratings else None
         bucket["review_count"] = sum(reviews) if reviews else None
         bucket["revenue_points"] = sum(m.get("revenue_est") is not None for m in product_metrics)
@@ -721,12 +824,18 @@ def sales_summary(
     trend = []
     for item in sorted(trend_map.values(), key=lambda i: i["date"]):
         rank_count = item.pop("rank_count")
+        category_rank_count = item.pop("category_rank_count")
+        subcategory_rank_count = item.pop("subcategory_rank_count")
         rating_count = item.pop("rating_count")
         rank_sum = item.pop("rank_sum")
+        category_rank_sum = item.pop("category_rank_sum")
+        subcategory_rank_sum = item.pop("subcategory_rank_sum")
         rating_sum = item.pop("rating_sum")
         listing_ids = item.pop("listing_ids")
         changed_listings = item.pop("changed_listings")
         item["rank_avg"] = round(rank_sum / rank_count, 2) if rank_count else None
+        item["category_rank_avg"] = round(category_rank_sum / category_rank_count, 2) if category_rank_count else None
+        item["subcategory_rank_avg"] = round(subcategory_rank_sum / subcategory_rank_count, 2) if subcategory_rank_count else None
         item["rating_avg"] = round(rating_sum / rating_count, 2) if rating_count else None
         if not item.pop("review_points"):
             item["review_count"] = None
@@ -736,13 +845,25 @@ def sales_summary(
 
     def _signal(row: dict, name: str):
         if name == "rank":
-            return row.get("bsr") if row.get("bsr") is not None else row.get("rank")
+            return (
+                row.get("category_rank")
+                if row.get("category_rank") is not None
+                else (row.get("bsr") if row.get("bsr") is not None else row.get("rank"))
+            )
         return row.get(name)
 
+    def _category_rank(row: dict):
+        return row.get("category_rank") if row.get("category_rank") is not None else _signal(row, "rank")
+
+    def _subcategory_rank(row: dict):
+        return row.get("subcategory_rank")
+
     latest_rank = [_signal(m, "rank") for m in latest_by_listing.values() if _signal(m, "rank") is not None]
+    latest_category_rank = [_category_rank(m) for m in latest_by_listing.values() if _category_rank(m) is not None]
+    latest_subcategory_rank = [_subcategory_rank(m) for m in latest_by_listing.values() if _subcategory_rank(m) is not None]
     latest_rating = [_signal(m, "rating") for m in latest_by_listing.values() if _signal(m, "rating") is not None]
     latest_reviews = [_signal(m, "review_count") for m in latest_by_listing.values() if _signal(m, "review_count") is not None]
-    rank_deltas, rating_deltas, review_deltas = [], [], []
+    rank_deltas, category_rank_deltas, subcategory_rank_deltas, rating_deltas, review_deltas = [], [], [], [], []
     for key, latest in latest_by_listing.items():
         first = first_by_listing.get(key)
         if not first or first.get("id") == latest.get("id"):
@@ -751,6 +872,12 @@ def sales_summary(
         if old_rank is not None and new_rank is not None:
             # Positive means the rank number improved (moved closer to #1).
             rank_deltas.append(old_rank - new_rank)
+        old_category, new_category = _category_rank(first), _category_rank(latest)
+        if old_category is not None and new_category is not None:
+            category_rank_deltas.append(old_category - new_category)
+        old_subcategory, new_subcategory = _subcategory_rank(first), _subcategory_rank(latest)
+        if old_subcategory is not None and new_subcategory is not None:
+            subcategory_rank_deltas.append(old_subcategory - new_subcategory)
         old_rating, new_rating = _signal(first, "rating"), _signal(latest, "rating")
         if old_rating is not None and new_rating is not None:
             rating_deltas.append(new_rating - old_rating)
@@ -763,9 +890,14 @@ def sales_summary(
         "listing_count": len(latest_by_listing),
         "rank_avg": round(sum(latest_rank) / len(latest_rank), 2) if latest_rank else None,
         "rank_min": min(latest_rank) if latest_rank else None,
+        "category_rank_avg": round(sum(latest_category_rank) / len(latest_category_rank), 2) if latest_category_rank else None,
+        "category_rank_min": min(latest_category_rank) if latest_category_rank else None,
+        "subcategory_rank_avg": round(sum(latest_subcategory_rank) / len(latest_subcategory_rank), 2) if latest_subcategory_rank else None,
         "rating_avg": round(sum(latest_rating) / len(latest_rating), 2) if latest_rating else None,
         "review_count": sum(latest_reviews) if latest_reviews else None,
         "rank_change": round(sum(rank_deltas) / len(rank_deltas), 2) if rank_deltas else None,
+        "category_rank_change": round(sum(category_rank_deltas) / len(category_rank_deltas), 2) if category_rank_deltas else None,
+        "subcategory_rank_change": round(sum(subcategory_rank_deltas) / len(subcategory_rank_deltas), 2) if subcategory_rank_deltas else None,
         "rating_change": round(sum(rating_deltas) / len(rating_deltas), 2) if rating_deltas else None,
         "review_change": sum(review_deltas) if review_deltas else 0,
         "changed_listings": len(changed_listing_keys),
@@ -797,6 +929,44 @@ def sales_summary(
         f"SELECT channel, COUNT(*) AS total FROM links WHERE {' AND '.join(link_filter)} GROUP BY channel",
         link_params,
     ).fetchall()
+    link_counts = {str(row["channel"]): int(row["total"] or 0) for row in links}
+
+    # Registry coverage is independent from successful metric captures.  Keep
+    # it in the channel payload so a configured Amazon channel remains visible
+    # while its first scrape is blocked or still pending.
+    listing_counts: dict[str, int] = {}
+    listing_columns = _table_columns(conn, "sales_listings")
+    if "channel" in listing_columns:
+        registry_clauses = ["brand_id = ?"]
+        registry_params: list[str] = [brand_id] if brand_id else []
+        if not brand_id:
+            registry_clauses = ["1 = 1"]
+        if product_id and "product_id" in listing_columns:
+            registry_clauses.append("product_id = ?")
+            registry_params.append(product_id)
+        registry_rows = conn.execute(
+            f"SELECT channel, COUNT(*) AS total FROM sales_listings WHERE {' AND '.join(registry_clauses)} GROUP BY channel",
+            registry_params,
+        ).fetchall()
+        listing_counts = {str(row["channel"]): int(row["total"] or 0) for row in registry_rows}
+
+    metric_latest_counts = {
+        channel: sum(1 for m in latest_by_listing.values() if (m.get("channel") or "other_ecom") == channel)
+        for channel in by_channel
+    }
+    for channel, bucket in by_channel.items():
+        metric_latest = metric_latest_counts.get(channel, 0)
+        registry_total = listing_counts.get(channel, 0)
+        bucket["configured_links"] = link_counts.get(channel, 0)
+        bucket["configured_listings"] = registry_total
+        bucket["latest_listings"] = max(metric_latest, registry_total)
+        bucket["coverage_status"] = (
+            "has_data" if bucket["data_points"] else
+            "configured_no_snapshot" if registry_total else
+            "configured_no_listing" if bucket["configured_links"] else
+            "not_configured"
+        )
+        bucket["revenue"] = round(bucket["revenue"], 2)
     listing_total = conn.execute(
         f"SELECT COUNT(*) AS c FROM sales_listings WHERE {listing_where}",
         listing_params,

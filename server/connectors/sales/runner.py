@@ -23,6 +23,10 @@ def _listing_key(ref_asin: str, ref_url: str) -> str:
 
 def _upsert_listing(conn: sqlite3.Connection, link: dict, ref: ListingRef) -> str:
     now = utc_now()
+    try:
+        link_config = json.loads(link.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        link_config = {}
     asin = (ref.asin or "").upper()
     canon = canonical_url(ref.url)
     existing = conn.execute(
@@ -34,6 +38,13 @@ def _upsert_listing(conn: sqlite3.Connection, link: dict, ref: ListingRef) -> st
         (link["id"], asin, canon),
     ).fetchone()
     if existing:
+        try:
+            existing_config = json.loads(existing["config_json"] or "{}")
+        except (TypeError, ValueError):
+            existing_config = {}
+        merged_config = {**link_config, **existing_config}
+        if "fingerprint" in existing_config:
+            merged_config["fingerprint"] = existing_config["fingerprint"]
         conn.execute(
             """
             UPDATE sales_listings
@@ -41,11 +52,11 @@ def _upsert_listing(conn: sqlite3.Connection, link: dict, ref: ListingRef) -> st
                 marketplace = COALESCE(NULLIF(?, ''), marketplace),
                 title = COALESCE(NULLIF(?, ''), title),
                 image_url = COALESCE(NULLIF(?, ''), image_url),
-                last_seen = ?, updated_at = ?
+                config_json = ?, last_seen = ?, updated_at = ?
             WHERE id = ?
             """,
             (ref.url, canon, asin, ref.marketplace, clean_text(ref.title),
-             ref.image_url, now, now, existing["id"]),
+             ref.image_url, json.dumps(merged_config, ensure_ascii=False), now, now, existing["id"]),
         )
         return existing["id"]
 
@@ -63,11 +74,29 @@ def _upsert_listing(conn: sqlite3.Connection, link: dict, ref: ListingRef) -> st
             ref.sku, ref.image_url, now, now, now, now,
         ),
     )
+    if link_config:
+        conn.execute(
+            "UPDATE sales_listings SET config_json = ? WHERE id = ?",
+            (json.dumps(link_config, ensure_ascii=False), listing_id),
+        )
     return listing_id
 
 
 def _diff_fingerprint(old_fp: dict, new_fp: dict) -> list[dict]:
     changes: list[dict] = []
+    # Bridge fingerprints written before explicit category ranks existed. The
+    # old `rank`/`bsr` value is the same broad category signal as the new
+    # `category_rank`, so an upgrade should still produce a meaningful event.
+    old_category = old_fp.get("category_rank")
+    old_has_category_signal = "category_rank" in old_fp or "rank" in old_fp or "bsr" in old_fp
+    if old_category is None and ("rank" in old_fp or "bsr" in old_fp):
+        old_category = metric_rank_value(old_fp)
+    new_category = new_fp.get("category_rank")
+    if new_category is None and ("rank" in new_fp or "bsr" in new_fp):
+        new_category = metric_rank_value(new_fp)
+    if "category_rank" in new_fp and (new_category is not None or "category_rank" in old_fp):
+        if old_has_category_signal and old_category != new_category and not (old_category is None and new_category is None):
+            changes.append({"field": "category_rank", "from": old_category, "to": new_category})
     for key, new_val in new_fp.items():
         # Fingerprints written before a field was introduced should not emit a
         # false positive on the first capture after an upgrade.
@@ -75,6 +104,10 @@ def _diff_fingerprint(old_fp: dict, new_fp: dict) -> list[dict]:
             if "rank" not in old_fp and "bsr" not in old_fp:
                 continue
             old_val = metric_rank_value(old_fp)
+        elif key in {"category_rank", "subcategory_rank"}:
+            # Explicit rank fields are handled below with legacy bridging and
+            # should not be treated as first-seen noise here.
+            continue
         else:
             if key not in old_fp:
                 continue
@@ -85,6 +118,11 @@ def _diff_fingerprint(old_fp: dict, new_fp: dict) -> list[dict]:
         if old_val in (None, "") and new_val in (None, ""):
             continue
         changes.append({"field": key, "from": old_val, "to": new_val})
+    if "subcategory_rank" in new_fp and "subcategory_rank" in old_fp:
+        old_subcategory = old_fp.get("subcategory_rank")
+        new_subcategory = new_fp.get("subcategory_rank")
+        if old_subcategory != new_subcategory and not (old_subcategory is None and new_subcategory is None):
+            changes.append({"field": "subcategory_rank", "from": old_subcategory, "to": new_subcategory})
     return canonicalize_metric_changes(changes)
 
 
@@ -130,9 +168,11 @@ def _record_snapshot(conn: sqlite3.Connection, listing: dict, snap: ListingSnaps
             existing_changes = json.loads(existing_today["changes_json"] or "[]")
         except (TypeError, ValueError):
             existing_changes = []
+    existing_columns = set(existing_today.keys()) if existing_today else set()
     has_existing_data = existing_today and any(
         existing_today[key] is not None
-        for key in ("price", "rating", "review_count", "rank", "bsr", "units_est")
+        for key in ("price", "rating", "review_count", "rank", "bsr", "category_rank", "subcategory_rank", "units_est", "revenue_est")
+        if key in existing_columns
     )
     if snap.status in ("blocked", "error") and has_existing_data:
         conn.execute(
@@ -153,24 +193,51 @@ def _record_snapshot(conn: sqlite3.Connection, listing: dict, snap: ListingSnaps
         "DELETE FROM sales_metrics WHERE link_id = ? AND snapshot_date = ?",
         (listing["id"], day),
     )
+    raw = dict(snap.raw or {})
+    if snap.estimate_method:
+        raw.setdefault("estimate_method", snap.estimate_method)
+        raw.setdefault("estimate_confidence", snap.estimate_confidence)
+        raw.setdefault("estimate_period_days", snap.estimate_period_days)
+        raw.setdefault("estimate_basis", snap.estimate_basis or {})
+    metric_values = {
+        "id": new_id(),
+        "link_id": listing["id"],
+        "brand_id": listing["brand_id"],
+        "product_id": listing.get("product_id"),
+        "snapshot_date": day,
+        "channel": listing["channel"],
+        "platform": listing.get("platform"),
+        "price": snap.price,
+        "currency": snap.currency,
+        "review_count": snap.review_count,
+        "rating": snap.rating,
+        "rank": snap.rank,
+        "category_rank": snap.category_rank,
+        "subcategory_rank": snap.subcategory_rank,
+        "category_name": snap.category_name or None,
+        "subcategory_name": snap.subcategory_name or None,
+        "units_est": snap.units_est,
+        "revenue_est": snap.revenue_est,
+        "in_stock": None if snap.in_stock is None else int(snap.in_stock),
+        "asin": snap.sku or listing.get("asin"),
+        "bsr": snap.bsr,
+        "title": clean_text(snap.title) or listing.get("title"),
+        "image_url": snap.image_url,
+        "estimate_method": snap.estimate_method or None,
+        "estimate_confidence": snap.estimate_confidence or None,
+        "estimate_period_days": snap.estimate_period_days,
+        "change_score": change_score,
+        "changes_json": json.dumps(changes, ensure_ascii=False),
+        "source": "sellersprite" if raw.get("provider") == "sellersprite" else "scrape",
+        "raw_json": json.dumps(raw, ensure_ascii=False),
+        "created_at": now,
+    }
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sales_metrics)")}
+    selected = [key for key in metric_values if key in columns]
+    placeholders = ", ".join("?" for _ in selected)
     conn.execute(
-        """
-        INSERT INTO sales_metrics (id, link_id, brand_id, product_id, snapshot_date, channel,
-            platform, price, currency, review_count, rating, rank, units_est, revenue_est,
-            in_stock, asin, bsr, title, image_url, change_score, changes_json, source,
-            raw_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            new_id(), listing["id"], listing["brand_id"], listing.get("product_id"), day,
-            listing["channel"], listing.get("platform"), snap.price, snap.currency,
-            snap.review_count, snap.rating, snap.rank, snap.units_est, snap.revenue_est,
-            None if snap.in_stock is None else int(snap.in_stock), snap.sku or listing.get("asin"),
-            snap.bsr, clean_text(snap.title) or listing.get("title"), snap.image_url,
-            change_score, json.dumps(changes, ensure_ascii=False),
-            "sellersprite" if snap.raw.get("provider") == "sellersprite" else "scrape",
-            json.dumps(snap.raw, ensure_ascii=False), now,
-        ),
+        f"INSERT INTO sales_metrics ({', '.join(selected)}) VALUES ({placeholders})",
+        [metric_values[key] for key in selected],
     )
 
     config["fingerprint"] = new_fp

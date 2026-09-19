@@ -268,9 +268,25 @@ def update_link(link_id: str, payload: LinkUpdate, conn: sqlite3.Connection = De
         raise HTTPException(status_code=404, detail="Link not found")
     data = {**dict(existing), **payload.model_dump(exclude_none=True), "updated_at": utc_now()}
     data["canonical_url"] = canonical_url(data.get("url") or "")
+    # Preserve provider settings when updating ordinary link fields.  The
+    # request may omit `config`; only an explicitly supplied config replaces
+    # the existing JSON value.
+    config = data.get("config")
+    if config is None:
+        try:
+            config = json.loads(data.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
     conn.execute(
-        "UPDATE links SET url = ?, canonical_url = ?, label = ?, status = ?, platform = ?, updated_at = ? WHERE id = ?",
-        (data["url"], data["canonical_url"], data["label"], data["status"], data["platform"], data["updated_at"], link_id),
+        """UPDATE links
+           SET url = ?, canonical_url = ?, label = ?, status = ?, platform = ?,
+               config_json = ?, updated_at = ?
+           WHERE id = ?""",
+        (
+            data["url"], data["canonical_url"], data["label"], data["status"],
+            data["platform"], json.dumps(config or {}, ensure_ascii=False),
+            data["updated_at"], link_id,
+        ),
     )
     return link_to_dict(conn.execute("SELECT * FROM links WHERE id = ?", (link_id,)).fetchone())
 

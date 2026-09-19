@@ -107,22 +107,37 @@ function GlobalView({
   onEntry: () => void;
 }) {
   const global = summary.global_metrics || {};
-  const trend = summary.trend || [];
+  const trend = (summary.trend || []).map((point: any) => ({
+    ...point,
+    category_rank_avg: firstNumeric(point, ["category_rank_avg", "main_category_rank_avg", "rank_avg"]),
+    subcategory_rank_avg: firstNumeric(point, ["subcategory_rank_avg", "sub_category_rank_avg"]),
+  }));
   const hasRevenue = Number(summary.revenue_points || 0) > 0;
   const hasUnits = Number(summary.units_points || 0) > 0;
-  const hasRank = trend.some((p: any) => p.rank_avg != null);
+  const hasCategoryRank = trend.some((p: any) => p.category_rank_avg != null || p.main_category_rank_avg != null || p.rank_avg != null);
+  const hasSubcategoryRank = trend.some((p: any) => p.subcategory_rank_avg != null || p.sub_category_rank_avg != null);
   const hasRating = trend.some((p: any) => p.rating_avg != null);
   const hasReviews = trend.some((p: any) => p.review_count != null);
-  // A scrape can produce rank/rating/review snapshots without a revenue
-  // estimate. Keep the channel panel useful in that case by falling back to
-  // snapshot counts instead of filtering every channel out.
-  const channelBars = (summary.channels || [])
-    .filter((c: any) => c.data_points > 0 || c.latest_listings > 0)
-    .map((c: any) => ({ ...c, label: CHANNEL_LABEL[c.channel] || c.channel }));
-  const channelDataKey = hasRevenue ? "revenue" : hasUnits ? "units" : "data_points";
-  const channelDataName = hasRevenue ? "销售额" : hasUnits ? "销量" : "数据点";
-  const salesTrendKey = hasRevenue ? "revenue" : "units";
-  const salesTrendName = hasRevenue ? "销售额" : "销量";
+  // Keep every configured channel visible, even when a provider has not
+  // produced its first snapshot yet. This is especially important for
+  // Amazon listings that are currently blocked by anti-bot pages.
+  const configuredLinks = Object.fromEntries((summary.link_counts || []).map((item: any) => [item.channel, Number(item.total || 0)]));
+  const channelBars = (summary.channels || []).map((c: any) => {
+    const links = configuredLinks[c.channel] || Number(c.configured_links || c.link_count || 0);
+    const snapshots = Number(c.data_points || 0);
+    const listings = Number(c.latest_listings || c.listings || c.listing_count || 0);
+    // Use one unit for every bar. Revenue, units and listing counts cannot be
+    // compared on the same axis, so the global distribution is a coverage
+    // view; the estimate trends above carry the sales values.
+    const value = listings || snapshots || links;
+    const status = snapshots > 0 ? "" : listings > 0 || links > 0 ? "（待采集）" : "（未配置）";
+    return {
+      ...c,
+      _display: value,
+      label: `${CHANNEL_LABEL[c.channel] || c.channel}${status}`,
+    };
+  }).filter((c: any) => Number(c.data_points || 0) > 0 || Number(c.latest_listings || c.listings || c.listing_count || 0) > 0 || Number(c.configured_links || c.link_count || configuredLinks[c.channel] || 0) > 0);
+  const channelDataName = "监控 Listing";
 
   const delta = (value: number | null | undefined, suffix = "") => {
     if (value == null || value === 0) return "区间内暂无变化";
@@ -160,6 +175,14 @@ function GlobalView({
             )}
           />
         </Card>
+        <Card>
+          <SectionTitle title="渠道分布" subtitle="已配置渠道会保留在这里；尚未形成快照的渠道标记为待采集" />
+          {channelBars.length ? (
+            <Bars data={channelBars} dataKey="_display" nameKey="label" name={channelDataName} color="var(--violet)" />
+          ) : (
+            <p className="text-[13px]" style={{ color: "var(--mute)" }}>暂无已配置的销售渠道</p>
+          )}
+        </Card>
         <SalesChangeLog brandId={brandId} productId={productId} />
       </div>
     );
@@ -167,11 +190,16 @@ function GlobalView({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <StatCard
-          label="最新平均排名"
-          value={global.rank_avg != null ? `#${fmtNum(global.rank_avg)}` : "—"}
-          hint={global.rank_avg != null ? rankDelta(global.rank_change) : "暂无排名快照"}
+          label="最新大类排名"
+          value={firstNumeric(global, ["category_rank_avg", "main_category_rank_avg", "rank_avg"]) != null ? `#${fmtNum(firstNumeric(global, ["category_rank_avg", "main_category_rank_avg", "rank_avg"]))}` : "—"}
+          hint={firstNumeric(global, ["category_rank_avg", "main_category_rank_avg"]) != null ? rankDelta(global.category_rank_change) : global.rank_avg != null ? rankDelta(global.rank_change) : "暂无大类排名快照"}
+        />
+        <StatCard
+          label="最新小类排名"
+          value={firstNumeric(global, ["subcategory_rank_avg", "sub_category_rank_avg"]) != null ? `#${fmtNum(firstNumeric(global, ["subcategory_rank_avg", "sub_category_rank_avg"]))}` : "—"}
+          hint={firstNumeric(global, ["subcategory_rank_avg", "sub_category_rank_avg"]) != null ? rankDelta(global.subcategory_rank_change) : "暂无小类排名快照"}
         />
         <StatCard
           label="最新平均评分"
@@ -199,14 +227,15 @@ function GlobalView({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
           <SectionTitle
-            title={hasRevenue || hasUnits ? `${salesTrendName}趋势` : "商品指标趋势"}
+            title={hasRevenue && hasUnits ? "销量与销售额估算趋势" : hasRevenue ? "销售额估算趋势" : hasUnits ? "销量估算趋势" : "商品指标趋势"}
             subtitle={!hasRevenue && !hasUnits ? "当前采集以排名、评分和评论为主，销量估算待渠道返回后展示" : undefined}
           />
-          {trend.length && (hasRevenue || hasUnits) ? (
-            <SimpleLine data={trend} dataKey={salesTrendKey} name={salesTrendName} color="var(--accent)" />
-          ) : trend.length && (hasRank || hasRating || hasReviews) ? (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {hasRank && <TrendMiniCard title="平均排名" data={trend} dataKey="rank_avg" color="var(--violet)" formatter={(v) => `#${fmtNum(v)}`} />}
+          {trend.length && (hasRevenue || hasUnits || hasCategoryRank || hasSubcategoryRank || hasRating || hasReviews) ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {hasUnits && <TrendMiniCard title="销量估算" data={trend} dataKey="units" color="var(--warning)" formatter={(v) => fmtNum(v)} />}
+              {hasRevenue && <TrendMiniCard title="销售额估算" data={trend} dataKey="revenue" color="var(--accent)" formatter={(v) => fmtNum(v)} />}
+              {hasCategoryRank && <TrendMiniCard title="大类排名" data={trend} dataKey="category_rank_avg" color="var(--violet)" formatter={(v) => `#${fmtNum(v)}`} />}
+              {hasSubcategoryRank && <TrendMiniCard title="小类排名" data={trend} dataKey="subcategory_rank_avg" color="var(--violet)" formatter={(v) => `#${fmtNum(v)}`} />}
               {hasRating && <TrendMiniCard title="平均评分" data={trend} dataKey="rating_avg" color="var(--accent)" formatter={(v) => Number(v).toFixed(2)} />}
               {hasReviews && <TrendMiniCard title="评论数" data={trend} dataKey="review_count" color="var(--warning)" formatter={(v) => fmtNum(v)} />}
             </div>
@@ -217,7 +246,7 @@ function GlobalView({
         <Card>
           <SectionTitle title="渠道分布" />
           {channelBars.length ? (
-            <Bars data={channelBars} dataKey={channelDataKey} nameKey="label" name={channelDataName} color="var(--violet)" />
+            <Bars data={channelBars} dataKey="_display" nameKey="label" name={channelDataName} color="var(--violet)" />
           ) : (
             <p className="text-[13px]" style={{ color: "var(--mute)" }}>暂无渠道销售数据</p>
           )}
@@ -236,7 +265,8 @@ function GlobalView({
 }
 
 const CHANGE_LABELS: Record<string, string> = {
-  rank: "排名", bsr: "BSR 排名", rating: "评分", review_count: "评论数", price: "价格",
+  rank: "大类排名", bsr: "大类排名", category_rank: "大类排名", main_category_rank: "大类排名",
+  subcategory_rank: "小类排名", sub_category_rank: "小类排名", rating: "评分", review_count: "评论数", price: "价格",
   units_est: "销量估算", revenue_est: "销售额估算", in_stock: "库存状态", title: "标题",
   image_url: "主图", sku: "SKU", currency: "币种", listing_count: "Listing 数量",
 };
@@ -294,6 +324,21 @@ function formatChangeValue(value: unknown): string {
   return String(value);
 }
 
+function estimateMethodLabel(value?: string): string {
+  if (value === "sellersprite") return "SellerSprite"
+  if (value === "amazon_bsr_curve") return "Amazon BSR 模型"
+  if (value === "dtc_review_velocity") return "评论增量模型"
+  if (value === "dtc_review_stock") return "评论存量模型"
+  return value || "渠道估算"
+}
+
+function estimateConfidenceLabel(value?: string): string {
+  if (value === "high") return "高置信度"
+  if (value === "medium") return "中置信度"
+  if (value === "low") return "低置信度"
+  return value || ""
+}
+
 function TrendMiniCard({ title, data, dataKey, color, formatter }: { title: string; data: any[]; dataKey: string; color: string; formatter: (v: number) => string }) {
   return (
     <div className="rounded-md p-2" style={{ border: "1px solid var(--hairline)" }}>
@@ -306,6 +351,26 @@ function TrendMiniCard({ title, data, dataKey, color, formatter }: { title: stri
   );
 }
 
+function firstNumeric(value: any, keys: string[]): number | null {
+  for (const key of keys) {
+    const candidate = value?.[key];
+    if (candidate !== null && candidate !== undefined && candidate !== "" && Number.isFinite(Number(candidate))) {
+      return Number(candidate);
+    }
+  }
+  return null;
+}
+
+// `rank`/`bsr` were the original single-rank fields. Treat them as the
+// category rank fallback while newer collectors populate the explicit fields.
+function displayCategoryRank(value: any): number | null {
+  return firstNumeric(value, ["category_rank", "main_category_rank", "categoryRank", "mainCategoryRank", "category_rank_avg", "main_category_rank_avg", "rank_avg", "bsr", "rank"]);
+}
+
+function displaySubcategoryRank(value: any): number | null {
+  return firstNumeric(value, ["subcategory_rank", "sub_category_rank", "subcategoryRank", "subCategoryRank", "subcategory_rank_avg", "sub_category_rank_avg"]);
+}
+
 function ProductTable({ rows }: { rows: any[] }) {
   if (!rows.length) return <EmptyState title="暂无产品销量" hint="采集 Listing 数据并将其映射到产品后在此聚合。" />;
   return (
@@ -313,7 +378,7 @@ function ProductTable({ rows }: { rows: any[] }) {
       <table className="w-full text-[13px]">
         <thead>
           <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
-            {["产品", "销量(估)", "销售额(估)", "平均排名", "平均评分", "评论数"].map((h) => (
+            {["产品", "销量(估)", "销售额(估)", "大类排名", "小类排名", "平均评分", "评论数"].map((h) => (
               <th key={h} className="text-left font-medium py-2 px-2">{h}</th>
             ))}
           </tr>
@@ -324,7 +389,8 @@ function ProductTable({ rows }: { rows: any[] }) {
               <td className="py-2 px-2" style={{ color: r.product_id ? "var(--ink)" : "var(--mute)" }}>{r.product_name}</td>
               <td className="py-2 px-2 tabular-nums">{r.units_points ? fmtNum(r.units) : "—"}</td>
               <td className="py-2 px-2 tabular-nums">{r.revenue_points ? fmtNum(r.revenue) : "—"}</td>
-              <td className="py-2 px-2 tabular-nums">{r.rank_avg != null ? `#${fmtNum(r.rank_avg)}` : "—"}</td>
+              <td className="py-2 px-2 tabular-nums">{displayCategoryRank(r) != null ? `#${fmtNum(displayCategoryRank(r))}` : "—"}</td>
+              <td className="py-2 px-2 tabular-nums">{displaySubcategoryRank(r) != null ? `#${fmtNum(displaySubcategoryRank(r))}` : "—"}</td>
               <td className="py-2 px-2 tabular-nums">{r.rating_avg != null ? Number(r.rating_avg).toFixed(2) : "—"}</td>
               <td className="py-2 px-2 tabular-nums">{r.review_count != null ? fmtNum(r.review_count) : "—"}</td>
             </tr>
@@ -437,7 +503,7 @@ function ListingTable({ listings, products, onDetail }: { listings: SalesListing
       <table className="w-full text-[13px]">
         <thead>
           <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
-            {["商品", "渠道", "价格", "排名", "评分", "评论", "变更", "映射产品", "监控", ""].map((h) => (
+            {["商品", "渠道", "价格", "大类排名", "小类排名", "评分", "评论", "销量(估)", "销售额(估)", "变更", "映射产品", "监控", ""].map((h) => (
               <th key={h} className="text-left font-medium py-2 px-2 whitespace-nowrap">{h}</th>
             ))}
           </tr>
@@ -461,9 +527,12 @@ function ListingTable({ listings, products, onDetail }: { listings: SalesListing
                 </td>
                 <td className="py-2 px-2 whitespace-nowrap">{CHANNEL_LABEL[l.channel] || l.channel}</td>
                 <td className="py-2 px-2 tabular-nums whitespace-nowrap">{m?.price != null ? `${m.currency || ""} ${m.price}` : "—"}</td>
-                <td className="py-2 px-2 tabular-nums">{m?.bsr != null ? `#${fmtNum(m.bsr)}` : (m?.rank != null ? `#${fmtNum(m.rank)}` : "—")}</td>
+                <td className="py-2 px-2 tabular-nums">{displayCategoryRank(m) != null ? `#${fmtNum(displayCategoryRank(m))}` : "—"}</td>
+                <td className="py-2 px-2 tabular-nums">{displaySubcategoryRank(m) != null ? `#${fmtNum(displaySubcategoryRank(m))}` : "—"}</td>
                 <td className="py-2 px-2 tabular-nums">{m?.rating ?? "—"}</td>
                 <td className="py-2 px-2 tabular-nums">{fmtNum(m?.review_count)}</td>
+                <td className="py-2 px-2 tabular-nums">{m?.units_est != null ? fmtNum(m.units_est) : "—"}</td>
+                <td className="py-2 px-2 tabular-nums">{m?.revenue_est != null ? `${m.currency || ""} ${fmtNum(m.revenue_est)}` : "—"}</td>
                 <td className="py-2 px-2">{changedToday ? <Badge tone="warning">变更 {m!.changes!.length}</Badge> : l.has_change ? <span className="text-[11px]" style={{ color: "var(--mute)" }}>曾变更</span> : "—"}</td>
                 <td className="py-2 px-2">
                   <Select value={l.product_id || ""} onChange={(e) => update.mutate({ id: l.id, product_id: e.target.value || null })} className="max-w-[140px]">
@@ -500,7 +569,16 @@ function ListingDetailModal({ listingId, onClose }: { listingId?: string; onClos
   const listing: SalesListing | undefined = data?.listing;
   const metrics: any[] = data?.metrics || [];
   const changes: any[] = data?.changes || [];
-  const series = metrics.map((m) => ({ date: m.snapshot_date, price: m.price, rank: m.bsr ?? m.rank, units: m.units_est }));
+  const series = metrics.map((m) => ({
+    date: m.snapshot_date,
+    price: m.price,
+    categoryRank: displayCategoryRank(m),
+    subcategoryRank: displaySubcategoryRank(m),
+    rating: m.rating,
+    reviews: m.review_count,
+    units: m.units_est,
+    revenue: m.revenue_est,
+  }));
   const has = (k: string) => series.some((s) => s[k as keyof typeof s] != null);
 
   return (
@@ -523,6 +601,13 @@ function ListingDetailModal({ listingId, onClose }: { listingId?: string; onClos
                 {listing?.asin ? `ASIN ${listing.asin} · ` : ""}{CHANNEL_LABEL[listing?.channel || ""] || listing?.channel} · 数据点 {listing?.data_points}
                 {listing?.last_status && listing.last_status !== "ok" ? ` · ${listing.last_status}` : ""}
               </div>
+              {(metrics[metrics.length - 1]?.estimate_method || metrics.some((m) => m.units_est != null || m.revenue_est != null)) && (
+                <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>
+                  销量/销售额为估算值
+                  {metrics[metrics.length - 1]?.estimate_method ? ` · ${estimateMethodLabel(metrics[metrics.length - 1].estimate_method)}` : ""}
+                  {metrics[metrics.length - 1]?.estimate_confidence ? ` · ${estimateConfidenceLabel(metrics[metrics.length - 1].estimate_confidence)}` : ""}
+                </div>
+              )}
             </div>
           </div>
 
@@ -531,8 +616,12 @@ function ListingDetailModal({ listingId, onClose }: { listingId?: string; onClos
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {has("price") && <DetailChart title="价格" data={series} dataKey="price" color="var(--accent)" />}
-              {has("rank") && <DetailChart title="排名 (BSR)" data={series} dataKey="rank" color="var(--violet)" />}
+              {has("categoryRank") && <DetailChart title="大类排名" data={series} dataKey="categoryRank" color="var(--violet)" />}
+              {has("subcategoryRank") && <DetailChart title="小类排名" data={series} dataKey="subcategoryRank" color="var(--violet)" />}
+              {has("rating") && <DetailChart title="评分" data={series} dataKey="rating" color="var(--accent)" />}
+              {has("reviews") && <DetailChart title="评论数" data={series} dataKey="reviews" color="var(--warning)" />}
               {has("units") && <DetailChart title="销量(估)" data={series} dataKey="units" color="var(--warning)" />}
+              {has("revenue") && <DetailChart title="销售额(估)" data={series} dataKey="revenue" color="var(--accent)" />}
             </div>
           )}
 

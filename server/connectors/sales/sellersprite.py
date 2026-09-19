@@ -77,12 +77,39 @@ class SellerSpriteProvider(SalesProvider):
         daily = data.get("dailyItemList") or []
         latest = daily[-1] if isinstance(daily, list) and daily else {}
         if latest:
-            snap.bsr = _to_int(latest.get("bsr"))
-            snap.rank = snap.bsr
+            snap.category_rank = _to_int(
+                latest.get("categoryRank")
+                or latest.get("category_rank")
+                or latest.get("catRank")
+                or detail.get("categoryRank")
+                or detail.get("category_rank")
+                or latest.get("bsr")
+            )
+            snap.subcategory_rank = _to_int(
+                latest.get("subcategoryRank")
+                or latest.get("subCategoryRank")
+                or latest.get("subcategory_rank")
+                or latest.get("sub_bsr")
+                or detail.get("subcategoryRank")
+                or detail.get("subCategoryRank")
+                or detail.get("subcategory_rank")
+            )
+            snap.category_name = clean_text(
+                latest.get("categoryName") or latest.get("category") or detail.get("categoryName") or detail.get("category")
+            )
+            snap.subcategory_name = clean_text(
+                latest.get("subcategoryName") or latest.get("subCategoryName") or latest.get("subcategory") or detail.get("subcategoryName")
+            )
+            snap.bsr = _to_int(latest.get("bsr")) or snap.category_rank
+            snap.rank = snap.category_rank or snap.bsr
             snap.units_est = _to_int(latest.get("sales"))
             snap.revenue_est = _to_float(latest.get("amount"))
             snap.price = _to_float(latest.get("price"))
             snap.in_stock = True
+            snap.estimate_method = "sellersprite"
+            snap.estimate_confidence = "medium"
+            snap.estimate_period_days = 1.0
+            snap.estimate_basis = {"marketplace": marketplace, "asin": asin}
         snap.currency = "USD"
         snap.status = "ok" if (snap.units_est is not None or snap.bsr is not None) else "partial"
         snap.raw = {"provider": self.name, "marketplace": marketplace}
