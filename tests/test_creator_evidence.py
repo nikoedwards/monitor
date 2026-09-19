@@ -76,6 +76,46 @@ class CreatorCollectionEvidenceTests(unittest.TestCase):
         self.assertEqual(130.0, evidence["transcript_matches"][0]["start"])
         self.assertIn("字幕可能不完整", evidence["analysis_note"])
 
+    def test_nearby_caption_hits_are_merged_into_one_segment(self) -> None:
+        cues = [
+            {"start": 100, "end": 104, "text": "This is PLAUD", "source": "automatic_caption"},
+            {"start": 108, "end": 113, "text": "NotePin for recording", "source": "automatic_caption"},
+            {"start": 122, "end": 126, "text": "PLAUD again later", "source": "automatic_caption"},
+        ]
+        matches = transcript_matches(cues, ["PLAUD", "NotePin"])
+        self.assertEqual(2, len(matches))
+        self.assertEqual(100.0, matches[0]["start"])
+        self.assertEqual(113.0, matches[0]["end"])
+        self.assertEqual(["PLAUD", "NotePin"], matches[0]["matched_terms"])
+        self.assertEqual(122.0, matches[1]["start"])
+
+        different_source = transcript_matches(
+            [
+                {"start": 200, "end": 204, "text": "PLAUD", "source": "automatic_caption"},
+                {"start": 205, "end": 209, "text": "PLAUD", "source": "manual_subtitle"},
+            ],
+            ["PLAUD"],
+        )
+        self.assertEqual(2, len(different_source))
+
+    def test_automatic_caption_plaude_is_normalized_but_manual_caption_is_not(self) -> None:
+        automatic = transcript_matches(
+            [{"start": 10, "end": 14, "text": "Plaude NotePin", "source": "automatic_caption"}],
+            ["PLAUD", "NotePin"],
+        )
+        self.assertEqual(1, len(automatic))
+        self.assertEqual("PLAUD", automatic[0]["matched_query"])
+        self.assertEqual("automatic_caption_alias", automatic[0]["match_rule"])
+        self.assertEqual(["Plaude"], automatic[0]["matched_variants"])
+
+        manual = transcript_matches(
+            [{"start": 10, "end": 14, "text": "Plaude NotePin", "source": "manual_subtitle"}],
+            ["PLAUD", "NotePin"],
+        )
+        self.assertEqual(1, len(manual))
+        self.assertEqual("NotePin", manual[0]["matched_query"])
+        self.assertNotIn("matched_variants", manual[0])
+
     def test_unavailable_transcript_is_explicitly_marked_as_unanalysed(self) -> None:
         evidence = build_collection_evidence(title="PLAUD overview", body="", brand=self.brand, raw={"transcript_status": "unavailable"})
         self.assertEqual("unavailable", evidence["transcript_status"])
