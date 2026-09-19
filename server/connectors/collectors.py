@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, ur
 from ..config import CREDENTIALS, USER_AGENT
 from ..fetchers import FetchError, fetch_bytes, fetch_form_json, fetch_json, fetch_page, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
+from ..records import cleanup_google_ad_mismatches
 from ..relevance import google_news_match_evidence, query_match_evidence, reddit_post_id, search_query_parts
 from ..util import (
     clean_text,
@@ -942,6 +943,8 @@ def _google_advertiser_suggestions(query: str) -> list[dict]:
             "Referer": "https://adstransparency.google.com/?region=US",
         },
     )
+    if not isinstance(response, dict) or "1" not in response:
+        raise ValueError("Google SearchSuggestions returned an invalid response")
     suggestions: list[dict] = []
     for item in (response.get("1", []) if isinstance(response, dict) else []):
         advertiser = item.get("1") if isinstance(item, dict) else None
@@ -1102,7 +1105,12 @@ def _google_public_payload(
     }
 
 
-def _collect_google_public_ads(brand: dict) -> list[dict]:
+def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dict]:
+    """Collect Google creatives and report whether the crawl is complete.
+
+    Payloads can still be useful when one public RPC call fails, but those
+    partial results must never authorize deletion of historical entities.
+    """
     payloads: list[dict] = []
     raw_items: list[tuple[dict, str]] = []
     seen_advertisers: set[str] = set()
@@ -1111,15 +1119,33 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
     # another advertiser is not silently dropped.
     seen_creatives: set[tuple[str, str]] = set()
     preview_cache: dict[str, dict] = {}
-    for query in brand_queries(brand)[:4]:
+    queries = brand_queries(brand)[:4]
+    report = {
+        "matched_advertiser_ids": [],
+        "queries_completed": 0,
+        "query_count": len(queries),
+        "suggestion_failed": False,
+        "creative_failed": False,
+        "pagination_truncated": False,
+        "advertiser_cap_reached": False,
+        "creative_count": 0,
+        "safe_to_cleanup": False,
+    }
+    for query in queries:
         try:
             suggestions = _google_advertiser_suggestions(query)
-        except (FetchError, ValueError, OSError):
+        except Exception:
+            report["suggestion_failed"] = True
+            continue
+        report["queries_completed"] += 1
+        if not isinstance(suggestions, list):
+            report["suggestion_failed"] = True
             continue
         matching = [
             advertiser
             for advertiser in suggestions
-            if _google_name_matches_query(advertiser.get("name", ""), query, brand.get("name"))
+            if isinstance(advertiser, dict)
+            and _google_name_matches_query(advertiser.get("name", ""), query, brand.get("name"))
         ]
         # Do not attach an arbitrary suggestion when the advertiser name does
         # not match the monitored brand. Google sometimes returns a single
@@ -1130,8 +1156,10 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
             if not advertiser_id or advertiser_id in seen_advertisers:
                 continue
             if len(seen_advertisers) >= _GOOGLE_ADS_MAX_ADVERTISERS:
+                report["advertiser_cap_reached"] = True
                 break
             seen_advertisers.add(advertiser_id)
+            report["matched_advertiser_ids"].append(advertiser_id)
             page_token: str | None = None
             for page_index in range(_GOOGLE_ADS_MAX_PAGES):
                 try:
@@ -1139,10 +1167,15 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
                     if page_token:
                         search_kwargs["page_token"] = page_token
                     response = _google_search_creatives([advertiser_id], **search_kwargs)
-                except (FetchError, ValueError, OSError):
+                except Exception:
+                    report["creative_failed"] = True
                     break
-                page_items = response.get("1", []) if isinstance(response, dict) else []
+                if not isinstance(response, dict) or "1" not in response:
+                    report["creative_failed"] = True
+                    break
+                page_items = response.get("1")
                 if not isinstance(page_items, list):
+                    report["creative_failed"] = True
                     break
                 for item in page_items:
                     creative_id = clean_text(item.get("2")) if isinstance(item, dict) else ""
@@ -1159,6 +1192,11 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
                 # returning the same page forever (the hard page cap is a
                 # second backstop).
                 if not next_token or next_token == page_token:
+                    if next_token == page_token and next_token:
+                        report["pagination_truncated"] = True
+                    break
+                if page_index == _GOOGLE_ADS_MAX_PAGES - 1:
+                    report["pagination_truncated"] = True
                     break
                 page_token = next_token
     # Image creatives expose a stable archive URL directly. Fetch a bounded
@@ -1186,12 +1224,31 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
         payload = _google_public_payload(item, brand, query, preview_cache=preview_cache)
         if payload:
             payloads.append(payload)
+    report["creative_count"] = len(payloads)
+    report["safe_to_cleanup"] = bool(
+        report["matched_advertiser_ids"]
+        and report["creative_count"]
+        and report["queries_completed"] == report["query_count"]
+        and not report["suggestion_failed"]
+        and not report["creative_failed"]
+        and not report["pagination_truncated"]
+        and not report["advertiser_cap_reached"]
+    )
+    return payloads, report
+
+
+def _collect_google_public_ads(brand: dict) -> list[dict]:
+    """Backward-compatible payload-only wrapper for existing callers/tests."""
+    payloads, _report = _collect_google_public_ads_with_report(brand)
     return payloads
 
 
 def collect_google_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     """Collect public Google Ads Transparency creatives without credentials."""
-    return _collect_google_public_ads(brand)
+    payloads, report = _collect_google_public_ads_with_report(brand)
+    if report.get("safe_to_cleanup"):
+        cleanup_google_ad_mismatches(conn, brand, report["matched_advertiser_ids"])
+    return payloads
 
 
 # ---------------------------------------------------------------- Meta Ad Library

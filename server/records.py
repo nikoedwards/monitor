@@ -9,6 +9,79 @@ from .nlp import analyze_text
 from .util import clean_text, new_id, utc_now
 
 
+def cleanup_google_ad_mismatches(
+    conn: sqlite3.Connection,
+    brand: dict,
+    valid_advertiser_ids,
+) -> int:
+    """Delete stale Google ad rows after a complete, successful crawl.
+
+    ``valid_advertiser_ids`` must come from the current crawl's verified
+    SearchSuggestions/SearchCreatives result.  The helper deliberately uses
+    the explicit ``raw_json.advertiser_id`` field as its only identity signal:
+    rows with malformed JSON or a missing advertiser ID stay in place for
+    manual review.  Callers must skip this helper whenever the crawl was
+    partial, failed, truncated, or returned no valid creatives.
+    """
+    if not valid_advertiser_ids:
+        return 0
+    brand_id = brand.get("id") if isinstance(brand, dict) else clean_text(str(brand))
+    if not brand_id:
+        return 0
+    if isinstance(valid_advertiser_ids, (str, int, float)) and not isinstance(valid_advertiser_ids, bool):
+        valid_advertiser_ids = (valid_advertiser_ids,)
+    valid_ids = {
+        clean_text(str(value))
+        for value in valid_advertiser_ids
+        if isinstance(value, (str, int, float))
+        and not isinstance(value, bool)
+        and clean_text(str(value))
+    }
+    if not valid_ids:
+        return 0
+    rows = conn.execute(
+        "SELECT id, raw_json, ad_external_id FROM ad_entities "
+        "WHERE brand_id = ? AND source_id = 'google_ads'",
+        (brand_id,),
+    ).fetchall()
+    stale: list[tuple[str, str]] = []
+    for row in rows:
+        try:
+            raw = json.loads(row["raw_json"] or "")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        raw_advertiser_id = raw.get("advertiser_id")
+        advertiser_id = (
+            clean_text(str(raw_advertiser_id))
+            if isinstance(raw_advertiser_id, (str, int, float))
+            and not isinstance(raw_advertiser_id, bool)
+            else ""
+        )
+        if advertiser_id and advertiser_id not in valid_ids:
+            stale.append((row["id"], clean_text(row["ad_external_id"])))
+    for entity_id, external_id in stale:
+        conn.execute("DELETE FROM ad_events WHERE entity_id = ?", (entity_id,))
+        conn.execute("DELETE FROM ad_snapshots WHERE entity_id = ?", (entity_id,))
+        conn.execute("DELETE FROM ad_entities WHERE id = ?", (entity_id,))
+        if external_id:
+            conn.execute(
+                "DELETE FROM records WHERE source_id = 'google_ads' AND external_id = ?",
+                (external_id,),
+            )
+    return len(stale)
+
+
+def _cleanup_google_stale_ads(
+    conn: sqlite3.Connection,
+    brand_id: str,
+    valid_advertiser_ids,
+) -> int:
+    """Compatibility wrapper using the lower-level brand-id signature."""
+    return cleanup_google_ad_mismatches(conn, brand_id, valid_advertiser_ids)
+
+
 def _merge_nonempty_mapping(previous: object, incoming: object) -> dict:
     """Keep previously observed ad metadata when a public crawl omits fields.
 

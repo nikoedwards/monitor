@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from server.connectors import collectors
 from server.db import SCHEMA
-from server.records import upsert_ad_observation
+from server.records import cleanup_google_ad_mismatches, insert_record_if_new, upsert_ad_observation
 
 
 def _creative_item(
@@ -283,6 +283,156 @@ def test_collect_google_public_ads_does_not_use_unmatched_first_suggestion() -> 
 
     assert payloads == []
     search.assert_not_called()
+
+
+def test_google_collection_report_marks_complete_crawl_safe_for_cleanup() -> None:
+    item = _creative_item(image_url="https://img.test/1.jpg")
+    brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
+    with (
+        patch.object(collectors, "_google_advertiser_suggestions", return_value=[{"id": "AR123", "name": "PLAUD LLC"}]),
+        patch.object(collectors, "_google_search_creatives", return_value={"1": [item]}),
+        patch.object(collectors, "_google_preview_fields", return_value={}),
+    ):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert len(payloads) == 1
+    assert report["matched_advertiser_ids"] == ["AR123"]
+    assert report["queries_completed"] == report["query_count"] == 1
+    assert report["creative_count"] == 1
+    assert report["safe_to_cleanup"] is True
+
+
+def test_google_collection_report_skips_cleanup_when_suggestions_fail() -> None:
+    brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
+    with patch.object(collectors, "_google_advertiser_suggestions", side_effect=collectors.FetchError("429")):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert payloads == []
+    assert report["suggestion_failed"] is True
+    assert report["safe_to_cleanup"] is False
+
+
+def test_google_collection_report_skips_cleanup_when_creatives_fail() -> None:
+    brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
+    with (
+        patch.object(collectors, "_google_advertiser_suggestions", return_value=[{"id": "AR123", "name": "PLAUD LLC"}]),
+        patch.object(collectors, "_google_search_creatives", side_effect=collectors.FetchError("network")),
+    ):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert payloads == []
+    assert report["creative_failed"] is True
+    assert report["safe_to_cleanup"] is False
+
+
+def test_google_collection_report_skips_cleanup_when_pagination_is_capped() -> None:
+    item = _creative_item(image_url="https://img.test/1.jpg")
+    brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
+    with (
+        patch.object(collectors, "_GOOGLE_ADS_MAX_PAGES", 1),
+        patch.object(collectors, "_google_advertiser_suggestions", return_value=[{"id": "AR123", "name": "PLAUD LLC"}]),
+        patch.object(collectors, "_google_search_creatives", return_value={"1": [item], "2": "next-page"}),
+        patch.object(collectors, "_google_preview_fields", return_value={}),
+    ):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert len(payloads) == 1
+    assert report["pagination_truncated"] is True
+    assert report["safe_to_cleanup"] is False
+
+
+def test_google_collection_report_skips_cleanup_when_advertiser_cap_is_reached() -> None:
+    item = _creative_item(image_url="https://img.test/1.jpg")
+    brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
+    suggestions = [
+        {"id": "AR123", "name": "PLAUD LLC"},
+        {"id": "AR456", "name": "PLAUD Labs"},
+    ]
+    with (
+        patch.object(collectors, "_GOOGLE_ADS_MAX_ADVERTISERS", 1),
+        patch.object(collectors, "_google_advertiser_suggestions", return_value=suggestions),
+        patch.object(collectors, "_google_search_creatives", return_value={"1": [item]}),
+        patch.object(collectors, "_google_preview_fields", return_value={}),
+    ):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert len(payloads) == 1
+    assert report["advertiser_cap_reached"] is True
+    assert report["safe_to_cleanup"] is False
+
+
+def test_google_collection_report_skips_cleanup_when_no_creatives_are_found() -> None:
+    brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
+    with (
+        patch.object(collectors, "_google_advertiser_suggestions", return_value=[{"id": "AR123", "name": "PLAUD LLC"}]),
+        patch.object(collectors, "_google_search_creatives", return_value={"1": []}),
+    ):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert payloads == []
+    assert report["creative_count"] == 0
+    assert report["safe_to_cleanup"] is False
+
+
+def test_cleanup_google_ad_mismatches_removes_only_explicitly_stale_rows_and_dependencies() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    brand = {"id": "brand-1", "name": "PLAUD"}
+
+    def seed(advertiser_id: str | None, external_id: str, *, raw_json: str | None = None) -> None:
+        payload = {
+            "source_id": "google_ads",
+            "brand_id": brand["id"],
+            "external_id": external_id,
+            "data_type": "ad",
+            "platform": "google",
+            "author": "PLAUD LLC",
+            "body": "creative",
+            "url": "https://adstransparency.google.com/creative/x",
+            "occurred_at": "2026-09-19T00:00:00+00:00",
+            "raw": {"advertiser_id": advertiser_id} if advertiser_id is not None else {},
+        }
+        upsert_ad_observation(conn, payload)
+        if raw_json is not None:
+            conn.execute(
+                "UPDATE ad_entities SET raw_json = ? WHERE ad_external_id = ?",
+                (raw_json, external_id),
+            )
+        insert_record_if_new(conn, payload)
+
+    seed("AR_GOOD", "brand-1:AR_GOOD:CR1")
+    seed("AR_OLD", "brand-1:AR_OLD:CR2")
+    seed(None, "brand-1:UNKNOWN:CR3")
+    seed("AR_BAD_JSON", "brand-1:BAD:CR4", raw_json="{bad json")
+    meta_payload = {
+        "source_id": "meta_ads",
+        "brand_id": brand["id"],
+        "external_id": "brand-1:META:CR5",
+        "data_type": "ad",
+        "platform": "meta",
+        "author": "Other page",
+        "body": "meta creative",
+        "url": "https://facebook.com/ads/library/?id=5",
+        "occurred_at": "2026-09-19T00:00:00+00:00",
+        "raw": {"page_name": "Other page"},
+    }
+    upsert_ad_observation(conn, meta_payload)
+    insert_record_if_new(conn, meta_payload)
+
+    removed = cleanup_google_ad_mismatches(conn, brand, {"AR_GOOD"})
+
+    assert removed == 1
+    assert conn.execute("SELECT COUNT(*) FROM ad_entities WHERE ad_external_id = 'brand-1:AR_GOOD:CR1'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM ad_entities WHERE ad_external_id = 'brand-1:AR_OLD:CR2'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ad_entities WHERE ad_external_id = 'brand-1:UNKNOWN:CR3'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM ad_entities WHERE ad_external_id = 'brand-1:BAD:CR4'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM ad_snapshots WHERE entity_id NOT IN (SELECT id FROM ad_entities)").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ad_events WHERE entity_id NOT IN (SELECT id FROM ad_entities)").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM records WHERE external_id = 'brand-1:AR_OLD:CR2'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM records WHERE external_id = 'brand-1:AR_GOOD:CR1'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM ad_entities WHERE source_id = 'meta_ads'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM records WHERE source_id = 'meta_ads'").fetchone()[0] == 1
 
 
 def test_google_public_payload_rejects_items_without_advertiser_or_creative_id() -> None:
