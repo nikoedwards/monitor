@@ -136,12 +136,18 @@ def _is_boss_url(value: str) -> bool:
     return any(host == root or host.endswith(f".{root}") for root in BOSS_HOSTS)
 
 
+def _looks_like_unavailable_boss_page(url: str) -> bool:
+    """Return whether navigation no longer points at a usable BOSS page."""
+    if not url or url.startswith("about:") or not _is_boss_url(url):
+        return True
+    path = (urlsplit(url).path or "").lower()
+    return any(marker in path for marker in LOGIN_PATH_MARKERS)
+
+
 def _looks_like_blocked(url: str, title: str, body: str) -> bool:
     path = (urlsplit(url).path or "").lower()
     haystack = f"{title}\n{body}".lower()
-    return any(marker.lower() in haystack for marker in LOGIN_MARKERS) or any(
-        marker in path for marker in LOGIN_PATH_MARKERS
-    )
+    return _looks_like_unavailable_boss_page(url) or any(marker.lower() in haystack for marker in LOGIN_MARKERS)
 
 
 def _looks_like_login_required_listing(body: str) -> bool:
@@ -381,7 +387,7 @@ async def _extract_listing(page: Any, url: str) -> tuple[CaptureResult, list[str
     body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
     final_url = page.url or url
     if _looks_like_blocked(final_url, title, body):
-        return CaptureResult(url, title, "blocked", "当前 BOSS 页面要求登录或安全验证。", []), []
+        return CaptureResult(url, title, "blocked", "当前 BOSS 页面要求登录、安全验证或未完成加载。", []), []
 
     detail_urls: list[str] = []
     seen: set[str] = set()

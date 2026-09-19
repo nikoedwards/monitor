@@ -310,6 +310,17 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         self.assertEqual(capture.page_status, "ok")
         self.assertEqual(detail_urls, hrefs)
 
+    def test_listing_redirected_to_about_blank_is_blocked(self):
+        page = _ListingPage(
+            "",
+            [],
+            "about:blank",
+        )
+        capture, detail_urls = asyncio.run(_extract_listing(page, "https://www.zhipin.com/gongsi/job/company.html"))
+        self.assertEqual(capture.page_status, "blocked")
+        self.assertIn("未完成加载", capture.page_error)
+        self.assertEqual(detail_urls, [])
+
     def test_browser_capture_reuses_legacy_zhipin_link(self):
         now = utc_now()
         source_url = "https://www.zhipin.com/gongsi/example.html"
