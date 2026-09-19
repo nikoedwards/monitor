@@ -323,8 +323,8 @@ def ingest_browser_hiring_capture(
 
     link = _browser_capture_link(conn, brand["id"], platform, source_url, source_title)
     now = utc_now()
-    blocked_capture = page_status == "blocked"
-    if blocked_capture and not jobs:
+    blocked_capture = platform == "boss" and page_status == "blocked"
+    if page_status == "blocked" and not blocked_capture:
         error = clean_text(page_error) or "页面需要登录或安全验证，请在浏览器中完成后重新采集。"
         conn.execute(
             "UPDATE links SET last_collect_at = ?, last_status = 'blocked', last_error = ?, updated_at = ? WHERE id = ?",

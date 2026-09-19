@@ -118,6 +118,22 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) AS c FROM job_postings").fetchone()["c"], 0)
         self.assertEqual(self.conn.execute("SELECT * FROM links").fetchone()["last_status"], "blocked")
 
+    def test_linkedin_blocked_capture_keeps_original_early_return(self):
+        result = self.capture(
+            platform="linkedin",
+            source_url="https://www.linkedin.com/company/example/jobs/",
+            page_status="blocked",
+            page_error="登录过期",
+            jobs=[{
+                "url": "https://www.linkedin.com/jobs/view/123456789/",
+                "title": "产品经理",
+                "is_open": True,
+            }],
+        )
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["captured"], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) AS c FROM job_postings").fetchone()["c"], 0)
+
     def test_blocked_page_preserves_jobs_captured_before_challenge(self):
         result = self.capture(page_status="blocked", page_error="详情页安全验证")
         self.assertEqual(result["status"], "blocked")
