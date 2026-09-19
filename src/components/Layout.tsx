@@ -128,11 +128,11 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
           <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
-            YouTube Data API：{data?.youtube_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（YouTube 红人不可采）</Badge>}
+            YouTube Data API：{data?.youtube_configured ? <Badge tone="positive">已配置（优先使用）</Badge> : <Badge tone="neutral">未配置（使用公开搜索）</Badge>}
             {data?.youtube_configured && data?.youtube_key_hint && <span>当前：{data.youtube_key_hint}</span>}
           </div>
-          <Field label={data?.youtube_configured ? "API key（已保存，留空表示不修改）" : "API key（免费档，红人达人 YouTube 采集）"}>
-            <Input type="password" value={form.youtube_api_key || ""} onChange={(e) => set("youtube_api_key", e.target.value)} placeholder="Google Cloud 启用 YouTube Data API v3 后的 key" />
+          <Field label={data?.youtube_configured ? "API key（已保存，留空表示不修改）" : "API key（可选；不填也会每日公开搜索）"}>
+            <Input type="password" value={form.youtube_api_key || ""} onChange={(e) => set("youtube_api_key", e.target.value)} placeholder="可选：Google Cloud YouTube Data API v3 key" />
           </Field>
         </div>
 
@@ -148,10 +148,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
           <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
-            Meta Ad Library：{data?.meta_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（广告投放不会采集）</Badge>}
+            Meta Ad Library：{data?.meta_configured ? <Badge tone="positive">API 已配置</Badge> : <Badge tone="positive">公开页面抓取</Badge>}
             {data?.meta_configured && data?.meta_key_hint && <span>当前：{data.meta_key_hint}</span>}
           </div>
-          <Field label={data?.meta_configured ? "Access Token（已保存，留空表示不修改）" : "Access Token（Meta 广告库必填）"} hint="也可在 Railway 环境变量中配置 META_ACCESS_TOKEN 或 FACEBOOK_ACCESS_TOKEN。">
+          <Field label={data?.meta_configured ? "Access Token（已保存，留空表示不修改）" : "Access Token（可选，公开页面抓取无需填写）"} hint="不填也会抓取 Meta Ad Library 公开页面；填写 META_ACCESS_TOKEN 或 FACEBOOK_ACCESS_TOKEN 后优先使用官方 API。">
             <Input type="password" value={form.meta_access_token || ""} onChange={(e) => set("meta_access_token", e.target.value)} placeholder="Meta Graph API access token" />
           </Field>
         </div>

@@ -452,7 +452,10 @@ def _ad_entity_dict(row: sqlite3.Row) -> dict:
         "delivery_start": item.get("started_at"), "delivery_stop": item.get("stopped_at"),
         "first_seen": item.get("first_seen_at"), "last_seen": item.get("last_seen_at"),
         "status": "active" if item.get("active_status") == "active" else "stopped",
-        "platforms": item.get("publisher_platforms") or [], "creative_url": item.get("snapshot_url"),
+        "platforms": item.get("publisher_platforms") or [],
+        "creative_url": ((raw.get("snapshot") or {}).get("cards") or [{}])[0].get("resized_image_url")
+        or ((raw.get("snapshot") or {}).get("cards") or [{}])[0].get("original_image_url")
+        or item.get("snapshot_url"),
         "landing_url": (item.get("link_urls") or [None])[0],
         "spend": raw.get("spend"), "impressions": raw.get("impressions"), "reach": raw.get("reach"),
     })
