@@ -382,18 +382,27 @@ def test_cleanup_google_ad_mismatches_removes_only_explicitly_stale_rows_and_dep
     conn.executescript(SCHEMA)
     brand = {"id": "brand-1", "name": "PLAUD"}
 
-    def seed(advertiser_id: str | None, external_id: str, *, raw_json: str | None = None) -> None:
+    def seed(
+        advertiser_id: str | None,
+        external_id: str,
+        *,
+        page_name: str = "PLAUD LLC",
+        raw_json: str | None = None,
+    ) -> None:
         payload = {
             "source_id": "google_ads",
             "brand_id": brand["id"],
             "external_id": external_id,
             "data_type": "ad",
             "platform": "google",
-            "author": "PLAUD LLC",
+            "author": page_name,
             "body": "creative",
             "url": "https://adstransparency.google.com/creative/x",
             "occurred_at": "2026-09-19T00:00:00+00:00",
-            "raw": {"advertiser_id": advertiser_id} if advertiser_id is not None else {},
+            "raw": {
+                "advertiser_id": advertiser_id,
+                "page_name": page_name,
+            } if advertiser_id is not None else {},
         }
         upsert_ad_observation(conn, payload)
         if raw_json is not None:
@@ -404,7 +413,7 @@ def test_cleanup_google_ad_mismatches_removes_only_explicitly_stale_rows_and_dep
         insert_record_if_new(conn, payload)
 
     seed("AR_GOOD", "brand-1:AR_GOOD:CR1")
-    seed("AR_OLD", "brand-1:AR_OLD:CR2")
+    seed("AR_OLD", "brand-1:AR_OLD:CR2", page_name="Other advertiser")
     seed(None, "brand-1:UNKNOWN:CR3")
     seed("AR_BAD_JSON", "brand-1:BAD:CR4", raw_json="{bad json")
     meta_payload = {

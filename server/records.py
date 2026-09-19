@@ -3,10 +3,38 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import sqlite3
 
 from .nlp import analyze_text
 from .util import clean_text, new_id, utc_now
+
+
+def _google_name_matches_brand(name: str, brand: dict) -> bool:
+    """Recognize a stored advertiser name that still plausibly belongs to a brand."""
+    normalized_name = re.sub(r"[_\W]+", " ", clean_text(name).casefold()).strip()
+    if not normalized_name:
+        return False
+    candidates: list[str] = []
+    if isinstance(brand, dict):
+        brand_name = clean_text(brand.get("name"))
+        if brand_name:
+            candidates.append(brand_name)
+        try:
+            keywords = json.loads(brand.get("monitoring_keywords_json") or "[]")
+        except (TypeError, ValueError):
+            keywords = []
+        candidates.extend(value for value in keywords if isinstance(value, str) and value.strip())
+    for candidate in candidates:
+        normalized = re.sub(r"[_\W]+", " ", candidate.casefold()).strip()
+        if not normalized:
+            continue
+        if normalized_name == normalized or normalized_name.startswith(f"{normalized} "):
+            return True
+        first_token = normalized.split(" ", 1)[0]
+        if len(first_token) >= 4 and normalized_name.startswith(f"{first_token} "):
+            return True
+    return False
 
 
 def cleanup_google_ad_mismatches(
@@ -40,7 +68,7 @@ def cleanup_google_ad_mismatches(
     if not valid_ids:
         return 0
     rows = conn.execute(
-        "SELECT id, raw_json, ad_external_id FROM ad_entities "
+        "SELECT id, page_name, raw_json, ad_external_id FROM ad_entities "
         "WHERE brand_id = ? AND source_id = 'google_ads'",
         (brand_id,),
     ).fetchall()
@@ -60,6 +88,15 @@ def cleanup_google_ad_mismatches(
             else ""
         )
         if advertiser_id and advertiser_id not in valid_ids:
+            page_name = clean_text(row["page_name"])
+            if not page_name:
+                page_name = clean_text(raw.get("page_name"))
+            # A known brand-like advertiser name is retained even when its
+            # account was absent from a partial suggestions response. This
+            # prevents a transient query failure from deleting a legitimate
+            # historical account while still removing obvious cross-brand rows.
+            if page_name and _google_name_matches_brand(page_name, brand):
+                continue
             stale.append((row["id"], clean_text(row["ad_external_id"])))
     for entity_id, external_id in stale:
         conn.execute("DELETE FROM ad_events WHERE entity_id = ?", (entity_id,))
