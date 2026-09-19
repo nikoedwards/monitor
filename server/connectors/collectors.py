@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import json
+import html as html_lib
 import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 from ..config import CREDENTIALS, USER_AGENT
-from ..fetchers import FetchError, fetch_bytes, fetch_json, fetch_page, parse_rss
+from ..fetchers import FetchError, fetch_bytes, fetch_form_json, fetch_json, fetch_page, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
 from ..relevance import google_news_match_evidence, query_match_evidence, reddit_post_id, search_query_parts
 from ..util import (
@@ -765,6 +766,425 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
             has_metric=row["id"] in successful_links,
         ))
     return payloads
+
+
+# ---------------------------------------------------------------- Google Ads Transparency Center
+_GOOGLE_ADS_RPC = "https://adstransparency.google.com/anji/_/rpc"
+_GOOGLE_ADS_REGION_CODE = 2840  # United States
+_GOOGLE_ADS_REGION = "US"
+_GOOGLE_ADS_PAGE_SIZE = 40
+_GOOGLE_ADS_MAX_PAGES = 5
+_GOOGLE_ADS_MAX_ADVERTISERS = 4
+_GOOGLE_ADS_MAX_PREVIEWS = 12
+_GOOGLE_ADS_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _google_timestamp(value) -> str | None:
+    """Decode Google's `{seconds, nanos}` timestamp shape to UTC ISO text."""
+    if isinstance(value, dict):
+        # The public RPC uses protobuf-style numeric keys (``1``/``2``),
+        # while fixtures and other Google surfaces may expose the named
+        # ``seconds``/``nanos`` shape.  Accept both representations.
+        if "1" in value or "2" in value:
+            seconds = value.get("1")
+            nanos = value.get("2")
+        else:
+            seconds = value.get("seconds")
+            nanos = value.get("nanos")
+        try:
+            value = float(seconds) + float(nanos or 0) / 1_000_000_000
+        except (TypeError, ValueError):
+            value = seconds
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _google_timestamp_seconds(value) -> float | None:
+    if isinstance(value, dict):
+        if "1" in value or "2" in value:
+            seconds = value.get("1")
+            nanos = value.get("2")
+        else:
+            seconds = value.get("seconds")
+            nanos = value.get("nanos")
+        try:
+            value = float(seconds) + float(nanos or 0) / 1_000_000_000
+        except (TypeError, ValueError):
+            value = seconds
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _google_js_unescape(value: str) -> str:
+    """Unescape the small JS string fragments used by preview/content.js."""
+    if not value:
+        return ""
+
+    def replace_hex(match: re.Match) -> str:
+        try:
+            return chr(int(match.group(1), 16))
+        except (TypeError, ValueError):
+            return match.group(0)
+
+    value = re.sub(r"\\x([0-9a-fA-F]{2})", replace_hex, value)
+    value = re.sub(
+        r"\\u([0-9a-fA-F]{4})",
+        lambda match: chr(int(match.group(1), 16)),
+        value,
+    )
+    return (
+        value.replace("\\'", "'")
+        .replace('\\"', '"')
+        .replace("\\/", "/")
+        .replace("\\&", "&")
+        .replace("\\=", "=")
+        .replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace("\\\\", "\\")
+    )
+
+
+def _google_preview_fields(preview_url: str, cache: dict[str, dict]) -> dict:
+    """Read text/links/media from Google's public creative preview script."""
+    if not preview_url:
+        return {}
+    if preview_url in cache:
+        return cache[preview_url]
+    fields: dict[str, str] = {}
+    try:
+        raw = fetch_bytes(
+            preview_url,
+            accept="application/javascript,text/javascript,*/*",
+            timeout=22,
+            max_bytes=3_000_000,
+            headers={"User-Agent": _GOOGLE_ADS_USER_AGENT, "Referer": "https://adstransparency.google.com/"},
+        )
+        text = raw.decode("utf-8", errors="replace")
+    except (FetchError, ValueError, OSError):
+        cache[preview_url] = fields
+        return fields
+
+    # The response contains a large generic ad renderer before the actual
+    # ``google_template_data.adData`` object. Decode first, then use the last
+    # occurrence so a helper function's `description` string cannot be
+    # mistaken for the creative copy.
+    decoded_text = _google_js_unescape(text)
+    ad_data_matches = list(re.finditer(r"adData[\"']?\s*:\s*\[\s*\{", decoded_text))
+    if ad_data_matches:
+        text = decoded_text[ad_data_matches[-1].start():]
+    else:
+        text = decoded_text
+
+    def first(patterns: tuple[str, ...], haystack: str = text) -> str:
+        for pattern in patterns:
+            match = re.search(pattern, haystack, flags=re.I | re.S)
+            if match:
+                value = clean_text(_google_js_unescape(match.group(1)))
+                if any(marker in value for marker in ("+c.", "catch(", "function(", "this.")):
+                    continue
+                if value:
+                    return value
+        return ""
+
+    for key, patterns in {
+        "headline": (r"(?<![A-Za-z0-9_])['\"]?headline['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?headline['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "long_headline": (r"(?<![A-Za-z0-9_])['\"]?longHeadline['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?longHeadline['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "description": (r"(?<![A-Za-z0-9_])['\"]?description['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?description['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "destination_url": (r"(?<![A-Za-z0-9_])['\"]?destination_url['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?destination_url['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "final_url": (r"(?<![A-Za-z0-9_])['\"]?final_url['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?final_url['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "visible_url": (r"(?<![A-Za-z0-9_])['\"]?visible_url['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?visible_url['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "thumbnail_url": (r"(?<![A-Za-z0-9_])['\"]?thumbnail['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?thumbnail['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "high_res_thumbnail_url": (r"(?<![A-Za-z0-9_])['\"]?highResThumbnail['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?highResThumbnail['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+        "video_url": (r"(?<![A-Za-z0-9_])['\"]?video['\"]?\s*:\s*'((?:\\.|[^'])*)'", r"(?<![A-Za-z0-9_])['\"]?video['\"]?\s*:\s*\"((?:\\.|[^\"])*)\""),
+    }.items():
+        value = first(patterns, decoded_text if key in {"destination_url", "final_url", "visible_url"} else text)
+        if value:
+            fields[key] = unquote(value) if key.endswith("url") else value
+    cache[preview_url] = fields
+    return fields
+
+
+def _google_html_image(html: str) -> str | None:
+    if not html:
+        return None
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)', html, flags=re.I)
+    return clean_text(html_lib.unescape(match.group(1))) if match else None
+
+
+def _google_advertiser_suggestions(query: str) -> list[dict]:
+    payload = {
+        "1": query,
+        "2": 10,
+        "3": 10,
+        "4": [_GOOGLE_ADS_REGION_CODE],
+        "5": {"1": 1},
+    }
+    response = fetch_form_json(
+        f"{_GOOGLE_ADS_RPC}/SearchService/SearchSuggestions?authuser=",
+        {"f.req": json.dumps(payload, separators=(",", ":"))},
+        timeout=25,
+        headers={
+            "User-Agent": _GOOGLE_ADS_USER_AGENT,
+            "Origin": "https://adstransparency.google.com",
+            "Referer": "https://adstransparency.google.com/?region=US",
+        },
+    )
+    suggestions: list[dict] = []
+    for item in (response.get("1", []) if isinstance(response, dict) else []):
+        advertiser = item.get("1") if isinstance(item, dict) else None
+        if not isinstance(advertiser, dict):
+            continue
+        advertiser_id = clean_text(advertiser.get("2"))
+        name = clean_text(advertiser.get("1"))
+        if advertiser_id and name:
+            suggestions.append({
+                "id": advertiser_id,
+                "name": name,
+                "country": clean_text(advertiser.get("3")) or _GOOGLE_ADS_REGION,
+                "raw": advertiser,
+            })
+    return suggestions
+
+
+def _google_name_matches_query(name: str, query: str, brand_name: str | None = None) -> bool:
+    """Keep advertiser suggestions that plausibly represent the monitored brand."""
+    candidates = [clean_text(query), clean_text(brand_name)]
+    normalized_name = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    if not normalized_name:
+        return False
+    for candidate in candidates:
+        normalized = re.sub(r"[^a-z0-9]+", " ", (candidate or "").lower()).strip()
+        if not normalized:
+            continue
+        if normalized_name == normalized or normalized_name.startswith(f"{normalized} "):
+            return True
+        # A multi-word search often includes product terms while the public
+        # advertiser name only contains the brand token.
+        first_token = normalized.split(" ", 1)[0]
+        if len(first_token) >= 4 and normalized_name.startswith(f"{first_token} "):
+            return True
+    return False
+
+
+def _google_search_creatives(
+    advertiser_ids: list[str],
+    *,
+    offset: int = 0,
+    page_token: str | None = None,
+) -> dict:
+    payload = {
+        "2": _GOOGLE_ADS_PAGE_SIZE,
+        "3": {
+            "8": [_GOOGLE_ADS_REGION_CODE],
+            "12": {"1": "", "2": True},
+            "13": {"1": advertiser_ids},
+        },
+        "7": {"1": 1, "2": offset, "3": _GOOGLE_ADS_REGION_CODE},
+    }
+    # SearchCreatives returns its continuation token as response field `2`;
+    # subsequent requests consume it through request field `4`.
+    if page_token:
+        payload["4"] = page_token
+    response = fetch_form_json(
+        f"{_GOOGLE_ADS_RPC}/SearchService/SearchCreatives?authuser=",
+        {"f.req": json.dumps(payload, separators=(",", ":"))},
+        timeout=35,
+        headers={
+            "User-Agent": _GOOGLE_ADS_USER_AGENT,
+            "Origin": "https://adstransparency.google.com",
+            "Referer": "https://adstransparency.google.com/?region=US",
+        },
+    )
+    return response if isinstance(response, dict) else {}
+
+
+def _google_public_payload(
+    item: dict,
+    brand: dict,
+    query: str,
+    *,
+    preview_cache: dict[str, dict] | None = None,
+    load_preview: bool = False,
+    now: datetime | None = None,
+) -> dict | None:
+    advertiser_id = clean_text(item.get("1"))
+    creative_id = clean_text(item.get("2"))
+    if not advertiser_id or not creative_id:
+        return None
+    preview = item.get("3") if isinstance(item.get("3"), dict) else {}
+    preview_url = clean_text(((preview.get("1") or {}).get("4")))
+    image_html = clean_text(((preview.get("3") or {}).get("2")))
+    image_url = _google_html_image(image_html)
+    fields = {}
+    if preview_url and load_preview:
+        fields = _google_preview_fields(
+            preview_url,
+            preview_cache if preview_cache is not None else {},
+        )
+    elif preview_url and preview_cache is not None:
+        fields = preview_cache.get(preview_url) or {}
+    thumbnail_url = image_url or fields.get("high_res_thumbnail_url") or fields.get("thumbnail_url")
+    video_url = fields.get("video_url")
+    body_parts: list[str] = []
+    for key in ("headline", "long_headline", "description"):
+        value = clean_text(fields.get(key))
+        if value and value not in body_parts:
+            body_parts.append(value)
+    body = " · ".join(body_parts)
+    landing_url = fields.get("destination_url") or fields.get("final_url") or fields.get("visible_url")
+    start_at = _google_timestamp(item.get("6"))
+    last_seen_at = _google_timestamp(item.get("7"))
+    now_dt = now or datetime.now(timezone.utc)
+    last_seen_seconds = _google_timestamp_seconds(item.get("7"))
+    active = bool(last_seen_seconds is not None and last_seen_seconds >= now_dt.timestamp() - 3 * 86400)
+    stopped_at = None if active else last_seen_at
+    snapshot_url = f"https://adstransparency.google.com/advertiser/{quote_plus(advertiser_id)}/creative/{quote_plus(creative_id)}?region={_GOOGLE_ADS_REGION}"
+    advertiser_name = clean_text(item.get("12")) or query
+    raw = {
+        "collection_method": "google_ads_transparency_public_rpc",
+        "search_query": query,
+        "advertiser_id": advertiser_id,
+        "creative_id": creative_id,
+        "preview_url": preview_url,
+        "preview_fields": fields,
+        "thumbnail_url": thumbnail_url,
+        "video_url": video_url,
+        "landing_url": landing_url,
+        "page_name": advertiser_name,
+        "google_item": item,
+    }
+    metrics = {
+        "advertiser_id": advertiser_id,
+        "creative_id": creative_id,
+        "creative_type": item.get("4"),
+        "thumbnail_url": thumbnail_url,
+        "video_url": video_url,
+        "ad_landing_url": landing_url,
+        "ad_creative_link_urls": [landing_url] if landing_url else [],
+        "google_last_seen_at": last_seen_at,
+        "publisher_platforms": ["google"],
+        "country": _GOOGLE_ADS_REGION,
+    }
+    return {
+        "source_id": "google_ads",
+        "brand_id": brand.get("id"),
+        "external_id": f"{brand.get('id')}:{advertiser_id}:{creative_id}",
+        "data_type": "ad",
+        "dimension": "marketing",
+        "channel": "ads",
+        "platform": "google",
+        "title": advertiser_name,
+        "author": advertiser_name,
+        "body": body or advertiser_name,
+        "url": snapshot_url,
+        "occurred_at": start_at or utc_now(),
+        "started_at": start_at,
+        "stopped_at": stopped_at,
+        "active_status": "active" if active else "inactive",
+        "metrics": metrics,
+        "raw": raw,
+    }
+
+
+def _collect_google_public_ads(brand: dict) -> list[dict]:
+    payloads: list[dict] = []
+    raw_items: list[tuple[dict, str]] = []
+    seen_advertisers: set[str] = set()
+    # Creative IDs are normally globally unique, but Google does not document
+    # that as a contract. Include the advertiser ID so a reused/scoped ID from
+    # another advertiser is not silently dropped.
+    seen_creatives: set[tuple[str, str]] = set()
+    preview_cache: dict[str, dict] = {}
+    for query in brand_queries(brand)[:4]:
+        try:
+            suggestions = _google_advertiser_suggestions(query)
+        except (FetchError, ValueError, OSError):
+            continue
+        matching = [
+            advertiser
+            for advertiser in suggestions
+            if _google_name_matches_query(advertiser.get("name", ""), query, brand.get("name"))
+        ]
+        # If the endpoint returns exactly one suggestion, it is safe to use it
+        # as the public advertiser match even when punctuation/localization
+        # prevents the normalized name check.  With multiple suggestions, do
+        # not silently attach a neighboring advertiser to this brand query.
+        if not matching and len(suggestions) == 1:
+            matching = suggestions
+        for advertiser in matching:
+            advertiser_id = advertiser.get("id")
+            if not advertiser_id or advertiser_id in seen_advertisers:
+                continue
+            if len(seen_advertisers) >= _GOOGLE_ADS_MAX_ADVERTISERS:
+                break
+            seen_advertisers.add(advertiser_id)
+            page_token: str | None = None
+            for page_index in range(_GOOGLE_ADS_MAX_PAGES):
+                try:
+                    search_kwargs = {"offset": page_index * _GOOGLE_ADS_PAGE_SIZE}
+                    if page_token:
+                        search_kwargs["page_token"] = page_token
+                    response = _google_search_creatives([advertiser_id], **search_kwargs)
+                except (FetchError, ValueError, OSError):
+                    break
+                page_items = response.get("1", []) if isinstance(response, dict) else []
+                if not isinstance(page_items, list):
+                    break
+                for item in page_items:
+                    creative_id = clean_text(item.get("2")) if isinstance(item, dict) else ""
+                    creative_key = (advertiser_id, creative_id)
+                    if not creative_id or creative_key in seen_creatives:
+                        continue
+                    seen_creatives.add(creative_key)
+                    raw_items.append((item, query))
+                next_token = clean_text(response.get("2")) if isinstance(response, dict) else ""
+                # The server token is authoritative; a short page can still
+                # carry a continuation when filters are applied. The
+                # repeated-token guard protects against a throttled endpoint
+                # returning the same page forever (the hard page cap is a
+                # second backstop).
+                if not next_token or next_token == page_token:
+                    break
+                page_token = next_token
+    # Image creatives expose a stable archive URL directly. Fetch a bounded
+    # number of preview scripts for richer copy/video thumbnails; fetching all
+    # scripts makes a daily public crawl unnecessarily slow and noisy.
+    priority_preview_urls: list[str] = []
+    fallback_preview_urls: list[str] = []
+    for item, _query in raw_items:
+        preview = item.get("3") if isinstance(item.get("3"), dict) else {}
+        preview_url = clean_text(((preview.get("1") or {}).get("4")))
+        image_html = clean_text(((preview.get("3") or {}).get("2")))
+        if not preview_url:
+            continue
+        target = priority_preview_urls if not _google_html_image(image_html) else fallback_preview_urls
+        if preview_url not in priority_preview_urls and preview_url not in fallback_preview_urls:
+            target.append(preview_url)
+    preview_urls = (priority_preview_urls + fallback_preview_urls)[:_GOOGLE_ADS_MAX_PREVIEWS]
+    if preview_urls:
+        def load_preview(url: str) -> tuple[str, dict]:
+            return url, _google_preview_fields(url, {})
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for url, fields in executor.map(load_preview, preview_urls):
+                preview_cache[url] = fields
+    for item, query in raw_items:
+        payload = _google_public_payload(item, brand, query, preview_cache=preview_cache)
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def collect_google_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
+    """Collect public Google Ads Transparency creatives without credentials."""
+    return _collect_google_public_ads(brand)
 
 
 # ---------------------------------------------------------------- Meta Ad Library

@@ -9,6 +9,27 @@ from .nlp import analyze_text
 from .util import clean_text, new_id, utc_now
 
 
+def _merge_nonempty_mapping(previous: object, incoming: object) -> dict:
+    """Keep previously observed ad metadata when a public crawl omits fields.
+
+    Google preview scripts are intentionally sampled to keep a daily crawl
+    bounded. A later sample can therefore contain an empty thumbnail/link
+    even though an earlier observation had one. Do not erase that evidence
+    from the materialized ad entity; incoming non-empty values still win.
+    """
+    merged = dict(previous) if isinstance(previous, dict) else {}
+    if not isinstance(incoming, dict):
+        return merged
+    for key, value in incoming.items():
+        if value in (None, "", [], {}):
+            continue
+        if key == "preview_fields" and isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_nonempty_mapping(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def upsert_ad_observation(conn: sqlite3.Connection, payload: dict) -> dict | None:
     """Persist the ad lifecycle separately from de-duplicated content records."""
     if payload.get("data_type") != "ad":
@@ -54,6 +75,25 @@ def upsert_ad_observation(conn: sqlite3.Connection, payload: dict) -> dict | Non
         entity = conn.execute("SELECT * FROM ad_entities WHERE id = ?", (entity_id,)).fetchone()
     else:
         entity_id = row["id"]
+        # Public ad previews can be temporarily incomplete (for example when
+        # Google's preview script is rate-limited). Keep previously observed
+        # links and media instead of replacing them with empty values during a
+        # later lifecycle refresh.
+        try:
+            previous_raw = json.loads(row["raw_json"] or "{}")
+        except (TypeError, ValueError):
+            previous_raw = {}
+        merged_raw = _merge_nonempty_mapping(previous_raw, raw)
+        try:
+            previous_links = json.loads(row["link_urls_json"] or "[]")
+        except (TypeError, ValueError):
+            previous_links = []
+        stored_links = link_urls if link_urls else previous_links
+        try:
+            previous_platforms = json.loads(row["publisher_platforms_json"] or "[]")
+        except (TypeError, ValueError):
+            previous_platforms = []
+        stored_platforms = platforms if platforms else previous_platforms
         if row["creative_hash"] and creative_hash and row["creative_hash"] != creative_hash:
             events.append(("creative_changed", {"previous_hash": row["creative_hash"], "creative_hash": creative_hash}))
         if row["active_status"] != status:
@@ -65,10 +105,10 @@ def upsert_ad_observation(conn: sqlite3.Connection, payload: dict) -> dict | Non
                creative_body = ?, creative_hash = ?, started_at = COALESCE(?, started_at),
                stopped_at = ?, active_status = ?, publisher_platforms_json = ?,
                link_urls_json = ?, raw_json = ?, last_seen_at = ?, updated_at = ? WHERE id = ?""",
-            (raw.get("page_id") or metrics.get("page_id"), payload.get("author") or raw.get("page_name"), payload.get("url"),
+            (raw.get("page_id") or metrics.get("page_id") or merged_raw.get("page_id"), payload.get("author") or raw.get("page_name") or merged_raw.get("page_name"), payload.get("url") or row["snapshot_url"],
              body, creative_hash, started_at, stopped_at, status,
-             json.dumps(platforms, ensure_ascii=False), json.dumps(link_urls, ensure_ascii=False),
-             json.dumps(raw, ensure_ascii=False), observed_at, now, entity_id),
+             json.dumps(stored_platforms, ensure_ascii=False), json.dumps(stored_links, ensure_ascii=False),
+             json.dumps(merged_raw, ensure_ascii=False), observed_at, now, entity_id),
         )
     conn.execute(
         """INSERT OR IGNORE INTO ad_snapshots

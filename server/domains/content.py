@@ -457,6 +457,21 @@ def _ad_entity_dict(row: sqlite3.Row) -> dict:
     for media in media_items:
         thumbnail_url = thumbnail_url or media.get("resized_image_url") or media.get("original_image_url") or media.get("video_preview_image_url")
         video_url = video_url or media.get("video_hd_url") or media.get("video_sd_url")
+    link_urls = item.get("link_urls")
+    landing_url = link_urls[0] if isinstance(link_urls, list) and link_urls else None
+    if not landing_url:
+        # Google Transparency payloads keep the destination in the raw
+        # snapshot as well.  This fallback also makes older entities visible
+        # before their next lifecycle refresh repopulates link_urls_json.
+        landing_url = raw.get("landing_url") or raw.get("ad_landing_url")
+        if not landing_url:
+            preview_fields = raw.get("preview_fields")
+            if isinstance(preview_fields, dict):
+                landing_url = (
+                    preview_fields.get("destination_url")
+                    or preview_fields.get("final_url")
+                    or preview_fields.get("visible_url")
+                )
     item.update({
         "source": item.get("source_id"), "source_ad_id": item.get("ad_external_id"),
         "advertiser_name": item.get("page_name"), "body": item.get("creative_body"),
@@ -468,7 +483,7 @@ def _ad_entity_dict(row: sqlite3.Row) -> dict:
         "thumbnail_url": thumbnail_url,
         "media_url": thumbnail_url or video_url,
         "video_url": video_url,
-        "landing_url": (item.get("link_urls") or [None])[0],
+        "landing_url": landing_url,
         "spend": raw.get("spend"), "impressions": raw.get("impressions"), "reach": raw.get("reach"),
     })
     item["duration_days"] = _ad_duration_days(item.get("started_at"), item.get("stopped_at"), item.get("last_seen_at"))
