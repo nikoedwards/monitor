@@ -5,6 +5,7 @@ import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
 import { MonitorStatus } from "../components/MonitorStatus";
 import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
+import { CreatorCollectionLogic } from "../components/CreatorCollectionLogic";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { SmartSummary } from "../components/SmartSummary";
 import { useAds, useAdsSummary, useMarketingSummary, useRecords } from "../lib/hooks";
@@ -168,6 +169,7 @@ export default function Marketing() {
         action={<div className="flex flex-wrap items-center gap-2"><TimeRangePicker /><MonitorStatus brandId={brandId} dimension="marketing" /></div>}
       />
       {channel === "creators" && <CreatorSourceStatus brandId={brandId} />}
+      {channel === "creators" && <CreatorCollectionLogic compact />}
 
       <div className="flex flex-wrap items-center gap-3">
         <SegmentGroup
