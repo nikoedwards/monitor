@@ -309,6 +309,31 @@ def test_google_collection_report_skips_cleanup_when_suggestions_fail() -> None:
 
     assert payloads == []
     assert report["suggestion_failed"] is True
+    assert report["cleanup_eligible"] is False
+    assert report["safe_to_cleanup"] is False
+
+
+def test_google_collection_report_allows_protected_cleanup_after_one_query_is_limited() -> None:
+    item = _creative_item(image_url="https://img.test/1.jpg")
+    brand = {
+        "id": "brand-1",
+        "name": "PLAUD",
+        "monitoring_keywords_json": '["PLAUD AI"]',
+    }
+    with (
+        patch.object(
+            collectors,
+            "_google_advertiser_suggestions",
+            side_effect=[[{"id": "AR123", "name": "PLAUD LLC"}], collectors.FetchError("429")],
+        ),
+        patch.object(collectors, "_google_search_creatives", return_value={"1": [item]}),
+        patch.object(collectors, "_google_preview_fields", return_value={}),
+    ):
+        payloads, report = collectors._collect_google_public_ads_with_report(brand)
+
+    assert len(payloads) == 1
+    assert report["suggestion_failed"] is True
+    assert report["cleanup_eligible"] is True
     assert report["safe_to_cleanup"] is False
 
 

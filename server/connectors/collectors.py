@@ -1132,6 +1132,7 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
         "pagination_truncated": False,
         "advertiser_cap_reached": False,
         "creative_count": 0,
+        "cleanup_eligible": False,
         "safe_to_cleanup": False,
     }
     for query in queries:
@@ -1234,13 +1235,21 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
         if payload:
             payloads.append(payload)
     report["creative_count"] = len(payloads)
-    report["safe_to_cleanup"] = bool(
+    # A partial suggestion pass can still safely remove obvious historical
+    # cross-brand rows: cleanup uses verified advertiser IDs and retains any
+    # old row whose stored page name still matches the brand. Keep this
+    # separate from the stricter complete-crawl flag for observability.
+    report["cleanup_eligible"] = bool(
         report["matched_advertiser_ids"]
         and report["creative_count"]
-        and report["queries_completed"] == report["query_count"]
-        and not report["suggestion_failed"]
+        and report["queries_completed"] > 0
         and not report["creative_failed"]
         and not report["advertiser_cap_reached"]
+    )
+    report["safe_to_cleanup"] = bool(
+        report["cleanup_eligible"]
+        and report["queries_completed"] == report["query_count"]
+        and not report["suggestion_failed"]
     )
     return payloads, report
 
@@ -1254,7 +1263,7 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
 def collect_google_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     """Collect public Google Ads Transparency creatives without credentials."""
     payloads, report = _collect_google_public_ads_with_report(brand)
-    if report.get("safe_to_cleanup"):
+    if report.get("cleanup_eligible"):
         cleanup_google_ad_mismatches(conn, brand, report["matched_advertiser_ids"])
     return payloads
 
