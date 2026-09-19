@@ -126,6 +126,125 @@ function collectionReason(record: RecordItem): string | undefined {
   return record.source_id ? `收录原因：${collectionSourceLabel(record.source_id) || record.source_id}` : undefined;
 }
 
+type CreatorEvidence = Record<string, unknown>;
+
+function creatorEvidence(record: RecordItem): CreatorEvidence | undefined {
+  if (record.channel !== "creators" && record.data_type !== "creator_post") return undefined;
+  const raw = record.raw || {};
+  if (raw.collection_evidence && typeof raw.collection_evidence === "object") {
+    return raw.collection_evidence as CreatorEvidence;
+  }
+  if (raw.evidence_type || raw.matched_in || raw.transcript_status || raw.transcript_matches) return raw;
+  return undefined;
+}
+
+function secondsLabel(value: unknown): string {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const rest = whole % 60;
+  if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function timestampUrl(url: string | undefined, value: unknown): string | undefined {
+  const seconds = Number(value);
+  if (!url || !Number.isFinite(seconds) || seconds < 0) return undefined;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("t", String(Math.floor(seconds)));
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function evidenceSummary(evidence: CreatorEvidence): string {
+  const matches = Array.isArray(evidence.transcript_matches) ? evidence.transcript_matches : [];
+  const scope = String(evidence.scope || "");
+  if (matches.length) {
+    const first = matches[0] as Record<string, unknown>;
+    const start = secondsLabel(first.start);
+    const end = secondsLabel(first.end);
+    return start && end ? `字幕命中片段 · ${start}–${end}` : "字幕命中片段";
+  }
+  if (scope === "transcript_and_metadata") return "字幕 + 标题/简介命中";
+  if (scope === "title_and_description") return "标题 + 简介命中";
+  if (scope === "title") return "标题命中";
+  if (scope === "description") return "简介命中";
+  if (scope === "metadata") return "公开元数据命中";
+  if (evidence.evidence_type === "product_keyword") return "产品名/别名命中";
+  return "历史记录未保存字段级证据";
+}
+
+function CreatorEvidenceDetails({ record }: { record: RecordItem }) {
+  const evidence = creatorEvidence(record);
+  if (!evidence) return null;
+  const matches = (Array.isArray(evidence.transcript_matches) ? evidence.transcript_matches : []) as Record<string, unknown>[];
+  const terms = Array.from(new Set([
+    ...(typeof evidence.matched_text === "string" ? evidence.matched_text.split(/[、,，]/) : []),
+    ...(Array.isArray(evidence.matched_texts) ? evidence.matched_texts : []),
+    ...(Array.isArray(evidence.matched_terms) ? evidence.matched_terms : []),
+    ...matches.flatMap((item) => [item.matched_text, ...(Array.isArray(item.matched_terms) ? item.matched_terms : [])]),
+  ].map((item) => String(item || "").trim()).filter(Boolean)));
+  const locationLabels: Record<string, string> = {
+    body: "简介",
+    title_and_description: "标题 + 简介",
+    transcript: "视频字幕",
+    metadata: "公开元数据",
+  };
+  const locations = Array.from(new Set([
+    ...(evidence.matched_in ? [String(evidence.matched_in)] : []),
+    ...(matches.length ? ["transcript"] : []),
+  ].map((value) => locationLabels[value] || value)));
+  const status = String(record.raw?.transcript_status || evidence.transcript_status || "");
+  const note = String(evidence.analysis_note || "");
+  const variantTarget = matches.find((item) => item.match_rule === "automatic_caption_alias")?.matched_query;
+  return (
+    <details className="mt-3 rounded-md" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
+      <summary className="cursor-pointer select-none px-2.5 py-2 text-[12px]" style={{ color: "var(--body)" }}>
+        <span className="font-medium" style={{ color: "var(--ink)" }}>为什么收录？</span>
+        <span className="ml-2" style={{ color: "var(--accent)" }}>{evidenceSummary(evidence)}</span>
+      </summary>
+      <div className="space-y-2 px-2.5 pb-2.5 text-[12px] leading-relaxed" style={{ color: "var(--mute)" }}>
+        {locations.length > 0 && <div><span style={{ color: "var(--body)" }}>命中位置：</span>{locations.join("、")}</div>}
+        {terms.length > 0 && <div><span style={{ color: "var(--body)" }}>命中词：</span>{terms.join("、")}</div>}
+        {Array.isArray(evidence.matched_queries) && evidence.matched_queries.length > 0 && (
+          <div><span style={{ color: "var(--body)" }}>搜索入口：</span>{evidence.matched_queries.map((item) => String(item)).join("、")}</div>
+        )}
+        {matches.length > 0 && (
+          <div className="space-y-1.5">
+            <div style={{ color: "var(--body)" }}>字幕证据（命中片段，不代表整段视频）：</div>
+            {matches.slice(0, 4).map((item, index) => {
+              const start = secondsLabel(item.start);
+              const end = secondsLabel(item.end);
+              const label = start && end ? `${start}–${end}` : start || "视频片段";
+              const href = timestampUrl(record.url, item.start);
+              const text = String(item.text || "").trim();
+              return (
+                <div key={`${label}-${index}`} className="rounded px-2 py-1.5" style={{ background: "var(--panel)" }}>
+                  {href ? <a href={href} target="_blank" rel="noreferrer" className="font-medium hover:underline" style={{ color: "var(--accent)" }}>{label}</a> : <span className="font-medium" style={{ color: "var(--accent)" }}>{label}</span>}
+                  {text && <span className="ml-2">“{text}”</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {Array.isArray(evidence.transcript_variants) && evidence.transcript_variants.length > 0 && (
+          <div><span style={{ color: "var(--body)" }}>自动字幕变体：</span>{evidence.transcript_variants.join("、")} → {String(variantTarget || "品牌词")}</div>
+        )}
+        {status === "unavailable" || status === "error" ? <div>没有可用的公开字幕，因此无法定位视频时间段。</div> : null}
+        {status === "available_no_match" ? <div>已检查到公开字幕，但字幕中没有额外命中品牌词。</div> : null}
+        {status === "not_checked_budget" ? <div>本次采集达到字幕检查上限，暂未检查公开字幕。</div> : null}
+        {status === "not_checked" ? <div>本次采集没有取得可定位的公开字幕证据。</div> : null}
+        {note && <div className="border-t pt-1" style={{ borderColor: "var(--hairline)" }}>{note}</div>}
+      </div>
+    </details>
+  );
+}
+
 function hostOf(url?: string): string {
   if (!url) return "";
   try {
@@ -306,6 +425,7 @@ function SocialRecordCard({ record }: { record: RecordItem }) {
         </h3>
         {showBody && <p className="mt-2 line-clamp-3 text-[13px] leading-relaxed" style={{ color: "var(--body)" }}>{body}</p>}
         {record.metrics && <SocialMeta metrics={record.metrics} />}
+        <CreatorEvidenceDetails record={record} />
         {record.topics.length > 0 && (
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {record.topics.slice(0, 4).map((topic) => (
@@ -372,6 +492,7 @@ export function RecordList({
               )}
               <p className="text-[13px] mt-1 line-clamp-2" style={{ color: "var(--body)" }}>{r.body}</p>
               {r.metrics && (r.channel === "social" ? <SocialMeta metrics={r.metrics} /> : <MediaMeta metrics={r.metrics} />)}
+              <CreatorEvidenceDetails record={r} />
               {collectionReason(r) && (
                 <div
                   className="mt-2 rounded px-2 py-1.5 text-[12px] leading-relaxed"

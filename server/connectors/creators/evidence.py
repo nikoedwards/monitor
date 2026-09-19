@@ -29,6 +29,10 @@ _TIMING = re.compile(
 )
 _TAG = re.compile(r"<[^>]+>")
 
+# YouTube automatic captions can render PLAUD as "Plaude". Keep this alias
+# explicit so caption matching remains conservative and reviewable.
+_AUTOMATIC_CAPTION_ALIASES = {"plaude": "PLAUD"}
+
 
 def _seconds(value: str) -> float | None:
     parts = value.replace(",", ".").split(":")
@@ -40,6 +44,19 @@ def _seconds(value: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return None
+
+
+def _timestamp(value: Any) -> str:
+    """Format seconds as a compact player-style timestamp."""
+    try:
+        seconds = max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return ""
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def parse_transcript_cues(text: str, *, source: str = "automatic_caption", limit: int = 500) -> list[dict[str, Any]]:
@@ -93,6 +110,59 @@ def parse_transcript_payload(text: str, *, source: str = "automatic_caption", li
     return parse_transcript_cues(value, source=source, limit=limit)
 
 
+def _caption_alias_text(text: str, source: str) -> tuple[str, list[str]]:
+    """Normalize only explicitly approved automatic-caption variants."""
+    if source != "automatic_caption":
+        return text, []
+    normalized = text
+    matched_variants: list[str] = []
+    for variant, canonical in _AUTOMATIC_CAPTION_ALIASES.items():
+        pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(variant)}(?![A-Za-z0-9])", re.I)
+        found = pattern.search(normalized)
+        if found:
+            matched_variants.append(found.group(0))
+            normalized = pattern.sub(canonical, normalized)
+    return normalized, matched_variants
+
+
+def _merge_transcript_matches(matches: list[dict[str, Any]], *, gap_seconds: float = 8.0) -> list[dict[str, Any]]:
+    """Merge nearby matching cues into readable evidence ranges."""
+    ordered = sorted(matches, key=lambda item: (float(item.get("start", 0)), float(item.get("end", 0))))
+    merged: list[dict[str, Any]] = []
+    for item in ordered:
+        if not merged:
+            merged.append(dict(item))
+            continue
+        previous = merged[-1]
+        try:
+            gap = float(item.get("start")) - float(previous.get("end"))
+        except (TypeError, ValueError):
+            gap = gap_seconds + 1
+        if item.get("source") == previous.get("source") and gap <= gap_seconds:
+            previous["end"] = round(max(float(previous.get("end", 0)), float(item.get("end", 0))), 3)
+            previous_text = clean_text(previous.get("text"))
+            item_text = clean_text(item.get("text"))
+            if item_text and item_text.casefold() not in previous_text.casefold():
+                previous["text"] = f"{previous_text} … {item_text}" if previous_text else item_text
+            terms = list(previous.get("matched_terms") or [])
+            for value in (previous.get("matched_query"), item.get("matched_query")):
+                value = clean_text(value)
+                if value and value not in terms:
+                    terms.append(value)
+            previous["matched_terms"] = terms
+            variants = list(previous.get("matched_variants") or [])
+            for value in list(item.get("matched_variants") or []):
+                if value and value not in variants:
+                    variants.append(value)
+            if variants:
+                previous["matched_variants"] = variants
+            if item.get("match_rule") and not previous.get("match_rule"):
+                previous["match_rule"] = item.get("match_rule")
+            continue
+        merged.append(dict(item))
+    return merged
+
+
 def transcript_matches(cues: Iterable[dict], terms: Iterable[str], *, limit: int = 12) -> list[dict[str, Any]]:
     candidates: list[str] = []
     seen: set[str] = set()
@@ -108,23 +178,40 @@ def transcript_matches(cues: Iterable[dict], terms: Iterable[str], *, limit: int
         text = clean_text(cue.get("text"))
         if not text:
             continue
+        source = clean_text(cue.get("source")) or "automatic_caption"
+        normalized_text, variants = _caption_alias_text(text, source)
+        term_matches: list[tuple[str, dict[str, str]]] = []
         for term in candidates:
-            match = query_match_evidence(term, "", text)
+            match = query_match_evidence(term, "", normalized_text)
             if not match:
                 continue
-            try:
-                start, end = float(cue.get("start")), float(cue.get("end"))
-            except (TypeError, ValueError):
-                continue
-            matches.append({
-                "start": round(start, 3), "end": round(end, 3), "text": text[:500],
-                "source": clean_text(cue.get("source")) or "automatic_caption",
-                "matched_query": term, "matched_text": match.get("matched_text") or term,
-            })
-            break
-        if len(matches) >= max(1, limit):
-            break
-    return matches
+            term_matches.append((term, match))
+        if not term_matches:
+            continue
+        # When an automatic caption alias is present, prefer the canonical
+        # brand term as the row's primary label while retaining every matched
+        # product/alias term in ``matched_terms``.
+        primary = term_matches[0]
+        if variants:
+            primary = next(
+                (item for item in term_matches if any(item[0].casefold() == canonical.casefold() for canonical in _AUTOMATIC_CAPTION_ALIASES.values())),
+                primary,
+            )
+        try:
+            start, end = float(cue.get("start")), float(cue.get("end"))
+        except (TypeError, ValueError):
+            continue
+        row: dict[str, Any] = {
+            "start": round(start, 3), "end": round(end, 3), "text": text[:500],
+            "source": source, "matched_query": primary[0],
+            "matched_text": primary[1].get("matched_text") or primary[0],
+            "matched_terms": [term for term, _match in term_matches],
+        }
+        if variants:
+            row["matched_variants"] = variants
+            row["match_rule"] = "automatic_caption_alias"
+        matches.append(row)
+    return _merge_transcript_matches(matches)[: max(1, limit)]
 
 
 def _list(value: Any) -> list[str]:
@@ -223,7 +310,10 @@ def build_collection_evidence(*, title: str = "", body: str = "", brand: dict | 
     transcript_rows = [
         {"start": item.get("start"), "end": item.get("end"), "text": clean_text(item.get("text"))[:500],
          "source": clean_text(item.get("source")) or "automatic_caption",
-         "matched_query": clean_text(item.get("matched_query")), "matched_text": clean_text(item.get("matched_text"))}
+         "matched_query": clean_text(item.get("matched_query")), "matched_text": clean_text(item.get("matched_text")),
+         "matched_terms": _list(item.get("matched_terms")),
+         "matched_variants": _list(item.get("matched_variants")),
+         "match_rule": clean_text(item.get("match_rule"))}
         for item in (transcript_matches_data or []) if isinstance(item, dict) and clean_text(item.get("text"))
     ][:24]
     visible = brands + [item for product in products for item in product.get("evidence", [])]
@@ -245,8 +335,14 @@ def build_collection_evidence(*, title: str = "", body: str = "", brand: dict | 
     has_brand, has_product = bool(brands), bool(products)
     brand_terms = {item.casefold() for item in _brand_terms(brand, signals)}
     product_terms = {clean_text(item.get("product_name")).casefold() for item in products if clean_text(item.get("product_name"))}
-    transcript_brand = any(clean_text(item.get("matched_query")).casefold() in brand_terms for item in transcript_rows)
-    transcript_product = any(clean_text(item.get("matched_query")).casefold() in product_terms for item in transcript_rows)
+    transcript_terms = {
+        clean_text(value).casefold()
+        for item in transcript_rows
+        for value in ([item.get("matched_query")] + list(item.get("matched_terms") or []))
+        if clean_text(value)
+    }
+    transcript_brand = bool(transcript_terms & brand_terms)
+    transcript_product = bool(transcript_terms & product_terms)
     if transcript_rows and transcript_brand and transcript_product:
         evidence_type = "transcript_brand_and_product_keyword"
     elif transcript_rows and transcript_brand:
@@ -269,10 +365,16 @@ def build_collection_evidence(*, title: str = "", body: str = "", brand: dict | 
         value = clean_text(item.get("matched_text"))
         if value and not any(value.casefold() in old.casefold() or old.casefold() in value.casefold() for old in matched_texts):
             matched_texts.append(value)
+    caption_variants = sorted({
+        clean_text(value)
+        for item in transcript_rows
+        for value in (item.get("matched_variants") or [])
+        if clean_text(value)
+    })
     transcript_status = clean_text(raw.get("transcript_status")) or "not_checked"
     queries = _queries(raw)
     if transcript_rows:
-        ranges = ", ".join(f"{int(float(item['start']) // 60):02d}:{float(item['start']) % 60:05.2f}-{int(float(item['end']) // 60):02d}:{float(item['end']) % 60:05.2f}" for item in transcript_rows[:4] if item.get("start") is not None and item.get("end") is not None)
+        ranges = ", ".join(f"{_timestamp(item.get('start'))}–{_timestamp(item.get('end'))}" for item in transcript_rows[:4] if item.get("start") is not None and item.get("end") is not None)
         reason = f"公开字幕在{ranges or '若干时间段'}命中关键词「{'、'.join(matched_texts[:4])}」；{TRANSCRIPT_ANALYSIS_NOTE}"
         note = TRANSCRIPT_ANALYSIS_NOTE
     elif matched_texts:
@@ -291,6 +393,7 @@ def build_collection_evidence(*, title: str = "", body: str = "", brand: dict | 
         "analysis_scope": "title_description_metadata_transcript" if transcript_rows else ANALYSIS_SCOPE,
         "analysis_note": note, "transcript_status": transcript_status,
         "transcript_source": clean_text(raw.get("transcript_source")), "transcript_matches": transcript_rows,
+        "transcript_variants": caption_variants,
         "reason": reason,
     }
 
