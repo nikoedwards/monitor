@@ -93,7 +93,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState("");
   useEffect(() => {
     if (open && data) {
-      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", boss_cookie: "", linkedin_cookie: "" });
+      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", linkedin_cookie: "" });
       setSaved(false);
       setError("");
     }
@@ -137,13 +137,12 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         </div>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
-          <div className="flex items-center gap-2 text-[13px] mb-2" style={{ color: "var(--mute)" }}>
-            Boss 直聘 Cookie：{data?.boss_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（招聘监控将被反爬拦截）</Badge>}
-            {data?.boss_configured && data?.boss_key_hint && <span>当前：{data.boss_key_hint}</span>}
+          <div className="flex items-center gap-2 text-[13px] mb-1" style={{ color: "var(--mute)" }}>
+            Boss 直聘：<Badge tone="positive">使用本机专用浏览器登录</Badge>
           </div>
-          <Field label={data?.boss_configured ? "Cookie（已保存，留空表示不修改）" : "Cookie（登录 zhipin.com 后从浏览器复制）"}>
-            <Textarea rows={2} value={form.boss_cookie || ""} onChange={(e) => set("boss_cookie", e.target.value)} placeholder="name=value; name2=value2 …（会话失效需重新粘贴）" />
-          </Field>
+          <div className="text-[12px]" style={{ color: "var(--mute)" }}>
+            在招聘监控页面添加 Boss 公司页或搜索结果 URL 后，首次运行会打开专用浏览器完成登录；之后由每日任务复用登录状态采集。无需填写 Cookie。
+          </div>
         </div>
 
         <div className="pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
@@ -179,11 +178,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               if (!payload.sellersprite_secret_key) delete payload.sellersprite_secret_key;
               if (!payload.youtube_api_key) delete payload.youtube_api_key;
               if (!payload.meta_access_token) delete payload.meta_access_token;
-              if (!payload.boss_cookie) delete payload.boss_cookie;
               if (!payload.linkedin_cookie) delete payload.linkedin_cookie;
               try {
                 await save.mutateAsync(payload);
-                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", boss_cookie: "", linkedin_cookie: "" }));
+                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", linkedin_cookie: "" }));
                 setSaved(true);
               } catch (e: any) {
                 setError(e?.message || "保存失败");
