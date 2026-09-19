@@ -6,6 +6,7 @@ import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
+import { CreatorCollectionLogic } from "../components/CreatorCollectionLogic";
 import { CreatorCuration } from "./CreatorCuration";
 import { useBrands, useCreatorsReport, useCreatorsRoster, useCreatorsSummary, useCreatorsSync, useProducts, useRecords } from "../lib/hooks";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
@@ -214,6 +215,7 @@ export default function Creators() {
         }
       />
       <CreatorSourceStatus brandId={brandId} />
+      <CreatorCollectionLogic />
 
       {sync.data && (
         <div className="text-[13px] p-2 rounded-md" style={{ background: "var(--bg-soft-2)", color: "var(--body)" }}>
