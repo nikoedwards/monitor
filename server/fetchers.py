@@ -4,7 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, build_opener, ProxyHandler, urlopen
 from xml.etree import ElementTree as ET
 
@@ -129,6 +129,41 @@ def fetch_json_post(
     except (URLError, OSError, ValueError) as exc:
         raise FetchError(str(exc)) from exc
     return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def fetch_form_json(
+    url: str,
+    payload: dict[str, str],
+    *,
+    timeout: int = 16,
+    headers: dict | None = None,
+) -> dict | list:
+    """POST an ``application/x-www-form-urlencoded`` body and decode JSON."""
+    merged = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    }
+    merged.update(headers or {})
+    request = Request(
+        normalize_url(url),
+        data=urlencode(payload).encode("utf-8"),
+        headers=merged,
+    )
+    try:
+        with _open(request, timeout) as response:
+            raw = response.read(3_000_000)
+    except (URLError, OSError, ValueError) as exc:
+        raise FetchError(str(exc)) from exc
+    try:
+        text = raw.decode("utf-8", errors="replace").lstrip("\ufeff")
+        # Some Google RPC deployments prepend the standard anti-XSSI guard.
+        # Strip it only when present; ordinary JSON responses remain untouched.
+        if text.startswith(")]}'"):
+            _, _, text = text.partition("\n")
+        return json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise FetchError(f"Invalid JSON response from {urlparse(url).hostname or url}") from exc
 
 
 def fetch_page(input_url: str, *, timeout: int = 18) -> dict:
