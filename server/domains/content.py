@@ -446,6 +446,17 @@ def _ad_entity_dict(row: sqlite3.Row) -> dict:
         try: item[target] = json.loads(item.pop(key) or ("{}" if key == "raw_json" else "[]"))
         except (TypeError, ValueError): item[target] = {} if key == "raw_json" else []
     raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    snapshot = raw.get("snapshot") if isinstance(raw.get("snapshot"), dict) else {}
+    media_items: list[dict] = []
+    for key in ("cards", "images", "videos", "extra_images", "extra_videos"):
+        values = snapshot.get(key) or []
+        if isinstance(values, list):
+            media_items.extend(value for value in values if isinstance(value, dict))
+    thumbnail_url = raw.get("thumbnail_url")
+    video_url = raw.get("video_url")
+    for media in media_items:
+        thumbnail_url = thumbnail_url or media.get("resized_image_url") or media.get("original_image_url") or media.get("video_preview_image_url")
+        video_url = video_url or media.get("video_hd_url") or media.get("video_sd_url")
     item.update({
         "source": item.get("source_id"), "source_ad_id": item.get("ad_external_id"),
         "advertiser_name": item.get("page_name"), "body": item.get("creative_body"),
@@ -453,9 +464,10 @@ def _ad_entity_dict(row: sqlite3.Row) -> dict:
         "first_seen": item.get("first_seen_at"), "last_seen": item.get("last_seen_at"),
         "status": "active" if item.get("active_status") == "active" else "stopped",
         "platforms": item.get("publisher_platforms") or [],
-        "creative_url": ((raw.get("snapshot") or {}).get("cards") or [{}])[0].get("resized_image_url")
-        or ((raw.get("snapshot") or {}).get("cards") or [{}])[0].get("original_image_url")
-        or item.get("snapshot_url"),
+        "creative_url": thumbnail_url or item.get("snapshot_url"),
+        "thumbnail_url": thumbnail_url,
+        "media_url": thumbnail_url or video_url,
+        "video_url": video_url,
         "landing_url": (item.get("link_urls") or [None])[0],
         "spend": raw.get("spend"), "impressions": raw.get("impressions"), "reach": raw.get("reach"),
     })

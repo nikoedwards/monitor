@@ -772,7 +772,7 @@ _META_PUBLIC_URL = "https://www.facebook.com/ads/library/"
 _META_PUBLIC_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
- )
+)
 
 
 def _meta_timestamp(value) -> str | None:
@@ -783,13 +783,7 @@ def _meta_timestamp(value) -> str | None:
 
 
 def _meta_public_ads_from_html(html: str) -> list[dict]:
-    """Extract Meta's SSR ad-library result from embedded application JSON.
-
-    Meta renders the first result page in a large ``application/json`` payload.
-    The visible DOM is client-rendered and may stay empty when the page is
-    opened without a logged-in session, so parsing the SSR payload is more
-    reliable than scraping CSS classes.
-    """
+    """Extract Meta's server-rendered Ad Library results from application JSON."""
     scripts = re.findall(
         r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>',
         html or "",
@@ -821,8 +815,10 @@ def _meta_public_ads_from_html(html: str) -> list[dict]:
 def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
     snapshot = ad.get("snapshot") or {}
     cards = snapshot.get("cards") or []
+    if not isinstance(cards, list):
+        cards = []
     body_data = snapshot.get("body") or {}
-    body = clean_text(body_data.get("text"))
+    body = clean_text(body_data.get("text") if isinstance(body_data, dict) else body_data)
     if not body and cards:
         body = clean_text(" ".join(str(card.get("body") or "") for card in cards if isinstance(card, dict)))
     title = clean_text(snapshot.get("title")) or clean_text(body)[:160]
@@ -833,7 +829,12 @@ def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
     images: list[str] = []
     videos: list[str] = []
     links: list[str] = []
-    for card in cards:
+    media_items = list(cards)
+    for key in ("images", "videos", "extra_images", "extra_videos"):
+        value = snapshot.get(key) or []
+        if isinstance(value, list):
+            media_items.extend(item for item in value if isinstance(item, dict))
+    for card in media_items:
         if not isinstance(card, dict):
             continue
         for key in ("resized_image_url", "original_image_url", "video_preview_image_url"):
@@ -855,7 +856,13 @@ def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
     stop_at = _meta_timestamp(ad.get("end_date"))
     is_active = bool(ad.get("is_active"))
     platforms = ad.get("publisher_platform") or snapshot.get("publisher_platform") or []
-    raw = {**ad, "collection_method": "meta_ad_library_public_ssr", "search_query": query}
+    raw = {
+        **ad,
+        "collection_method": "meta_ad_library_public_ssr",
+        "search_query": query,
+        "thumbnail_url": images[0] if images else None,
+        "video_url": videos[0] if videos else None,
+    }
     metrics = {
         "publisher_platforms": platforms,
         "ad_creative_link_urls": links,
@@ -898,11 +905,14 @@ def _collect_meta_public_ads(brand: dict) -> list[dict]:
     payloads: list[dict] = []
     seen: set[str] = set()
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        context = browser.new_context(locale="en-US", user_agent=_META_PUBLIC_USER_AGENT)
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+        )
+        context = browser.new_context(locale="en-US", user_agent=_META_PUBLIC_USER_AGENT, viewport={"width": 1366, "height": 900})
         page = context.new_page()
         try:
-            for query in brand_queries(brand)[:6]:
+            for query in brand_queries(brand)[:4]:
                 params = urlencode({
                     "active_status": "all",
                     "ad_type": "all",
