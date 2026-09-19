@@ -55,8 +55,16 @@ def _error_status(exc: Exception) -> tuple[str, str]:
 
 
 def _active_links(conn: sqlite3.Connection, brand_id: str, *, force: bool) -> list[dict]:
-    due_clause = "" if force else "AND (last_collect_at IS NULL OR substr(last_collect_at, 1, 10) < ?)"
-    params: tuple = (brand_id,) if force else (brand_id, today())
+    # Successful sources remain daily; failed/blocked sources get a bounded
+    # hourly retry so a transient Instagram/TikTok challenge does not suppress
+    # the rest of the day.
+    retry_before = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+    due_clause = "" if force else (
+        "AND (last_collect_at IS NULL OR substr(last_collect_at, 1, 10) < ? "
+        "OR (last_status IN ('blocked', 'network', 'error', 'needs_credential') "
+        "AND last_collect_at < ?))"
+    )
+    params: tuple = (brand_id,) if force else (brand_id, today(), retry_before)
     rows = conn.execute(
         f"""
         SELECT * FROM links
