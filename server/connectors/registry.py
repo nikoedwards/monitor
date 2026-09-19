@@ -62,12 +62,11 @@ REGISTRY: list[ConnectorSpec] = [
         tier=1, vendor="Web", sync_mode="scheduled", cadence="daily",
         notes="Playwright/浏览器截图 + 变更分析,支持子页面发现与回溯。",
     ),
-    # ---- Tier 2: needs credential ----
+    # ---- Tier 2: needs credential / public fallback ----
     ConnectorSpec(
         id="meta_ads", name="Meta 广告库", category="ads", dimension="marketing",
-        tier=2, vendor="Meta", sync_mode="scheduled", cadence="daily",
-        credential_key="facebook_access_token",
-        notes="Meta Ad Library API 抓竞品在投广告;需 Meta access token。",
+        tier=1, vendor="Meta", sync_mode="scheduled", cadence="daily",
+        notes="通过 Meta Ad Library 公开页面抓取广告;无需 Token。若配置 access token 则优先使用官方 API。",
         collect=collectors.collect_meta_ads,
     ),
     ConnectorSpec(
