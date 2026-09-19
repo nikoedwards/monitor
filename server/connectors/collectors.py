@@ -1240,7 +1240,6 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
         and report["queries_completed"] == report["query_count"]
         and not report["suggestion_failed"]
         and not report["creative_failed"]
-        and not report["pagination_truncated"]
         and not report["advertiser_cap_reached"]
     )
     return payloads, report

@@ -325,7 +325,7 @@ def test_google_collection_report_skips_cleanup_when_creatives_fail() -> None:
     assert report["safe_to_cleanup"] is False
 
 
-def test_google_collection_report_skips_cleanup_when_pagination_is_capped() -> None:
+def test_google_collection_report_allows_cleanup_when_creative_pagination_is_capped() -> None:
     item = _creative_item(image_url="https://img.test/1.jpg")
     brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords_json": "[]"}
     with (
@@ -338,7 +338,9 @@ def test_google_collection_report_skips_cleanup_when_pagination_is_capped() -> N
 
     assert len(payloads) == 1
     assert report["pagination_truncated"] is True
-    assert report["safe_to_cleanup"] is False
+    # Pagination limits creative history, but the advertiser ID set is still
+    # complete as long as the suggestion query and advertiser cap succeeded.
+    assert report["safe_to_cleanup"] is True
 
 
 def test_google_collection_report_skips_cleanup_when_advertiser_cap_is_reached() -> None:
