@@ -166,6 +166,18 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         self.assertEqual(result["delivery"], "direct_db")
         self.assertEqual(result["captured"], 1)
 
+    def test_remote_timeout_reports_connection_error_without_local_fallback(self):
+        capture = CaptureResult(
+            source_url="https://www.zhipin.com/gongsi/example.html",
+            source_title="Example 招聘",
+            page_status="ok",
+            page_error="",
+            jobs=[],
+        )
+        with patch("tools.boss_browser_worker.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                _post_capture("https://monitor.example.com", capture, self.brand["id"])
+
     def test_zhipin_url_is_accepted_even_with_legacy_platform_value(self):
         links = _rows_to_links([{
             "id": "boss-link",

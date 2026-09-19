@@ -268,7 +268,8 @@ def _post_capture(base_url: str, capture: CaptureResult, brand_id: str) -> dict[
                 raise RuntimeError(
                     f"无法连接 Monitor API {endpoint}，且本地数据库写入失败：{direct_exc}"
                 ) from direct_exc
-        raise RuntimeError(f"无法连接 Monitor API {endpoint}: {exc.reason}") from exc
+        detail = getattr(exc, "reason", None) or str(exc)
+        raise RuntimeError(f"无法连接 Monitor API {endpoint}: {detail}") from exc
 
 
 async def _first_text(page: Any, selectors: Iterable[str], root: Any = None) -> str:
