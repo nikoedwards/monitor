@@ -1145,7 +1145,8 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
                         continue
                     seen_creatives.add(creative_key)
                     raw_items.append((item, query))
-                next_token = clean_text(response.get("2")) if isinstance(response, dict) else ""
+                raw_next_token = response.get("2") if isinstance(response, dict) else None
+                next_token = clean_text(str(raw_next_token)) if raw_next_token is not None else ""
                 # The server token is authoritative; a short page can still
                 # carry a continuation when filters are applied. The
                 # repeated-token guard protects against a throttled endpoint
