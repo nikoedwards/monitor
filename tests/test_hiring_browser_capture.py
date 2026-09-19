@@ -8,7 +8,62 @@ from unittest.mock import patch
 from server.connectors.hiring.runner import ingest_browser_hiring_capture, run_hiring_collection
 from server.db import SCHEMA, _cleanup_fake_boss_login_postings
 from server.util import utc_now
-from tools.boss_browser_worker import CaptureResult, HiringLink, _collect_link, _post_capture, _rows_to_links
+from tools.boss_browser_worker import (
+    CaptureResult,
+    HiringLink,
+    _collect_link,
+    _extract_listing,
+    _post_capture,
+    _rows_to_links,
+)
+
+
+class _TextLocator:
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self, timeout=None):
+        return self.text
+
+
+class _Anchor:
+    def __init__(self, href):
+        self.href = href
+
+    async def get_attribute(self, name):
+        return self.href if name == "href" else None
+
+
+class _AnchorLocator:
+    def __init__(self, hrefs):
+        self.anchors = [_Anchor(href) for href in hrefs]
+
+    async def count(self):
+        return len(self.anchors)
+
+    def nth(self, index):
+        return self.anchors[index]
+
+
+class _ListingPage:
+    def __init__(self, body, hrefs, url, title="Plaud招聘"):
+        self.body = body
+        self.hrefs = hrefs
+        self.url = url
+        self._title = title
+
+    async def wait_for_timeout(self, _milliseconds):
+        return None
+
+    async def title(self):
+        return self._title
+
+    def locator(self, selector):
+        if selector == "body":
+            return _TextLocator(self.body)
+        if "a[href*='/job_detail/']" in selector:
+            return _AnchorLocator(self.hrefs)
+        return _TextLocator("")
 
 
 class HiringBrowserCaptureTests(unittest.TestCase):
@@ -214,6 +269,46 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         ))
         self.assertEqual(capture.page_status, "blocked")
         self.assertIn("浏览器窗口已关闭", capture.page_error)
+
+    def test_logged_out_company_listing_with_visible_subset_is_blocked(self):
+        page = _ListingPage(
+            "Plaud招聘 招聘职位(15) 登录后查看更多职位",
+            [
+                "https://www.zhipin.com/job_detail/a.html",
+                "https://www.zhipin.com/job_detail/b.html",
+                "https://www.zhipin.com/job_detail/c.html",
+            ],
+            "https://www.zhipin.com/gongsi/job/company.html",
+        )
+        capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
+        self.assertEqual(capture.page_status, "blocked")
+        self.assertIn("登录", capture.page_error)
+        self.assertEqual(detail_urls, [])
+
+    def test_company_listing_count_mismatch_is_blocked_without_login_copy(self):
+        page = _ListingPage(
+            "Plaud招聘 招聘职位(15)",
+            [
+                "https://www.zhipin.com/job_detail/a.html",
+                "https://www.zhipin.com/job_detail/b.html",
+            ],
+            "https://www.zhipin.com/gongsi/job/company.html",
+        )
+        capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
+        self.assertEqual(capture.page_status, "blocked")
+        self.assertIn("2/15", capture.page_error)
+        self.assertEqual(detail_urls, [])
+
+    def test_complete_company_listing_is_still_harvestable(self):
+        hrefs = [f"https://www.zhipin.com/job_detail/{letter}.html" for letter in "abc"]
+        page = _ListingPage(
+            "Plaud招聘 招聘职位(3)",
+            hrefs,
+            "https://www.zhipin.com/gongsi/job/company.html",
+        )
+        capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
+        self.assertEqual(capture.page_status, "ok")
+        self.assertEqual(detail_urls, hrefs)
 
     def test_browser_capture_reuses_legacy_zhipin_link(self):
         now = utc_now()

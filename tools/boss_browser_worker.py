@@ -58,9 +58,38 @@ LOGIN_MARKERS = (
     "完成验证",
     "验证码",
 )
+# A company jobs page can keep its normal header, company card, and a few
+# public job cards visible while withholding the rest until the visitor logs
+# in.  These phrases are more specific than the generic login markers above:
+# seeing one on a listing page means that an apparently successful render is
+# still not safe to ingest as a complete snapshot.
+LOGIN_REQUIRED_LISTING_MARKERS = (
+    "登录后查看全部职位",
+    "登录后查看更多职位",
+    "登录后查看职位",
+    "登录后查看更多",
+    "登录查看更多职位",
+    "登录查看更多",
+    "登录后可查看",
+    "登录后才能查看",
+    "请登录后查看",
+    "查看更多职位请登录",
+    "更多职位请登录",
+)
 LOGIN_PATH_MARKERS = ("/web/user/", "/login", "/register", "/security-check", "/safe-check")
 CLOSED_MARKERS = ("职位已下线", "停止招聘", "职位不存在", "已结束", "已关闭")
 JOB_DETAIL_PATH = "/job_detail/"
+COMPANY_JOBS_PATH = "/gongsi/job/"
+
+# BOSS puts the total in the company-page tab label, for example
+# ``招聘职位(15)``.  Keep the patterns intentionally narrow so a number in a
+# job description or a city filter cannot be mistaken for the advertised
+# listing size.
+_LISTING_COUNT_PATTERNS = (
+    re.compile(r"招聘职位\s*[（(]\s*(\d{1,4})\s*[）)]"),
+    re.compile(r"招聘岗位\s*[（(]\s*(\d{1,4})\s*[）)]"),
+    re.compile(r"(?:招聘职位|招聘岗位)\s*[:：]\s*(\d{1,4})"),
+)
 
 
 class _MonitorUnavailable(RuntimeError):
@@ -113,6 +142,28 @@ def _looks_like_blocked(url: str, title: str, body: str) -> bool:
     return any(marker.lower() in haystack for marker in LOGIN_MARKERS) or any(
         marker in path for marker in LOGIN_PATH_MARKERS
     )
+
+
+def _looks_like_login_required_listing(body: str) -> bool:
+    """Return whether a visible listing asks the visitor to log in for more."""
+    lower = body.lower()
+    return any(marker.lower() in lower for marker in LOGIN_REQUIRED_LISTING_MARKERS)
+
+
+def _advertised_listing_count(body: str) -> int | None:
+    """Extract the total job count shown by a BOSS company jobs page."""
+    for pattern in _LISTING_COUNT_PATTERNS:
+        match = pattern.search(body or "")
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _is_company_jobs_url(url: str) -> bool:
+    try:
+        return COMPANY_JOBS_PATH in (urlsplit(url).path or "").lower()
+    except ValueError:
+        return False
 
 
 def _is_open(body: str) -> bool:
@@ -348,6 +399,38 @@ async def _extract_listing(page: Any, url: str) -> tuple[CaptureResult, list[str
         if job_url and _is_boss_url(job_url) and job_url not in seen:
             seen.add(job_url)
             detail_urls.append(job_url)
+
+    # A logged-out company page may expose a handful of cards before showing
+    # a "登录后查看更多职位" gate.  Do not treat those visible cards as a
+    # complete source: ingesting them would make the next run close every
+    # hidden job as if it had disappeared.  The explicit gate wins even when
+    # the page does not expose a total count.
+    if _looks_like_login_required_listing(body):
+        return CaptureResult(
+            url,
+            title,
+            "blocked",
+            "BOSS 公司职位页只显示部分职位，请先登录后重试。",
+            [],
+        ), []
+
+    # Company pages advertise their total in the tab label (usually
+    # ``招聘职位(15)``).  If the worker sees fewer detail links than that
+    # total, the DOM is incomplete.  Treat it as blocked only for the company
+    # jobs route; search pages can legitimately paginate or lazy-load results.
+    advertised_count = _advertised_listing_count(body)
+    if (
+        _is_company_jobs_url(final_url)
+        and advertised_count is not None
+        and len(detail_urls) < advertised_count
+    ):
+        return CaptureResult(
+            url,
+            title,
+            "blocked",
+            f"BOSS 公司职位页只加载了部分职位（已发现 {len(detail_urls)}/{advertised_count}），请先登录后重试。",
+            [],
+        ), []
 
     # A direct detail URL is a valid source link and should still be captured.
     if JOB_DETAIL_PATH in (urlsplit(final_url).path or "") and final_url not in seen:
