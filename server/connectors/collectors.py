@@ -72,9 +72,14 @@ def _touch_link(conn: sqlite3.Connection, link_id, *, status: str, error: str = 
     """
     if not link_id:
         return
+    now = utc_now()
+    # Keep failed community links eligible for the next scheduler pass. A
+    # blocked Reddit request should cool down and retry, rather than being
+    # treated as successfully collected for the rest of the day.
+    collect_at = None if status in {"blocked", "network", "error", "needs_credential"} else now
     conn.execute(
         "UPDATE links SET last_collect_at = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
-        (utc_now(), status, (error or "")[:500], utc_now(), link_id),
+        (collect_at, status, (error or "")[:500], now, link_id),
     )
 
 
