@@ -122,55 +122,24 @@ def get_spec(source_id: str) -> ConnectorSpec | None:
     return BY_ID.get(source_id)
 
 
-def _source_ids_referenced_by_foreign_keys(conn: sqlite3.Connection) -> set[str]:
-    """Return source ids still needed by rows in this database.
+def _source_ids_in_use(conn: sqlite3.Connection) -> set[str]:
+    """Return source ids needed by historical/runtime rows.
 
-    Older databases declared ``records.source_id`` as a foreign key while the
-    current schema is intentionally additive and does not recreate that table.
-    A connector can therefore disappear from the registry while its historical
-    records still require the corresponding ``sources`` row to exist.  Inspect
-    the schema instead of hard-coding one legacy table so future source-linked
-    tables are handled the same way.
+    ``records`` can carry a legacy foreign key to ``sources`` and
+    ``source_brand_runs`` keeps per-brand state even though older schemas did
+    not declare that relationship. Both must survive registry cleanup.
     """
     referenced: set[str] = set()
-    tables = conn.execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
-
-    def value(row, key: str, index: int):
+    for table in ("records", "source_brand_runs"):
         try:
-            return row[key]
-        except (IndexError, KeyError, TypeError):
-            return row[index]
-
-    def quote_identifier(identifier: str) -> str:
-        return '"' + identifier.replace('"', '""') + '"'
-
-    for table_row in tables:
-        table = value(table_row, "name", 0)
-        for foreign_key in conn.execute(
-            f"PRAGMA foreign_key_list({quote_identifier(table)})"
-        ).fetchall():
-            parent_table = value(foreign_key, "table", 2)
-            if parent_table != "sources":
-                continue
-            child_column = value(foreign_key, "from", 3)
             rows = conn.execute(
-                f"SELECT {quote_identifier(child_column)} "
-                f"FROM {quote_identifier(table)} "
-                f"WHERE {quote_identifier(child_column)} IS NOT NULL"
+                f"SELECT DISTINCT source_id FROM {table} "
+                "WHERE source_id IS NOT NULL"
             ).fetchall()
-            referenced.update(str(value(row, 0, 0)) for row in rows)
-    # ``source_brand_runs`` predates the foreign-key declaration and may still
-    # contain useful per-brand runtime state for a retired connector.
-    try:
-        rows = conn.execute(
-            "SELECT source_id FROM source_brand_runs WHERE source_id IS NOT NULL"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = ()
-    referenced.update(str(value(row, 0, 0)) for row in rows)
+        except sqlite3.OperationalError:
+            # Some focused/test schemas omit one of the historical tables.
+            continue
+        referenced.update(str(row[0]) for row in rows)
     return referenced
 
 
@@ -182,7 +151,7 @@ def sync_to_db(conn: sqlite3.Connection) -> None:
     # Keep retired connector rows when historical data still points at them.
     # Deleting those rows from a legacy DB with FK enforcement enabled makes
     # application startup fail before the API can serve any request.
-    referenced = _source_ids_referenced_by_foreign_keys(conn)
+    referenced = _source_ids_in_use(conn)
     stale_rows = conn.execute(
         f"SELECT id FROM sources WHERE id NOT IN ({placeholders})", keep
     ).fetchall()
