@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import unittest
 import json
@@ -7,7 +8,7 @@ from unittest.mock import patch
 from server.connectors.hiring.runner import ingest_browser_hiring_capture, run_hiring_collection
 from server.db import SCHEMA, _cleanup_fake_boss_login_postings
 from server.util import utc_now
-from tools.boss_browser_worker import CaptureResult, _post_capture, _rows_to_links
+from tools.boss_browser_worker import CaptureResult, HiringLink, _collect_link, _post_capture, _rows_to_links
 
 
 class HiringBrowserCaptureTests(unittest.TestCase):
@@ -187,6 +188,32 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         }])
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0].platform, "boss")
+
+    def test_boss_source_query_parameters_are_preserved(self):
+        links = _rows_to_links([{
+            "id": "boss-search",
+            "brand_id": self.brand["id"],
+            "url": "https://www.zhipin.com/web/geek/job?query=%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86&city=101280600",
+            "platform": "boss",
+        }])
+        self.assertEqual(
+            links[0].url,
+            "https://www.zhipin.com/web/geek/job?query=%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86&city=101280600",
+        )
+
+    def test_closed_browser_context_is_reported_as_blocked(self):
+        class _ClosedContext:
+            async def new_page(self):
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        capture = asyncio.run(_collect_link(
+            _ClosedContext(),
+            HiringLink("boss-link", self.brand["id"], "https://www.zhipin.com/gongsi/example.html"),
+            max_jobs=1,
+            detail_delay_ms=0,
+        ))
+        self.assertEqual(capture.page_status, "blocked")
+        self.assertIn("浏览器窗口已关闭", capture.page_error)
 
     def test_browser_capture_reuses_legacy_zhipin_link(self):
         now = utc_now()

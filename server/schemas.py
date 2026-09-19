@@ -82,8 +82,15 @@ class SalesMetricIn(BaseModel):
     review_count: Optional[int] = None
     rating: Optional[float] = None
     rank: Optional[int] = None
+    category_rank: Optional[int] = None
+    subcategory_rank: Optional[int] = None
+    category_name: Optional[str] = None
+    subcategory_name: Optional[str] = None
     units_est: Optional[int] = None
     revenue_est: Optional[float] = None
+    estimate_method: Optional[str] = None
+    estimate_confidence: Optional[str] = None
+    estimate_period_days: Optional[float] = None
     in_stock: Optional[bool] = None
     source: str = "manual"
 
@@ -163,6 +170,9 @@ class LinkUpdate(BaseModel):
     label: Optional[str] = None
     status: Optional[str] = None
     platform: Optional[str] = None
+    # Keep provider-specific collection settings editable after a link is
+    # created (for example DTC visits/conversion/review-rate assumptions).
+    config: Optional[dict[str, Any]] = None
 
 
 class SalesListingUpdate(BaseModel):

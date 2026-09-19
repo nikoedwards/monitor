@@ -13,9 +13,16 @@ from typing import Mapping, Optional
 
 
 def metric_rank_value(values: Mapping[str, object]):
-    """Return the canonical rank signal, preferring marketplace BSR."""
-    bsr = values.get("bsr")
-    return bsr if bsr is not None else values.get("rank")
+    """Return the canonical (large-category) rank signal.
+
+    ``rank``/``bsr`` predate the separate category fields and remain the
+    fallback so old snapshots continue to participate in deltas and summaries.
+    """
+    for key in ("category_rank", "bsr", "rank"):
+        value = values.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 def canonicalize_metric_changes(changes: list[dict] | None) -> list[dict]:
@@ -74,8 +81,16 @@ class ListingSnapshot:
     review_count: Optional[int] = None
     rank: Optional[int] = None
     bsr: Optional[int] = None
+    category_rank: Optional[int] = None
+    subcategory_rank: Optional[int] = None
+    category_name: str = ""
+    subcategory_name: str = ""
     units_est: Optional[int] = None
     revenue_est: Optional[float] = None
+    estimate_method: str = ""
+    estimate_confidence: str = ""
+    estimate_period_days: Optional[float] = None
+    estimate_basis: dict = field(default_factory=dict)
     in_stock: Optional[bool] = None
     status: str = "ok"          # ok | partial | blocked | error
     error: str = ""
@@ -83,12 +98,11 @@ class ListingSnapshot:
 
     def fingerprint_fields(self) -> dict:
         """Fields whose observed changes belong in the sales monitoring log."""
-        return {
+        fields = {
             "title": self.title or "",
             "sku": self.sku or "",
             "image_url": self.image_url or "",
             "in_stock": self.in_stock,
-            "rank": self.bsr if self.bsr is not None else self.rank,
             "rating": self.rating,
             "review_count": self.review_count,
             "price": self.price,
@@ -96,6 +110,15 @@ class ListingSnapshot:
             "units_est": self.units_est,
             "revenue_est": self.revenue_est,
         }
+        # New captures use explicit category levels. Keep the legacy rank alias
+        # when no level was available, while always retaining the explicit keys
+        # once a collector has started producing them so a later disappearance
+        # is visible in the change log.
+        fields["category_rank"] = self.category_rank
+        fields["subcategory_rank"] = self.subcategory_rank
+        if self.category_rank is None and self.subcategory_rank is None:
+            fields["rank"] = self.bsr if self.bsr is not None else self.rank
+        return fields
 
 
 class SalesProvider:

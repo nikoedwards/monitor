@@ -945,8 +945,11 @@ def _google_advertiser_suggestions(query: str) -> list[dict]:
     )
     if not isinstance(response, dict) or "1" not in response:
         raise ValueError("Google SearchSuggestions returned an invalid response")
+    suggestion_items = response.get("1")
+    if not isinstance(suggestion_items, list):
+        raise ValueError("Google SearchSuggestions returned invalid suggestions")
     suggestions: list[dict] = []
-    for item in (response.get("1", []) if isinstance(response, dict) else []):
+    for item in suggestion_items:
         advertiser = item.get("1") if isinstance(item, dict) else None
         if not isinstance(advertiser, dict):
             continue
@@ -1152,7 +1155,13 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
         # generic result for product-like queries; treating that as a match
         # pollutes the lifecycle table with unrelated advertisers.
         for advertiser in matching:
-            advertiser_id = advertiser.get("id")
+            raw_advertiser_id = advertiser.get("id")
+            advertiser_id = (
+                clean_text(str(raw_advertiser_id))
+                if isinstance(raw_advertiser_id, (str, int, float))
+                and not isinstance(raw_advertiser_id, bool)
+                else ""
+            )
             if not advertiser_id or advertiser_id in seen_advertisers:
                 continue
             if len(seen_advertisers) >= _GOOGLE_ADS_MAX_ADVERTISERS:

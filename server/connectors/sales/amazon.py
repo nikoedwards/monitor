@@ -15,12 +15,17 @@ from urllib.parse import parse_qs, urlparse
 from ...fetchers import FetchError, fetch_page
 from ...util import amazon_market, clean_text, extract_asin
 from .base import ListingRef, ListingSnapshot, SalesProvider
+from .estimates import estimate_amazon_sales
 
 _ASIN_RE = re.compile(r'data-asin="([A-Z0-9]{10})"')
 _DP_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
 _RATING_RE = re.compile(r"([0-5](?:\.[0-9])?)\s+out of\s+5", re.I)
 _REVIEWS_RE = re.compile(r"([0-9][0-9,]*)\s+(?:global ratings|ratings|reviews)", re.I)
 _BSR_RE = re.compile(r"(?:Best Sellers Rank|Best Seller Rank)[\s\S]{0,500}?#\s*([0-9][0-9,]*)", re.I)
+_BSR_LEVEL_RE = re.compile(
+    r"#\s*([0-9][0-9,]*)\s+in\s+([^#(\n\r]+?)(?=\s*\(|\s+#|\s*$)",
+    re.I,
+)
 _PRODUCT_TITLE_RE = re.compile(r'id=["\']productTitle["\'][^>]*>([\s\S]*?)</', re.I)
 _ACR_RATING_RE = re.compile(r'id=["\']acrPopover["\'][^>]*(?:title|aria-label)=["\']([^"\']+)', re.I)
 _ACR_REVIEWS_RE = re.compile(r'id=["\']acrCustomerReviewText["\'][^>]*>([\s\S]*?)</', re.I)
@@ -139,6 +144,46 @@ def _extract_price(html: str) -> float | None:
     return None
 
 
+def _extract_rank_levels(text: str, html: str = "") -> dict:
+    """Extract the first large-category and nested-category BSR values.
+
+    Amazon renders the BSR block differently across locales and page versions.
+    The visible text is preferred, with a small HTML fallback for pages where
+    the text parser omits the rank container.  The first rank is the broad
+    category rank; the second is the first subcategory rank.
+    """
+    sources = []
+    for value in (text or "", _strip_html(html or "")):
+        if value and value not in sources:
+            sources.append(value)
+    for source in sources:
+        marker = re.search(r"Best Sellers? Rank", source, re.I)
+        if marker:
+            source = source[marker.start(): marker.start() + 1200]
+        matches = list(_BSR_LEVEL_RE.finditer(source))
+        if not matches:
+            continue
+        levels = []
+        for match in matches:
+            rank = _to_int(match.group(1))
+            name = clean_text(match.group(2))
+            if rank is not None:
+                levels.append((rank, name))
+        if levels:
+            result = {
+                "category_rank": levels[0][0],
+                "subcategory_rank": levels[1][0] if len(levels) > 1 else None,
+                "category_name": levels[0][1],
+                "subcategory_name": levels[1][1] if len(levels) > 1 else "",
+            }
+            return result
+    fallback = _BSR_RE.search(text or "") or _BSR_RE.search(_strip_html(html or ""))
+    if fallback:
+        value = _to_int(fallback.group(1))
+        return {"category_rank": value, "subcategory_rank": None, "category_name": "", "subcategory_name": ""}
+    return {}
+
+
 class ScrapeAmazonProvider(SalesProvider):
     name = "amazon_scrape"
 
@@ -231,17 +276,38 @@ class ScrapeAmazonProvider(SalesProvider):
         reviews = _REVIEWS_RE.search(reviews_source)
         if reviews:
             snap.review_count = _to_int(reviews.group(1))
-        bsr = _BSR_RE.search(text)
-        if bsr:
-            snap.bsr = _to_int(bsr.group(1))
-            snap.rank = snap.bsr
+        ranks = _extract_rank_levels(text, html)
+        if ranks:
+            snap.category_rank = ranks.get("category_rank")
+            snap.subcategory_rank = ranks.get("subcategory_rank")
+            snap.category_name = ranks.get("category_name") or ""
+            snap.subcategory_name = ranks.get("subcategory_name") or ""
+            # Keep legacy fields populated for old clients and market-share
+            # consumers.  The broad category rank is the canonical fallback.
+            snap.bsr = snap.category_rank
+            snap.rank = snap.category_rank
         snap.price = _extract_price(html)
         if "currently unavailable" in low or "out of stock" in low:
             snap.in_stock = False
         elif "in stock" in low or snap.price is not None:
             snap.in_stock = True
 
-        parsed_any = any(v is not None for v in (snap.price, snap.rating, snap.review_count, snap.bsr))
+        # A public Amazon page has no authoritative order count.  Use a
+        # monotonic BSR estimate as a clearly-labelled fallback; SellerSprite
+        # replaces this in the paid provider when configured.
+        estimate = estimate_amazon_sales(
+            rank=snap.category_rank if snap.category_rank is not None else snap.bsr,
+            price=snap.price,
+            marketplace=listing.get("marketplace") or "US",
+        )
+        if estimate:
+            snap.units_est = estimate.get("units_est")
+            snap.revenue_est = estimate.get("revenue_est")
+            snap.estimate_method = estimate.get("estimate_method") or ""
+            snap.estimate_confidence = estimate.get("estimate_confidence") or ""
+            snap.estimate_period_days = estimate.get("estimate_period_days")
+            snap.estimate_basis = estimate.get("estimate_basis") or {}
+        parsed_any = any(v is not None for v in (snap.price, snap.rating, snap.review_count, snap.bsr, snap.category_rank))
         if not title and not parsed_any:
             snap.status = "blocked"
             snap.error = "No listing fields parsed (likely blocked or JS-rendered)."

@@ -11,8 +11,9 @@ import re
 import sqlite3
 
 from ...fetchers import FetchError, fetch_page
-from ...util import canonical_url, clean_external_link, clean_text, host_key, is_html_like_url, normalize_url
+from ...util import canonical_url, clean_external_link, clean_text, host_key, is_html_like_url, normalize_url, today
 from .base import ListingRef, ListingSnapshot, SalesProvider
+from .estimates import estimate_dtc_sales
 
 _PRODUCT_PATH_RE = re.compile(r"/(products?|product|item|p|shop|dp)/", re.I)
 
@@ -150,8 +151,41 @@ class ScrapeDtcProvider(SalesProvider):
             if cur:
                 snap.currency = cur
 
+        # DTC pages generally expose no order count.  Use review stock/velocity
+        # as a transparent low-confidence proxy so the daily history can still
+        # show an estimated units/revenue trend.  If no reviews exist, leave
+        # estimates null rather than fabricating a number from price alone.
+        previous = None
+        if conn is not None and listing.get("id"):
+            previous = conn.execute(
+                "SELECT snapshot_date, review_count FROM sales_metrics "
+                "WHERE link_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
+                (listing["id"],),
+            ).fetchone()
+        estimate = estimate_dtc_sales(
+            price=snap.price,
+            review_count=snap.review_count,
+            previous_review_count=previous["review_count"] if previous else None,
+            previous_date=previous["snapshot_date"] if previous else None,
+            current_date=today(),
+        )
+        if estimate:
+            snap.units_est = estimate.get("units_est")
+            snap.revenue_est = estimate.get("revenue_est")
+            snap.estimate_method = estimate.get("estimate_method") or ""
+            snap.estimate_confidence = estimate.get("estimate_confidence") or ""
+            snap.estimate_period_days = estimate.get("estimate_period_days")
+            snap.estimate_basis = estimate.get("estimate_basis") or {}
+
         if snap.price is None and snap.rating is None and not product:
             snap.status = "partial"
         snap.raw = {"final_url": page.get("final_url"), "provider": self.name, "had_jsonld": bool(product)}
+        if estimate:
+            snap.raw.update({
+                "estimate_method": snap.estimate_method,
+                "estimate_confidence": snap.estimate_confidence,
+                "estimate_period_days": snap.estimate_period_days,
+                "estimate_basis": snap.estimate_basis,
+            })
         snap.sku = snap.sku or canonical_url(url)[-40:]
         return snap

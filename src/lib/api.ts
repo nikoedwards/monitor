@@ -144,8 +144,22 @@ export interface SalesMetric {
   review_count?: number;
   rating?: number;
   rank?: number;
+  /** Amazon category ranks. `rank`/`bsr` remain as legacy fallbacks. */
+  category_rank?: number;
+  subcategory_rank?: number;
+  category_name?: string;
+  subcategory_name?: string;
+  /** Compatibility aliases used by some collectors/imports. */
+  main_category_rank?: number;
+  sub_category_rank?: number;
+  main_category_name?: string;
+  sub_category_name?: string;
   units_est?: number;
   revenue_est?: number;
+  estimate_method?: string;
+  estimate_confidence?: "high" | "medium" | "low" | string;
+  estimate_period_days?: number;
+  estimate_basis?: Record<string, unknown>;
   in_stock?: boolean | null;
   asin?: string;
   bsr?: number;

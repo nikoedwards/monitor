@@ -89,14 +89,14 @@ def _clean(value: Any, limit: int = 20_000) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
-def _canonical_url(value: str, base: str = "") -> str:
+def _canonical_url(value: str, base: str = "", *, preserve_query: bool = False) -> str:
     try:
         parsed = urlsplit(urljoin(base, value))
     except ValueError:
         return ""
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return ""
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query if preserve_query else "", ""))
 
 
 def _is_boss_url(value: str) -> bool:
@@ -123,7 +123,11 @@ def _is_open(body: str) -> bool:
 def _rows_to_links(rows: Iterable[dict[str, Any]]) -> list[HiringLink]:
     links: list[HiringLink] = []
     for row in rows:
-        url = _canonical_url(row.get("url") or "")
+        # Search-result pages use query parameters for city/keyword filters;
+        # preserve those parameters on the configured source URL. Detail URLs
+        # continue to use the query-free form below so tracking parameters do
+        # not create duplicate postings.
+        url = _canonical_url(row.get("url") or "", preserve_query=True)
         # Treat the host as the source of truth.  Older Monitor rows may have
         # been saved with a blank/legacy platform value even though the URL is
         # a BOSS page; dropping those rows would make the scheduled worker
@@ -360,7 +364,16 @@ async def _collect_link(
     max_jobs: int,
     detail_delay_ms: int,
 ) -> CaptureResult:
-    page = await context.new_page()
+    try:
+        page = await context.new_page()
+    except Exception as exc:
+        return CaptureResult(
+            link.url,
+            "",
+            "blocked",
+            f"BOSS 浏览器窗口已关闭或不可用：{str(exc)[:300]}",
+            [],
+        )
     try:
         await page.goto(link.url, wait_until="domcontentloaded", timeout=30_000)
         listing, detail_urls = await _extract_listing(page, link.url)
@@ -468,7 +481,19 @@ async def _run(args: argparse.Namespace) -> int:
                 print("BOSS 登录 profile 已保存；当前没有 active 招聘链接，本次不采集。", file=sys.stderr)
                 return 0
             for link in links:
-                capture = await _collect_link(context, link, args.max_jobs, args.detail_delay_ms)
+                try:
+                    capture = await _collect_link(context, link, args.max_jobs, args.detail_delay_ms)
+                except Exception as exc:
+                    # A headed browser can be closed by the operator while the
+                    # fixed login wait is running. Convert that lifecycle race
+                    # into the same blocked state used for security checks.
+                    capture = CaptureResult(
+                        link.url,
+                        "",
+                        "blocked",
+                        f"BOSS 浏览器窗口已关闭或不可用：{str(exc)[:300]}",
+                        [],
+                    )
                 result = _post_capture(args.base_url, capture, link.brand_id)
                 link_blocked = capture.page_status == "blocked"
                 print(
