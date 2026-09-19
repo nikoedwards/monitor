@@ -122,12 +122,82 @@ def get_spec(source_id: str) -> ConnectorSpec | None:
     return BY_ID.get(source_id)
 
 
+def _source_ids_referenced_by_foreign_keys(conn: sqlite3.Connection) -> set[str]:
+    """Return source ids still needed by rows in this database.
+
+    Older databases declared ``records.source_id`` as a foreign key while the
+    current schema is intentionally additive and does not recreate that table.
+    A connector can therefore disappear from the registry while its historical
+    records still require the corresponding ``sources`` row to exist.  Inspect
+    the schema instead of hard-coding one legacy table so future source-linked
+    tables are handled the same way.
+    """
+    referenced: set[str] = set()
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+
+    def value(row, key: str, index: int):
+        try:
+            return row[key]
+        except (IndexError, KeyError, TypeError):
+            return row[index]
+
+    def quote_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    for table_row in tables:
+        table = value(table_row, "name", 0)
+        for foreign_key in conn.execute(
+            f"PRAGMA foreign_key_list({quote_identifier(table)})"
+        ).fetchall():
+            parent_table = value(foreign_key, "table", 2)
+            if parent_table != "sources":
+                continue
+            child_column = value(foreign_key, "from", 3)
+            rows = conn.execute(
+                f"SELECT {quote_identifier(child_column)} "
+                f"FROM {quote_identifier(table)} "
+                f"WHERE {quote_identifier(child_column)} IS NOT NULL"
+            ).fetchall()
+            referenced.update(str(value(row, 0, 0)) for row in rows)
+    # ``source_brand_runs`` predates the foreign-key declaration and may still
+    # contain useful per-brand runtime state for a retired connector.
+    try:
+        rows = conn.execute(
+            "SELECT source_id FROM source_brand_runs WHERE source_id IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = ()
+    referenced.update(str(value(row, 0, 0)) for row in rows)
+    return referenced
+
+
 def sync_to_db(conn: sqlite3.Connection) -> None:
     """Upsert connector metadata into the sources table (preserve runtime stats)."""
     now = utc_now()
     keep = tuple(BY_ID.keys())
     placeholders = ", ".join("?" for _ in keep)
-    conn.execute(f"DELETE FROM sources WHERE id NOT IN ({placeholders})", keep)
+    # Keep retired connector rows when historical data still points at them.
+    # Deleting those rows from a legacy DB with FK enforcement enabled makes
+    # application startup fail before the API can serve any request.
+    referenced = _source_ids_referenced_by_foreign_keys(conn)
+    stale_rows = conn.execute(
+        f"SELECT id FROM sources WHERE id NOT IN ({placeholders})", keep
+    ).fetchall()
+    for row in stale_rows:
+        source_id = row[0]
+        if source_id in referenced:
+            continue
+        try:
+            conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        except sqlite3.IntegrityError as exc:
+            # A legacy trigger or FK not visible through sqlite_master should
+            # not prevent the registry from syncing. Leave that source row in
+            # place and let its historical data continue to resolve.
+            if "foreign key" not in str(exc).lower():
+                raise
     for spec in REGISTRY:
         existing = conn.execute("SELECT id FROM sources WHERE id = ?", (spec.id,)).fetchone()
         if existing:
