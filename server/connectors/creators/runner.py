@@ -14,6 +14,7 @@ from ...util import clean_text, new_id, utc_now
 from ..collectors import brand_queries
 from . import pick_provider
 from .base import CreatorPost, brand_signals, detect_collaboration
+from .evidence import build_collection_evidence
 from .products import creator_product_queries, load_product_signals, match_record_to_products
 
 # platform -> connector source_id (registry).
@@ -25,7 +26,10 @@ PLATFORM_SOURCE = {
 }
 
 
-def _payload(brand: dict, post: CreatorPost, collab: dict, source_id: str) -> dict:
+def _payload(brand: dict, post: CreatorPost, collab: dict, source_id: str, *, product_matches: list[dict] | None = None, signals: dict | None = None) -> dict:
+    raw = dict(post.raw or {})
+    evidence = build_collection_evidence(title=post.title, body=post.body, brand=brand, signals=signals, raw=raw, product_matches=product_matches)
+    raw.update({"evidence_type": evidence["evidence_type"], "scope": evidence["scope"], "matched_in": evidence["matched_in"], "matched_text": evidence["matched_text"], "matched_queries": evidence["matched_queries"], "collection_evidence": evidence})
     return {
         "source_id": source_id,
         "brand_id": brand.get("id"),
@@ -58,7 +62,7 @@ def _payload(brand: dict, post: CreatorPost, collab: dict, source_id: str) -> di
             "collab_type": collab["collab_type"],
             "mentions": collab["mentions"],
         },
-        "raw": post.raw,
+        "raw": raw,
     }
 
 
@@ -97,14 +101,19 @@ def _collect_platform(conn: sqlite3.Connection, brand: dict, platform: str) -> l
             },
             products,
         )
+        transcript_matches = (post.raw or {}).get("transcript_matches") if isinstance(post.raw, dict) else None
+        transcript_hit = isinstance(transcript_matches, list) and bool(transcript_matches)
+        if transcript_hit and not collab["is_collab"]:
+            mentions = {clean_text(item.get("matched_text") or item.get("matched_query")) for item in transcript_matches if isinstance(item, dict)}
+            collab = {**collab, "is_collab": True, "collab_type": "transcript", "mentions": sorted(item for item in mentions if item)}
         # Search APIs are relevance-ranked rather than exact-match. Persist a
         # result only when the visible content contains brand or product proof.
-        if not collab["mentions"] and not product_matches:
+        if not collab["mentions"] and not product_matches and not transcript_hit:
             continue
         # TODO(multimodal): soft placements (product shown on-screen, no caption
         # mention) are invisible to text detection. A future vision pass over the
         # thumbnail/video frames should upgrade collab_type from "none" here.
-        payloads.append(_payload(brand, post, collab, source_id))
+        payloads.append(_payload(brand, post, collab, source_id, product_matches=product_matches, signals=signals))
     return payloads
 
 
