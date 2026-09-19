@@ -79,6 +79,19 @@ def upsert_ad_observation(conn: sqlite3.Connection, payload: dict) -> dict | Non
         # Google's preview script is rate-limited). Keep previously observed
         # links and media instead of replacing them with empty values during a
         # later lifecycle refresh.
+        previous_body = clean_text(row["creative_body"])
+        preview_fields = raw.get("preview_fields") if isinstance(raw, dict) else None
+        preview_has_copy = isinstance(preview_fields, dict) and any(
+            clean_text(preview_fields.get(key))
+            for key in ("headline", "long_headline", "description")
+        )
+        fallback_author = clean_text(payload.get("author") or raw.get("page_name")) if isinstance(raw, dict) else ""
+        if previous_body and (
+            not body
+            or (source_id == "google_ads" and not preview_has_copy and body == fallback_author)
+        ):
+            body = previous_body
+            creative_hash = row["creative_hash"] or hashlib.sha256(body.encode("utf-8")).hexdigest()
         try:
             previous_raw = json.loads(row["raw_json"] or "{}")
         except (TypeError, ValueError):

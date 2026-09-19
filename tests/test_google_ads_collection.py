@@ -332,9 +332,10 @@ def test_ad_upsert_preserves_google_media_when_a_later_preview_is_incomplete() -
     upsert_ad_observation(conn, later)
 
     row = conn.execute(
-        "SELECT link_urls_json, raw_json FROM ad_entities WHERE ad_external_id = ?",
+        "SELECT creative_body, link_urls_json, raw_json FROM ad_entities WHERE ad_external_id = ?",
         (base["external_id"],),
     ).fetchone()
+    assert row["creative_body"] == "A rich creative"
     assert json.loads(row["link_urls_json"]) == ["https://plaud.ai/product"]
     stored_raw = json.loads(row["raw_json"])
     assert stored_raw["thumbnail_url"] == "https://img.test/creative.jpg"
