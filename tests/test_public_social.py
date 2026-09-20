@@ -4,6 +4,7 @@ import unittest
 from server.connectors.public_social import (
     _json_script,
     instagram_posts_from_feed,
+    instagram_posts_from_html,
     instagram_posts_from_responses,
     instagram_posts_from_user,
     tiktok_posts_from_data,
@@ -156,6 +157,50 @@ class PublicSocialNormalizerTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertEqual(posts[0].follower_count, 141000)
         self.assertEqual(posts[0].raw["collection_method"], "instagram_public_timeline")
+
+    def test_instagram_unauthorized_api_uses_public_profile_html_timeline(self):
+        payload = {
+            "data": {
+                "xig_user_by_username": {
+                    "username": "plaud_official",
+                    "full_name": "Plaud | Amplify Human Intelligence",
+                    "profile_pic_url": "https://cdn.example/avatar.jpg",
+                    "follower_count": 147081,
+                    "is_private": False,
+                    "is_verified": True,
+                    "polaris_ordered_timeline_connection": {
+                        "edges": [{
+                            "node": {
+                                "__typename": "XIGPolarisImageMedia",
+                                "pk": "3988900139593896042",
+                                "code": "Ddba4r5ABBq",
+                                "accessibility_caption": (
+                                    "Photo by Plaud | Amplify Human Intelligence on "
+                                    "September 18, 2026."
+                                ),
+                                "caption": {"text": "Out in the world with Plaud One."},
+                                "display_uri": "https://cdn.example/post.jpg",
+                                "media_type": 1,
+                                "product_type": "feed",
+                            },
+                        }],
+                    },
+                },
+            },
+        }
+        html = '<script type="application/json">' + json.dumps(payload) + "</script>"
+        posts = instagram_posts_from_html(
+            html,
+            "https://www.instagram.com/plaud_official/",
+            "plaud_official",
+        )
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].external_id, "3988900139593896042")
+        self.assertEqual(posts[0].url, "https://www.instagram.com/p/Ddba4r5ABBq/")
+        self.assertEqual(posts[0].occurred_at, "2026-09-18T12:00:00+00:00")
+        self.assertEqual(posts[0].follower_count, 147081)
+        self.assertEqual(posts[0].raw["collection_method"], "instagram_public_html")
 
     def test_tiktok_playlist_entries_become_posts_with_metrics(self):
         profile = {

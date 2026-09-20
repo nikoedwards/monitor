@@ -5,9 +5,6 @@ import sqlite3
 
 from ...config import CREDENTIALS
 from .base import PLATFORM_LABELS, PLATFORMS, CreatorPost, CreatorProvider, detect_collaboration
-from .public_search import PublicSearchCreatorProvider
-from .youtube import YouTubeProvider, YouTubePublicProvider
-
 __all__ = [
     "PLATFORMS",
     "PLATFORM_LABELS",
@@ -28,8 +25,12 @@ def creator_credential(conn: sqlite3.Connection, key: str) -> str:
 
 def pick_provider(platform: str, conn: sqlite3.Connection) -> CreatorProvider | None:
     if platform == "youtube":
+        from .youtube import YouTubeProvider, YouTubePublicProvider
+
         key = creator_credential(conn, "youtube_api_key")
         return YouTubeProvider(key) if key else YouTubePublicProvider()
     if platform in {"instagram", "tiktok"}:
+        from .public_search import PublicSearchCreatorProvider
+
         return PublicSearchCreatorProvider(platform)
     return None

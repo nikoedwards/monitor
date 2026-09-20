@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from html import unescape
 from typing import Any
 
 from ..fetchers import FetchError, fetch_text
@@ -241,6 +242,135 @@ def instagram_posts_from_feed(
     return posts
 
 
+def _instagram_html_nodes(html: str) -> tuple[dict, list[dict]]:
+    """Extract the public Polaris timeline embedded in an Instagram profile."""
+    if not html:
+        return {}, []
+
+    script_pattern = r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>'
+    profile: dict = {}
+    edges: list[dict] = []
+
+    def visit(value: object) -> None:
+        nonlocal profile, edges
+        if isinstance(value, dict):
+            candidate = value.get("xig_user_by_username")
+            if isinstance(candidate, dict):
+                for key in (
+                    "pk", "id", "username", "full_name", "profile_pic_url",
+                    "is_private", "is_verified", "follower_count",
+                ):
+                    if candidate.get(key) is not None:
+                        profile[key] = candidate[key]
+                connection = candidate.get("polaris_ordered_timeline_connection")
+                if isinstance(connection, dict) and isinstance(connection.get("edges"), list):
+                    candidate_edges = connection["edges"]
+                    if len(candidate_edges) >= len(edges):
+                        edges = candidate_edges
+            connection = value.get("polaris_ordered_timeline_connection")
+            if isinstance(connection, dict) and isinstance(connection.get("edges"), list):
+                candidate_edges = connection["edges"]
+                if len(candidate_edges) >= len(edges):
+                    edges = candidate_edges
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for match in re.finditer(script_pattern, html, flags=re.I | re.S):
+        raw = unescape(match.group(1)).strip()
+        if not raw:
+            continue
+        try:
+            visit(json.loads(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return profile, edges
+
+
+def _instagram_html_date(value: str) -> str | None:
+    match = re.search(
+        r"\bon\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})\b",
+        value or "",
+        flags=re.I,
+    )
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%B %d, %Y").replace(
+            tzinfo=timezone.utc,
+            hour=12,
+        ).isoformat()
+    except ValueError:
+        return None
+
+
+def instagram_posts_from_html(
+    html: str,
+    account_url: str,
+    handle: str,
+    *,
+    limit: int = _MAX_POSTS,
+) -> list[CreatorPost]:
+    """Normalize public posts from Instagram's server-rendered profile HTML."""
+    profile, edges = _instagram_html_nodes(html)
+    username = str(profile.get("username") or handle).strip().lstrip("@").lower()
+    if not username or not edges:
+        return []
+    if profile.get("is_private"):
+        raise FetchError("Instagram 账号为私密账号；自采仅支持公开账号。")
+
+    display_name = str(profile.get("full_name") or username).strip()
+    profile_pic = str(profile.get("profile_pic_url") or "")
+    follower_count = _number(profile.get("follower_count"))
+    posts: list[CreatorPost] = []
+    seen: set[str] = set()
+    for edge in edges[: max(1, limit)]:
+        node = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(node, dict):
+            continue
+        shortcode = str(node.get("code") or node.get("shortcode") or "").strip()
+        external_id = str(node.get("pk") or node.get("id") or shortcode).strip()
+        if not shortcode or not external_id or external_id in seen:
+            continue
+        seen.add(external_id)
+        caption_value = node.get("caption")
+        caption = (
+            str(caption_value.get("text") or "").strip()
+            if isinstance(caption_value, dict)
+            else str(caption_value or "").strip()
+        )
+        accessibility = str(node.get("accessibility_caption") or "").strip()
+        media_type = _number(node.get("media_type"))
+        product_type = str(node.get("product_type") or "")
+        is_video = "Video" in str(node.get("__typename") or "") or media_type == 2
+        path = "reel" if product_type == "clips" else "p"
+        posts.append(CreatorPost(
+            platform="instagram",
+            external_id=external_id,
+            url=f"https://www.instagram.com/{path}/{shortcode}/",
+            title=(caption or f"Instagram post by @{username}")[:200],
+            body=caption or f"Instagram post by @{username}",
+            author=display_name,
+            author_handle=username,
+            author_url=account_url,
+            avatar_url=str(node.get("display_uri") or profile_pic),
+            occurred_at=_instagram_html_date(accessibility),
+            follower_count=follower_count,
+            raw={
+                "collection_method": "instagram_public_html",
+                "shortcode": shortcode,
+                "post_type": product_type or ("video" if is_video else "image"),
+                "is_video": is_video,
+                "is_verified": bool(profile.get("is_verified")),
+                "profile_pic_url": profile_pic,
+                "accessibility_caption": accessibility,
+            },
+        ))
+    return posts
+
+
 def instagram_posts_from_responses(
     result: dict,
     account_url: str,
@@ -252,19 +382,34 @@ def instagram_posts_from_responses(
     profile_status = _number((result or {}).get("profile_status")) or 0
     user = (((result or {}).get("profile_data") or {}).get("data") or {}).get("user")
     if profile_status == 200 and isinstance(user, dict) and user.get("username"):
-        return instagram_posts_from_user(user, account_url, limit=limit)
+        posts = instagram_posts_from_user(user, account_url, limit=limit)
+        if posts:
+            return posts
 
     feed_status = _number((result or {}).get("feed_status")) or 0
     feed = (result or {}).get("feed_data")
     if feed_status == 200 and isinstance(feed, dict):
         follower_count = _instagram_followers_from_og(str((result or {}).get("og_description") or ""))
-        return instagram_posts_from_feed(
+        posts = instagram_posts_from_feed(
             feed,
             account_url,
             handle=handle,
             follower_count=follower_count,
             limit=limit,
         )
+        if posts:
+            return posts
+
+    # Instagram may reject the legacy logged-out JSON endpoints with 401/429
+    # while embedding the same public timeline in profile HTML.
+    html_posts = instagram_posts_from_html(
+        str((result or {}).get("html") or ""),
+        account_url,
+        handle,
+        limit=limit,
+    )
+    if html_posts:
+        return html_posts
 
     raise FetchError(
         "Instagram 公开接口采集失败："
@@ -275,6 +420,23 @@ def instagram_posts_from_responses(
 
 def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX_POSTS) -> list[CreatorPost]:
     """Load one public Instagram profile through the logged-out web client."""
+    # The profile HTML remains public even when Instagram rejects the older
+    # /api/v1 endpoints. Use its embedded Polaris timeline first so public
+    # monitoring does not require a login or access token.
+    try:
+        html = fetch_text(
+            f"https://www.instagram.com/{handle}/",
+            timeout=30,
+            headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
+        html_posts = instagram_posts_from_html(html, account_url, handle, limit=limit)
+        if html_posts:
+            return html_posts
+    except FetchError:
+        # Keep the browser/API fallback for temporary HTML challenges or an
+        # account whose page uses a different response shape.
+        pass
+
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -296,7 +458,7 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
                     wait_until="domcontentloaded",
                     timeout=45_000,
                 )
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(2_000)
                 result = page.evaluate(
                     """
                     async ({handle, appId, limit}) => {
@@ -341,7 +503,8 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
                         profile_data: profileData,
                         feed_status: feedResponse?.status || 0,
                         feed_data: feedData,
-                        og_description: document.querySelector('meta[property="og:description"]')?.content || ""
+                        og_description: document.querySelector('meta[property="og:description"]')?.content || "",
+                        html: document.documentElement?.outerHTML || ""
                       };
                     }
                     """,
