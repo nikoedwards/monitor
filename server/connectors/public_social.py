@@ -144,7 +144,8 @@ def instagram_posts_from_user(user: dict, account_url: str, *, limit: int = _MAX
             author=display_name,
             author_handle=username,
             author_url=account_url,
-            avatar_url=thumbnail or profile_pic,
+            avatar_url=profile_pic,
+            thumbnail_url=thumbnail,
             occurred_at=_timestamp(node.get("taken_at_timestamp")),
             views=views,
             likes=likes,
@@ -225,7 +226,8 @@ def instagram_posts_from_feed(
             author=display_name,
             author_handle=username,
             author_url=account_url,
-            avatar_url=_instagram_feed_thumbnail(item) or profile_pic,
+            avatar_url=profile_pic,
+            thumbnail_url=_instagram_feed_thumbnail(item),
             occurred_at=_timestamp(item.get("taken_at")),
             views=views,
             likes=likes,
@@ -306,6 +308,20 @@ def _instagram_html_date(value: str) -> str | None:
         ).isoformat()
     except ValueError:
         return None
+
+
+def _instagram_html_meta_content(html: str, property_name: str) -> str:
+    for tag_match in re.finditer(r"<meta\b[^>]*>", html or "", flags=re.I | re.S):
+        attributes: dict[str, str] = {}
+        for attr_match in re.finditer(
+            r"([\w:-]+)\s*=\s*([\"'])(.*?)\2",
+            tag_match.group(0),
+            flags=re.I | re.S,
+        ):
+            attributes[attr_match.group(1).lower()] = unescape(attr_match.group(3))
+        if attributes.get("property", "").lower() == property_name.lower():
+            return attributes.get("content", "").strip()
+    return ""
 
 
 def _instagram_shortcode_id(shortcode: str) -> str:
@@ -414,6 +430,10 @@ def instagram_posts_from_html(
     display_name = str(profile.get("full_name") or username).strip()
     profile_pic = str(profile.get("profile_pic_url") or "")
     follower_count = _number(profile.get("follower_count"))
+    if follower_count is None:
+        follower_count = _instagram_followers_from_og(
+            _instagram_html_meta_content(html, "og:description")
+        )
     posts: list[CreatorPost] = []
     seen: set[str] = set()
     for edge in edges[: max(1, limit)]:
@@ -446,6 +466,7 @@ def instagram_posts_from_html(
             author_handle=username,
             author_url=account_url,
             avatar_url=profile_pic,
+            thumbnail_url=str(node.get("display_uri") or ""),
             occurred_at=_instagram_html_date(accessibility),
             follower_count=follower_count,
             raw={
@@ -487,6 +508,7 @@ def instagram_posts_from_html(
             author_handle=username,
             author_url=account_url,
             avatar_url=profile_pic,
+            thumbnail_url=item.get("image_url", ""),
             occurred_at=_instagram_html_date(alt or item.get("text", "")),
             follower_count=follower_count,
             raw={
