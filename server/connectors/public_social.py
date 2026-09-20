@@ -486,7 +486,7 @@ def instagram_posts_from_html(
             author=display_name,
             author_handle=username,
             author_url=account_url,
-            avatar_url=item.get("image_url", "") or profile_pic,
+            avatar_url=profile_pic,
             occurred_at=_instagram_html_date(alt or item.get("text", "")),
             follower_count=follower_count,
             raw={
@@ -497,6 +497,7 @@ def instagram_posts_from_html(
                 "is_verified": bool(profile.get("is_verified")),
                 "profile_pic_url": profile_pic,
                 "accessibility_caption": alt,
+                "media_url": item.get("image_url", ""),
             },
         ))
     return posts
