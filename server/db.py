@@ -786,6 +786,15 @@ def init_db() -> None:
                 _ensure_column(conn, table, column, ddl)
             except sqlite3.OperationalError:
                 pass
+        # Older installations already have sales snapshots, but those rows
+        # predate the fallback estimate and explicit category-rank columns.
+        # Run the idempotent migration after additive columns exist so the
+        # first restart immediately makes the historical data usable.  Keep
+        # the import local to avoid a db -> connector import cycle at module
+        # load time.
+        from .connectors.sales.estimates import backfill_sales_metrics
+
+        backfill_sales_metrics(conn)
         conn.executescript(INDEXES)
         _backfill_brand_ids(conn)
         _cleanup_fake_boss_login_postings(conn)

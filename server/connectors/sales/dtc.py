@@ -62,6 +62,84 @@ def _first_offer(node: dict) -> dict:
     return {}
 
 
+def _extract_review_signals(html: str, text: str, meta: dict) -> tuple[float | None, int | None, str]:
+    """Recover rating/review count when JSON-LD is absent or incomplete.
+
+    Shopify review apps and rendered storefront themes commonly expose these
+    values as data attributes, accessible labels, or plain text rather than in
+    ``aggregateRating``.  Keep the patterns tied to a review/rating label so
+    prices, years, and unrelated counters are not mistaken for reviews.
+    """
+    source = html or ""
+    visible = text or ""
+    metadata = {str(key).lower(): value for key, value in (meta or {}).items()}
+
+    rating: float | None = None
+    review_count: int | None = None
+
+    def number(value) -> float | None:
+        try:
+            return float(str(value).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def integer(value) -> int | None:
+        value = str(value or "").replace("\u00a0", " ").strip()
+        match = re.search(r"\d[\d,\.\s]*", value)
+        if not match:
+            return None
+        try:
+            return int(float(match.group(0).replace(",", "").replace(" ", "")))
+        except (TypeError, ValueError):
+            return None
+
+    # Meta and common review-app attributes are the least ambiguous signals.
+    for key in (
+        "product:rating", "product:rating_value", "rating", "ratingvalue",
+        "aggregate_rating", "aggregate-rating", "data-rating",
+    ):
+        candidate = number(metadata.get(key))
+        if candidate is not None and 0 <= candidate <= 5:
+            rating = candidate
+            break
+    for key in (
+        "product:review_count", "product:reviewcount", "review_count",
+        "reviewcount", "rating_count", "ratingcount", "reviews_count",
+        "reviews-count", "data-review-count", "data-reviews-count",
+    ):
+        candidate = integer(metadata.get(key))
+        if candidate is not None and candidate >= 0:
+            review_count = candidate
+            break
+
+    rating_patterns = (
+        r"(?:ratingvalue|rating_value|rating|data-rating)\s*[\"'=:> ]+([0-5](?:[\.,][0-9]+)?)",
+        r"([0-5](?:[\.,][0-9]+)?)\s*(?:out\s+of\s+5|/\s*5|stars?)",
+    )
+    for pattern in rating_patterns:
+        match = re.search(pattern, source, re.I) or re.search(pattern, visible, re.I)
+        if match:
+            candidate = number(match.group(1).replace(",", "."))
+            if candidate is not None and 0 <= candidate <= 5:
+                rating = rating if rating is not None else candidate
+                break
+
+    count_patterns = (
+        r"(?:review[_\- ]?count|reviews[_\- ]?count|rating[_\- ]?count|data-(?:review|reviews)[-_]count)\s*[\"'=:> ]+(\d[\d,\.\s]*)",
+        r"(\d[\d,\.\s]*)\s*(?:customer\s+)?(?:reviews?|ratings?|reviews?\s+and\s+ratings?|条评论|条评价|评论|评价)\b",
+        r"(?:reviews?|ratings?|评论|评价)[^\d]{0,24}(\d[\d,\.\s]*)",
+    )
+    for pattern in count_patterns:
+        match = re.search(pattern, source, re.I) or re.search(pattern, visible, re.I)
+        if match:
+            candidate = integer(match.group(1))
+            if candidate is not None and candidate >= 0:
+                review_count = review_count if review_count is not None else candidate
+                break
+
+    return rating, review_count, "html_fallback" if rating is not None or review_count is not None else ""
+
+
 class ScrapeDtcProvider(SalesProvider):
     name = "dtc_scrape"
 
@@ -151,6 +229,17 @@ class ScrapeDtcProvider(SalesProvider):
             if cur:
                 snap.currency = cur
 
+        # A number of Shopify themes load reviews client-side and omit
+        # aggregateRating from JSON-LD.  Recover the labelled values from the
+        # rendered HTML/meta so the review-based estimate can still be formed.
+        fallback_rating, fallback_reviews, fallback_source = _extract_review_signals(
+            page.get("html") or "", page.get("text") or "", meta,
+        )
+        if snap.rating is None:
+            snap.rating = fallback_rating
+        if snap.review_count is None:
+            snap.review_count = fallback_reviews
+
         # DTC pages generally expose no order count.  Use review stock/velocity
         # as a transparent low-confidence proxy so the daily history can still
         # show an estimated units/revenue trend.  If no reviews exist, leave
@@ -179,7 +268,13 @@ class ScrapeDtcProvider(SalesProvider):
 
         if snap.price is None and snap.rating is None and not product:
             snap.status = "partial"
-        snap.raw = {"final_url": page.get("final_url"), "provider": self.name, "had_jsonld": bool(product)}
+        snap.raw = {
+            "final_url": page.get("final_url"),
+            "provider": self.name,
+            "had_jsonld": bool(product),
+        }
+        if fallback_source:
+            snap.raw["review_signal_source"] = fallback_source
         if estimate:
             snap.raw.update({
                 "estimate_method": snap.estimate_method,

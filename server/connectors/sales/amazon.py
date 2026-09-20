@@ -22,8 +22,20 @@ _DP_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
 _RATING_RE = re.compile(r"([0-5](?:\.[0-9])?)\s+out of\s+5", re.I)
 _REVIEWS_RE = re.compile(r"([0-9][0-9,]*)\s+(?:global ratings|ratings|reviews)", re.I)
 _BSR_RE = re.compile(r"(?:Best Sellers Rank|Best Seller Rank)[\s\S]{0,500}?#\s*([0-9][0-9,]*)", re.I)
+_BSR_MARKER_RE = re.compile(
+    r"(?:best\s+sellers?\s+rank|sales\s*rank|salesrank|"
+    r"best[-_ ]seller[-_ ]rank|classement\s+des\s+meilleures\s+ventes|"
+    r"rang\s+des\s+ventes|売れ筋ランキング|ランキング)",
+    re.I,
+)
 _BSR_LEVEL_RE = re.compile(
     r"#\s*([0-9][0-9,]*)\s+in\s+([^#(\n\r]+?)(?=\s*\(|\s+#|\s*$)",
+    re.I,
+)
+_BSR_TOKEN_RE = re.compile(r"#\s*([0-9][0-9.,\u00a0\u202f ]*)")
+_BSR_CONTAINER_RE = re.compile(
+    r"<[^>]+(?:id|class)=[\"'][^\"']*(?:salesrank|sales.rank|"
+    r"detailbullets|best[-_ ]seller|best[-_ ]rank)[^\"']*[\"'][^>]*>",
     re.I,
 )
 _PRODUCT_TITLE_RE = re.compile(r'id=["\']productTitle["\'][^>]*>([\s\S]*?)</', re.I)
@@ -46,6 +58,83 @@ _BROWSER_HEADERS = {
     "Cache-Control": "no-cache",
     "Cookie": "lc-main=en_US; i18n-prefs=USD",
 }
+
+
+def _is_amazon_interstitial(page: dict | None) -> bool:
+    """Identify Amazon's short continue-shopping/robot gate response.
+
+    Amazon sometimes returns a tiny ``Amazon.com / Continue shopping`` page to
+    one request fingerprint while returning the real product page to another.
+    Treat that response as retryable instead of persisting an empty snapshot.
+    A short page with product markers is kept as valid, since some mobile
+    layouts intentionally contain very little visible text.
+    """
+    if not isinstance(page, dict):
+        return True
+    text = clean_text(str(page.get("text") or ""))
+    html_text = _strip_html(str(page.get("html") or ""))
+    if not text and not html_text:
+        return True
+    content = max((text, html_text), key=len)
+    lower = f"{text} {html_text}".lower()
+    gate_markers = (
+        "continue shopping",
+        "click the button below",
+        "robot check",
+        "enter the characters you see",
+        "automated access",
+    )
+    if not any(marker in lower for marker in gate_markers):
+        return False
+    # Continue-shopping interstitials are tiny; a long page containing that
+    # phrase may be a real product page with a normal footer. Robot/automated
+    # access gates remain retryable at any length.
+    robot_gate = any(marker in lower for marker in gate_markers[2:])
+    if not robot_gate and len(content) > 1800:
+        return False
+    product_markers = (
+        "best sellers rank",
+        "about this item",
+        "add to cart",
+        "buying options",
+        "product information",
+    )
+    return not any(marker in lower for marker in product_markers)
+
+
+def _fetch_amazon_page(url: str) -> dict:
+    """Fetch an Amazon page, retrying a gated default response once.
+
+    The ordinary request fingerprint is preferred: on some Amazon edges the
+    Chrome-like headers and cookie below trigger a 153-byte interstitial while
+    the default request returns the complete product page.  The browser-like
+    request remains a fallback for storefronts that require it.
+    """
+    first_error: FetchError | None = None
+    try:
+        page = fetch_page(url)
+    except FetchError as exc:
+        first_error = exc
+        page = None
+    if page is not None and not _is_amazon_interstitial(page):
+        return page
+
+    try:
+        retry = fetch_page(url, headers=_BROWSER_HEADERS)
+    except FetchError:
+        if page is not None:
+            return page
+        assert first_error is not None
+        raise first_error
+    if page is None:
+        return retry
+    if not _is_amazon_interstitial(retry):
+        return retry
+    # If both fingerprints are gated, keep the richer response so downstream
+    # parsing has the best chance of recovering a title or diagnostic marker.
+    page_size = len(str(page.get("html") or "")) + len(str(page.get("text") or ""))
+    retry_size = len(str(retry.get("html") or "")) + len(str(retry.get("text") or ""))
+    return retry if retry_size > page_size else page
 
 # Main-image extraction from a /dp/ page (several layouts / fallbacks).
 _IMG_DYNAMIC_RE = re.compile(r'id="landingImage"[^>]*\bdata-a-dynamic-image="([^"]+)"')
@@ -145,42 +234,142 @@ def _extract_price(html: str) -> float | None:
 
 
 def _extract_rank_levels(text: str, html: str = "") -> dict:
-    """Extract the first large-category and nested-category BSR values.
+    """Extract broad and nested Amazon BSR levels from page variants.
 
-    Amazon renders the BSR block differently across locales and page versions.
-    The visible text is preferred, with a small HTML fallback for pages where
-    the text parser omits the rank container.  The first rank is the broad
-    category rank; the second is the first subcategory rank.
+    The detail-bullets block is not stable: depending on locale, device and
+    bot treatment Amazon may return visible text, an HTML container, or only a
+    fragment with ``#SalesRank``/``salesrank`` identifiers.  We first use the
+    strongly-labelled English form, then fall back to the first two ``#N``
+    tokens in a labelled rank window.  The latter deliberately does not rely
+    on the word ``in`` so localized category labels and line-wrapped HTML are
+    still captured.
     """
+
+    def _rank_number(value: str | None) -> int | None:
+        if not value:
+            return None
+        # Rank values are integers. Amazon locales use comma, dot, NBSP or
+        # narrow-NBSP as thousands separators; stripping all separators keeps
+        # the parser locale-neutral while rejecting non-numeric fragments.
+        normalized = re.sub(r"[\s,\.\u00a0\u202f]", "", value)
+        return _to_int(normalized)
+
+    def _name_after_token(window: str, end: int, next_start: int | None) -> str:
+        tail = window[end: next_start if next_start is not None else end + 240]
+        # Generic fallback can operate on raw HTML containers; remove tags
+        # before looking for the category label so markup does not become part
+        # of the returned name.
+        tail = re.sub(r"<[^>]+>", " ", tail)
+        tail = html_lib.unescape(tail)
+        # Category labels end before the explanatory ``See Top 100`` link,
+        # parenthetical text, another rank, or a neighboring page label.
+        # Normalize line-wrapped labels first (for example ``in\nDigital``).
+        tail = re.sub(r"\s+", " ", tail)
+        tail = re.split(
+            r"\(|\)|#|See\s+Top\s+100|Top\s+100|\bASIN\b|\bCustomer\s+Reviews?\b",
+            tail,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+        # BSR category names are often wrapped after the connector (for
+        # example ``#12 in\nDigital Voice Recorders``). Keep those line breaks
+        # while trimming the metadata that follows the BSR list.
+        tail = re.split(
+            r"\b(?:ASIN|Customer\s+Reviews?|Product\s+information|"
+            r"Item\s+model\s+number|Date\s+First\s+Available|"
+            r"Best\s+Sellers?\s+Rank)\b",
+            tail,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+        tail = re.sub(
+            r"^\s*(?:in|im|en|dans|sur|unter|カテゴリー?|カテゴリ|在|中的?)\s*[:：-]?\s*",
+            "",
+            tail,
+            flags=re.I,
+        )
+        # When no connector is present, remove punctuation left by a label
+        # such as ``Best Sellers Rank:`` and keep the category words.
+        return clean_text(tail.strip(" :：\u00a0\u202f-–—>"))
+
+    def _result(levels: list[tuple[int, str]]) -> dict:
+        return {
+            "category_rank": levels[0][0],
+            "subcategory_rank": levels[1][0] if len(levels) > 1 else None,
+            "category_name": levels[0][1],
+            "subcategory_name": levels[1][1] if len(levels) > 1 else "",
+        }
+
+    def _windows(source: str, *, html_source: bool = False) -> list[str]:
+        if not source:
+            return []
+        windows: list[str] = []
+        # Prefer every labelled block instead of only the first marker: the
+        # page header may contain a navigation ``Best Sellers`` link before the
+        # actual product-detail block.
+        markers = list(_BSR_MARKER_RE.finditer(source))
+        for marker in markers:
+            windows.append(source[marker.start(): marker.start() + 2000])
+        if html_source:
+            for container in _BSR_CONTAINER_RE.finditer(source):
+                windows.append(source[container.start(): container.start() + 4000])
+        if not windows:
+            # Do not interpret arbitrary ``#123`` fragments elsewhere on a
+            # page as a BSR. A generic token pass is safe only inside a
+            # labelled rank block or a known rank container.
+            return []
+        # Preserve order while avoiding duplicate windows from text/html.
+        return list(dict.fromkeys(windows))
+
     sources = []
-    for value in (text or "", _strip_html(html or "")):
-        if value and value not in sources:
-            sources.append(value)
-    for source in sources:
-        marker = re.search(r"Best Sellers? Rank", source, re.I)
-        if marker:
-            source = source[marker.start(): marker.start() + 1200]
-        matches = list(_BSR_LEVEL_RE.finditer(source))
-        if not matches:
-            continue
-        levels = []
-        for match in matches:
-            rank = _to_int(match.group(1))
-            name = clean_text(match.group(2))
-            if rank is not None:
-                levels.append((rank, name))
-        if levels:
-            result = {
-                "category_rank": levels[0][0],
-                "subcategory_rank": levels[1][0] if len(levels) > 1 else None,
-                "category_name": levels[0][1],
-                "subcategory_name": levels[1][1] if len(levels) > 1 else "",
-            }
-            return result
-    fallback = _BSR_RE.search(text or "") or _BSR_RE.search(_strip_html(html or ""))
-    if fallback:
-        value = _to_int(fallback.group(1))
-        return {"category_rank": value, "subcategory_rank": None, "category_name": "", "subcategory_name": ""}
+    visible = text or ""
+    stripped_html = _strip_html(html or "")
+    for value, is_html in ((visible, False), (stripped_html, True)):
+        if value and value not in {item[0] for item in sources}:
+            sources.append((value, is_html))
+    # A raw HTML pass is useful for ``id=SalesRank`` containers whose text is
+    # absent from the visible-text parser due to script/template wrappers.
+    if html:
+        sources.append((html, True))
+
+    for source, is_html in sources:
+        for window in _windows(source, html_source=is_html):
+            # Generic/localized fallback: use the first two rank tokens in a
+            # labelled window. This also handles ``# 1,234`` and ``#1.234``.
+            tokens = list(_BSR_TOKEN_RE.finditer(window))
+            generic: list[tuple[int, str]] = []
+            for index, token in enumerate(tokens[:3]):
+                rank = _rank_number(token.group(1))
+                if rank is None:
+                    continue
+                next_start = tokens[index + 1].start() if index + 1 < len(tokens) else None
+                name = _name_after_token(window, token.end(), next_start)
+                generic.append((rank, name))
+                if len(generic) == 2:
+                    break
+            if generic:
+                return _result(generic)
+
+            # Keep the older strict English parser as a final pass for odd
+            # markup where the rank token is present but the generic window
+            # was not labelled cleanly.
+            matches = list(_BSR_LEVEL_RE.finditer(window))
+            levels: list[tuple[int, str]] = []
+            for match in matches:
+                rank = _rank_number(match.group(1))
+                if rank is not None:
+                    levels.append((rank, clean_text(match.group(2))))
+            if levels:
+                return _result(levels)
+
+    # Last-resort compatibility path for legacy captures that only expose one
+    # broad BSR value without a rank label or nested category.
+    for source in (visible, stripped_html):
+        fallback = _BSR_RE.search(source)
+        if fallback:
+            value = _rank_number(fallback.group(1))
+            if value is not None:
+                return {"category_rank": value, "subcategory_rank": None, "category_name": "", "subcategory_name": ""}
     return {}
 
 
@@ -210,7 +399,7 @@ class ScrapeAmazonProvider(SalesProvider):
         for page in range(1, self.max_pages + 1):
             page_url = url if page == 1 else self._with_page(url, page)
             try:
-                fetched = fetch_page(page_url, headers=_BROWSER_HEADERS)
+                fetched = _fetch_amazon_page(page_url)
             except FetchError:
                 break
             html = fetched.get("html") or ""
@@ -241,7 +430,7 @@ class ScrapeAmazonProvider(SalesProvider):
         url = listing.get("url") or ""
         snap = ListingSnapshot(currency="USD")
         try:
-            page = fetch_page(url, headers=_BROWSER_HEADERS)
+            page = _fetch_amazon_page(url)
         except FetchError as exc:
             snap.status = "error"
             snap.error = str(exc)[:300]
@@ -314,4 +503,8 @@ class ScrapeAmazonProvider(SalesProvider):
         elif not parsed_any:
             snap.status = "partial"
         snap.raw = {"final_url": page.get("final_url"), "provider": self.name}
+        if ranks:
+            # Keep the parser output in raw_json as a migration/debug seam for
+            # installations whose database predates dedicated rank columns.
+            snap.raw["rank_levels"] = ranks
         return snap

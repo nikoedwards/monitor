@@ -1,7 +1,12 @@
 import unittest
 from unittest.mock import patch
 
-from server.connectors.sales.amazon import ScrapeAmazonProvider, _extract_price, _strip_html
+from server.connectors.sales.amazon import (
+    ScrapeAmazonProvider,
+    _BROWSER_HEADERS,
+    _extract_price,
+    _strip_html,
+)
 
 
 class AmazonSalesParserTests(unittest.TestCase):
@@ -35,6 +40,67 @@ class AmazonSalesParserTests(unittest.TestCase):
         }
         snapshot = ScrapeAmazonProvider().fetch(None, {"url": "https://www.amazon.com/dp/B000000000", "asin": "B000000000"})
         self.assertEqual(snapshot.review_count, 825)
+
+    @patch("server.connectors.sales.amazon.fetch_page")
+    def test_product_fetch_retries_when_default_request_hits_continue_shopping(self, fetch_page):
+        fetch_page.side_effect = [
+            {
+                "html": "<html><title>Amazon.com</title></html>",
+                "text": "Amazon.com Click the button below to continue shopping",
+                "meta": {},
+                "title": "Amazon.com",
+                "final_url": "https://www.amazon.com/dp/B000000000",
+            },
+            {
+                "html": (
+                    '<span id="productTitle">Example</span>'
+                    '<div id="corePrice_feature_div"><span class="a-offscreen">$20.00</span></div>'
+                ),
+                "text": (
+                    "Best Sellers Rank #100 in Electronics (See Top 100 in Electronics) "
+                    "#20 in Headphones (See Top 100 in Headphones)"
+                ),
+                "meta": {"og:title": "Example"},
+                "title": "Example",
+                "final_url": "https://www.amazon.com/dp/B000000000",
+            },
+        ]
+
+        snapshot = ScrapeAmazonProvider().fetch(
+            None,
+            {"url": "https://www.amazon.com/dp/B000000000", "asin": "B000000000", "marketplace": "US"},
+        )
+
+        self.assertEqual(2, fetch_page.call_count)
+        self.assertEqual(
+            (("https://www.amazon.com/dp/B000000000",), {"headers": _BROWSER_HEADERS}),
+            fetch_page.call_args_list[1],
+        )
+        self.assertEqual("Example", snapshot.title)
+        self.assertEqual(100, snapshot.category_rank)
+        self.assertEqual(20, snapshot.subcategory_rank)
+        self.assertEqual(100, snapshot.units_est)
+
+    @patch("server.connectors.sales.amazon.fetch_page")
+    def test_storefront_expand_retries_gate_and_discovers_asins(self, fetch_page):
+        fetch_page.side_effect = [
+            {
+                "html": "<html><title>Amazon.com</title></html>",
+                "text": "Amazon.com Click the button below to continue shopping",
+            },
+            {
+                "html": '<div data-asin="B000000000"><a href="/dp/B000000000">Example</a></div>',
+                "text": "Example",
+            },
+        ]
+
+        refs = ScrapeAmazonProvider(max_pages=1).expand(
+            None,
+            {"url": "https://www.amazon.com/s?k=plaud+note", "channel": "amazon"},
+        )
+
+        self.assertEqual(["B000000000"], [ref.asin for ref in refs])
+        self.assertEqual(2, fetch_page.call_count)
 
 
 if __name__ == "__main__":
