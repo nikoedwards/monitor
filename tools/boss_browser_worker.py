@@ -17,7 +17,7 @@ Example (first run)::
 
 Example (scheduled run)::
 
-    python -m tools.boss_browser_worker --headless --max-jobs 40
+    python -m tools.boss_browser_worker --headless --max-jobs 100
 
 The browser profile is deliberately separate from a user's normal Chrome
 profile.  This prevents profile-lock conflicts and makes the login session used
@@ -47,6 +47,7 @@ from server.db import connect
 DEFAULT_BASE_URL = os.environ.get("MONITOR_BASE_URL", "http://127.0.0.1:8790")
 DEFAULT_PROFILE_DIR = ROOT / "data" / "browser_profiles" / "boss"
 DEFAULT_LOGIN_URL = "https://www.zhipin.com/"
+BROWSER_CHANNEL = os.environ.get("BOSS_BROWSER_CHANNEL", "").strip().lower()
 BOSS_HOSTS = ("zhipin.com",)
 LOGIN_MARKERS = (
     "boss直聘注册登录",
@@ -80,6 +81,13 @@ LOGIN_PATH_MARKERS = ("/web/user/", "/login", "/register", "/security-check", "/
 CLOSED_MARKERS = ("职位已下线", "停止招聘", "职位不存在", "已结束", "已关闭")
 JOB_DETAIL_PATH = "/job_detail/"
 COMPANY_JOBS_PATH = "/gongsi/job/"
+# BOSS renders recommendation cards next to the company's own listings.  The
+# generic ``a[href*='/job_detail/']`` selector therefore over-counts a page
+# and can make a logged-in company page look incomplete.  Keep this selector
+# aligned with the listing cards themselves.
+JOB_CARD_SELECTOR = ".job-card-box a.job-name[href*='/job_detail/']"
+PAGINATION_SELECTOR = "a[ka^='page-']"
+MAX_LISTING_PAGES = 50
 
 # BOSS puts the total in the company-page tab label, for example
 # ``招聘职位(15)``.  Keep the patterns intentionally narrow so a number in a
@@ -333,6 +341,17 @@ def _post_capture(base_url: str, capture: CaptureResult, brand_id: str) -> dict[
         raise RuntimeError(f"无法连接 Monitor API {endpoint}: {detail}") from exc
 
 
+async def _login_page_for_context(context: Any) -> Any:
+    """Reuse the persistent context's initial blank tab for headed login."""
+    existing_pages = list(getattr(context, "pages", []) or [])
+    for candidate in existing_pages:
+        if (getattr(candidate, "url", "") or "") in {"", "about:blank"}:
+            return candidate
+    if existing_pages:
+        return existing_pages[0]
+    return await context.new_page()
+
+
 async def _first_text(page: Any, selectors: Iterable[str], root: Any = None) -> str:
     """Return the first non-empty inner text for a small selector list."""
     scope = root or page
@@ -381,7 +400,141 @@ async def _extract_detail(page: Any, url: str, source_title: str = "") -> dict[s
     }
 
 
-async def _extract_listing(page: Any, url: str) -> tuple[CaptureResult, list[str]]:
+async def _detail_urls_on_page(page: Any, final_url: str) -> list[str]:
+    """Read job links from one rendered listing page.
+
+    Company pages contain a ``similar-job-card`` recommendation rail.  Only
+    links inside ``job-card-box`` are part of the company's advertised jobs;
+    using the broad selector there would mix recommendations into the
+    snapshot.  Search pages and direct listing URLs retain the broad fallback
+    because they do not expose the company-card wrapper consistently.
+    """
+    selectors = (JOB_CARD_SELECTOR,) if _is_company_jobs_url(final_url) else (
+        JOB_CARD_SELECTOR,
+        f"a[href*='{JOB_DETAIL_PATH}']",
+    )
+    detail_urls: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        try:
+            anchors = page.locator(selector)
+            count = await anchors.count()
+        except Exception:
+            continue
+        for index in range(count):
+            try:
+                href = await anchors.nth(index).get_attribute("href")
+            except Exception:
+                continue
+            job_url = _canonical_url(href or "", final_url)
+            if job_url and _is_boss_url(job_url) and job_url not in seen:
+                seen.add(job_url)
+                detail_urls.append(job_url)
+        # The strict selector is authoritative for company pages.  Do not
+        # fall back to recommendation links just because a card is lazy.
+        if detail_urls or _is_company_jobs_url(final_url):
+            break
+    return detail_urls
+
+
+async def _pagination_targets(page: Any, final_url: str) -> list[tuple[str, str]]:
+    """Return distinct BOSS pagination tokens and optional hrefs.
+
+    BOSS currently renders these anchors as ``href="javascript:;"`` and
+    handles the transition in JavaScript.  Keep the ``ka`` token so callers
+    can click the anchor when no navigable href is available, while retaining
+    support for a normal href if the site changes its markup.
+    """
+    if not _is_company_jobs_url(final_url):
+        return []
+    try:
+        anchors = page.locator(PAGINATION_SELECTOR)
+        count = await anchors.count()
+    except Exception:
+        return []
+    targets: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index in range(count):
+        try:
+            anchor = anchors.nth(index)
+            href = await anchor.get_attribute("href")
+            token = (await anchor.get_attribute("ka") or "").strip().lower()
+        except Exception:
+            continue
+        # A page-all anchor is a real final page in BOSS's company listing;
+        # preserve it instead of assuming numeric pages are contiguous.
+        if not token.startswith("page-"):
+            continue
+        target = _canonical_url(href or "", final_url, preserve_query=True)
+        key = token or target
+        if not key or key in seen:
+            continue
+        if target and not _is_boss_url(target):
+            continue
+        seen.add(key)
+        targets.append((token, target))
+    return targets[:MAX_LISTING_PAGES]
+
+
+async def _collect_company_listing_pages(page: Any, url: str, initial_url: str) -> tuple[str, list[str], int | None, bool]:
+    """Collect company-card links across BOSS pagination.
+
+    Returns ``(current_final_url, detail_urls, advertised_count, failed)``.
+    ``failed`` means a pagination target could not be rendered or was sent to
+    a login/security page, so callers can preserve the blocked safeguard.
+    """
+    final_url = page.url or initial_url or url
+    body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
+    advertised_count = _advertised_listing_count(body)
+    detail_urls = await _detail_urls_on_page(page, final_url)
+    if not _is_company_jobs_url(final_url) or advertised_count is None:
+        return final_url, detail_urls, advertised_count, False
+    if len(detail_urls) >= advertised_count:
+        return final_url, detail_urls, advertised_count, False
+
+    targets = await _pagination_targets(page, final_url)
+    if not targets:
+        return final_url, detail_urls, advertised_count, True
+
+    seen = set(detail_urls)
+    failed = False
+    # The first anchor often points to the current page.  Navigating it again
+    # is harmless, and using every advertised target handles both numeric
+    # pages and the special ``page-all`` token without guessing page size.
+    for token, target in targets:
+        if len(seen) >= advertised_count:
+            break
+        try:
+            if target:
+                await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+            else:
+                # JS-backed anchors expose only ``ka=page-N`` and use a click
+                # handler to fetch the next page.  Re-locate by token after
+                # each transition because the listing DOM is replaced.
+                anchor = page.locator(f"a[ka='{token}']").first
+                await anchor.click(timeout=30_000)
+            await page.wait_for_timeout(1000)
+            current = page.url or target
+            page_title = _clean(await page.title(), 500)
+            page_body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
+            if _looks_like_blocked(current, page_title, page_body) or _looks_like_login_required_listing(page_body):
+                failed = True
+                break
+            current_urls = await _detail_urls_on_page(page, current)
+            for detail_url in current_urls:
+                if detail_url not in seen:
+                    seen.add(detail_url)
+                    detail_urls.append(detail_url)
+        except Exception:
+            failed = True
+            break
+    return page.url or final_url, detail_urls, advertised_count, failed
+
+
+async def _extract_listing(
+    page: Any,
+    url: str,
+) -> tuple[CaptureResult, list[str]]:
     await page.wait_for_timeout(1500)
     title = _clean(await page.title(), 500)
     body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
@@ -389,22 +542,7 @@ async def _extract_listing(page: Any, url: str) -> tuple[CaptureResult, list[str
     if _looks_like_blocked(final_url, title, body):
         return CaptureResult(url, title, "blocked", "当前 BOSS 页面要求登录、安全验证或未完成加载。", []), []
 
-    detail_urls: list[str] = []
-    seen: set[str] = set()
-    anchors = page.locator(f"a[href*='{JOB_DETAIL_PATH}']")
-    try:
-        count = await anchors.count()
-    except Exception:
-        count = 0
-    for index in range(count):
-        try:
-            href = await anchors.nth(index).get_attribute("href")
-        except Exception:
-            continue
-        job_url = _canonical_url(href or "", final_url)
-        if job_url and _is_boss_url(job_url) and job_url not in seen:
-            seen.add(job_url)
-            detail_urls.append(job_url)
+    detail_urls = await _detail_urls_on_page(page, final_url)
 
     # A logged-out company page may expose a handful of cards before showing
     # a "登录后查看更多职位" gate.  Do not treat those visible cards as a
@@ -425,22 +563,30 @@ async def _extract_listing(page: Any, url: str) -> tuple[CaptureResult, list[str
     # total, the DOM is incomplete.  Treat it as blocked only for the company
     # jobs route; search pages can legitimately paginate or lazy-load results.
     advertised_count = _advertised_listing_count(body)
-    if (
-        _is_company_jobs_url(final_url)
-        and advertised_count is not None
-        and len(detail_urls) < advertised_count
-    ):
+    pagination_failed = False
+    if _is_company_jobs_url(final_url) and advertised_count is not None and len(detail_urls) < advertised_count:
+        try:
+            final_url, detail_urls, advertised_count, pagination_failed = await _collect_company_listing_pages(
+                page,
+                url,
+                final_url,
+            )
+        except Exception:
+            pagination_failed = True
+    if _is_company_jobs_url(final_url) and advertised_count is not None and len(detail_urls) < advertised_count:
+        reason = "分页未完整加载" if pagination_failed else "只加载了部分职位"
         return CaptureResult(
             url,
             title,
             "blocked",
-            f"BOSS 公司职位页只加载了部分职位（已发现 {len(detail_urls)}/{advertised_count}），请先登录后重试。",
+            f"BOSS 公司职位页{reason}（已发现 {len(detail_urls)}/{advertised_count}），请先登录后重试。",
             [],
         ), []
 
     # A direct detail URL is a valid source link and should still be captured.
-    if JOB_DETAIL_PATH in (urlsplit(final_url).path or "") and final_url not in seen:
-        detail_urls.insert(0, _canonical_url(final_url))
+    direct_url = _canonical_url(final_url)
+    if JOB_DETAIL_PATH in (urlsplit(final_url).path or "") and direct_url and direct_url not in detail_urls:
+        detail_urls.insert(0, direct_url)
 
     status = "ok" if detail_urls else "partial"
     error = "" if detail_urls else "当前页面没有发现可识别的 Boss 职位链接。"
@@ -541,15 +687,23 @@ async def _run(args: argparse.Namespace) -> int:
     had_blocked = False
     async with async_playwright() as playwright:
         try:
-            context = await playwright.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=not args.headed,
-                viewport={"width": 1440, "height": 1100},
-                locale="zh-CN",
-                user_agent=(
+            launch_options = {
+                "headless": not args.headed,
+                "viewport": {"width": 1440, "height": 1100},
+                "locale": "zh-CN",
+                "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 ),
+            }
+            # Set BOSS_BROWSER_CHANNEL=chrome to use the installed Chrome
+            # binary for a headed login.  Leaving it unset preserves the
+            # bundled Playwright browser used by scheduled headless runs.
+            if BROWSER_CHANNEL:
+                launch_options["channel"] = BROWSER_CHANNEL
+            context = await playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                **launch_options,
             )
         except Exception as exc:
             print(f"无法启动持久化浏览器 profile {profile_dir}: {exc}", file=sys.stderr)
@@ -558,7 +712,7 @@ async def _run(args: argparse.Namespace) -> int:
 
         try:
             if args.wait_for_login:
-                login_page = await context.new_page()
+                login_page = await _login_page_for_context(context)
                 try:
                     login_target = links[0].url if links else DEFAULT_LOGIN_URL
                     await login_page.goto(login_target, wait_until="domcontentloaded", timeout=30_000)
@@ -613,7 +767,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headed", action="store_true", help="显示浏览器；首次登录或人工验证时使用")
     parser.add_argument("--headless", action="store_true", help="显式使用无头模式（默认也是无头）")
     parser.add_argument("--wait-for-login", type=int, default=0, metavar="SECONDS", help="先打开 BOSS 页面等待人工登录，再开始采集；需 --headed")
-    parser.add_argument("--max-jobs", type=int, default=40, help="每个源最多采集多少个职位详情")
+    parser.add_argument("--max-jobs", type=int, default=100, help="每个源最多采集多少个职位详情")
     parser.add_argument("--detail-delay-ms", type=int, default=900, help="职位详情之间的等待毫秒数")
     return parser
 

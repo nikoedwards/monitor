@@ -12,9 +12,12 @@ from tools.boss_browser_worker import (
     CaptureResult,
     HiringLink,
     _collect_link,
+    _collect_company_listing_pages,
     _extract_listing,
+    _login_page_for_context,
     _post_capture,
     _rows_to_links,
+    build_parser,
 )
 
 
@@ -45,6 +48,92 @@ class _AnchorLocator:
         return self.anchors[index]
 
 
+class _PagedAnchor(_Anchor):
+    def __init__(self, page, token):
+        super().__init__("javascript:;")
+        self.page = page
+        self.token = token
+
+    async def get_attribute(self, name):
+        if name == "ka":
+            return self.token
+        return await super().get_attribute(name)
+
+    async def click(self, timeout=None):
+        self.page.select_page(self.token)
+
+
+class _PagedAnchorLocator:
+    def __init__(self, anchors):
+        self.anchors = anchors
+
+    @property
+    def first(self):
+        return self.anchors[0]
+
+    async def count(self):
+        return len(self.anchors)
+
+    def nth(self, index):
+        return self.anchors[index]
+
+
+class _PagedListingPage:
+    """Minimal Playwright page double for BOSS JS-backed pagination."""
+
+    def __init__(self, pages, recommendations=None, url="https://www.zhipin.com/gongsi/job/company.html"):
+        self.pages = pages
+        self.recommendations = recommendations or []
+        self.url = url
+        self.page_index = 0
+        self._title = "Plaud招聘"
+
+    @property
+    def current_urls(self):
+        return self.pages[self.page_index]
+
+    def select_page(self, token):
+        if token == "page-1":
+            self.page_index = 0
+        elif token == "page-2":
+            self.page_index = 1
+        elif token == "page-all":
+            self.page_index = 2
+
+    async def wait_for_timeout(self, _milliseconds):
+        return None
+
+    async def title(self):
+        return self._title
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.url = url
+
+    def locator(self, selector):
+        if selector == "body":
+            return _TextLocator(f"Plaud招聘 招聘职位(44)")
+        if "a[ka^='page-']" in selector:
+            return _PagedAnchorLocator([_PagedAnchor(self, token) for token in ("page-1", "page-2", "page-all")])
+        if "a[ka='" in selector:
+            token = selector.split("a[ka='")[1].split("'")[0]
+            return _PagedAnchorLocator([_PagedAnchor(self, token)])
+        if "job-card-box" in selector:
+            return _AnchorLocator(self.current_urls)
+        if "a[href*='/job_detail/']" in selector:
+            return _AnchorLocator([*self.current_urls, *self.recommendations])
+        return _TextLocator("")
+
+
+class _LoginContext:
+    def __init__(self, pages):
+        self.pages = pages
+
+
+class _LoginPage:
+    def __init__(self, url):
+        self.url = url
+
+
 class _ListingPage:
     def __init__(self, body, hrefs, url, title="Plaud招聘"):
         self.body = body
@@ -61,7 +150,7 @@ class _ListingPage:
     def locator(self, selector):
         if selector == "body":
             return _TextLocator(self.body)
-        if "a[href*='/job_detail/']" in selector:
+        if "job_detail" in selector:
             return _AnchorLocator(self.hrefs)
         return _TextLocator("")
 
@@ -309,6 +398,49 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
         self.assertEqual(capture.page_status, "ok")
         self.assertEqual(detail_urls, hrefs)
+
+    def test_logged_in_company_listing_walks_js_pagination_and_skips_recommendations(self):
+        pages = [
+            [f"https://www.zhipin.com/job_detail/{index}.html" for index in range(1, 16)],
+            [f"https://www.zhipin.com/job_detail/{index}.html" for index in range(16, 31)],
+            [f"https://www.zhipin.com/job_detail/{index}.html" for index in range(31, 45)],
+        ]
+        recommendations = [
+            "https://www.zhipin.com/job_detail/recommended-1.html",
+            "https://www.zhipin.com/job_detail/recommended-2.html",
+        ]
+        page = _PagedListingPage(pages, recommendations=recommendations)
+        capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
+        self.assertEqual(capture.page_status, "ok")
+        self.assertEqual(len(detail_urls), 44)
+        self.assertNotIn("https://www.zhipin.com/job_detail/recommended-1.html", detail_urls)
+        self.assertEqual(detail_urls[0], pages[0][0])
+        self.assertEqual(detail_urls[-1], pages[2][-1])
+
+    def test_company_pagination_helper_reports_complete_count(self):
+        pages = [
+            [f"https://www.zhipin.com/job_detail/{index}.html" for index in range(1, 16)],
+            [f"https://www.zhipin.com/job_detail/{index}.html" for index in range(16, 31)],
+            [f"https://www.zhipin.com/job_detail/{index}.html" for index in range(31, 45)],
+        ]
+        page = _PagedListingPage(pages)
+        final_url, detail_urls, advertised_count, failed = asyncio.run(
+            _collect_company_listing_pages(page, page.url, page.url)
+        )
+        self.assertEqual(final_url, page.url)
+        self.assertEqual(advertised_count, 44)
+        self.assertEqual(len(detail_urls), 44)
+        self.assertFalse(failed)
+
+    def test_max_jobs_default_covers_company_pages_larger_than_forty(self):
+        args = build_parser().parse_args([])
+        self.assertGreaterEqual(args.max_jobs, 44)
+
+    def test_headed_login_reuses_initial_blank_tab(self):
+        blank = _LoginPage("about:blank")
+        existing = _LoginPage("https://www.zhipin.com/")
+        selected = asyncio.run(_login_page_for_context(_LoginContext([blank, existing])))
+        self.assertIs(selected, blank)
 
     def test_listing_redirected_to_about_blank_is_blocked(self):
         page = _ListingPage(
