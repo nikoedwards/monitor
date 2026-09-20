@@ -11,6 +11,7 @@ import json
 import re
 from datetime import datetime, timezone
 from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 
 from ..fetchers import FetchError, fetch_text
@@ -22,6 +23,7 @@ _BROWSER_USER_AGENT = (
 )
 _INSTAGRAM_APP_ID = "936619743392459"
 _MAX_POSTS = 12
+_INSTAGRAM_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
 def _number(value: Any) -> int | None:
@@ -306,6 +308,96 @@ def _instagram_html_date(value: str) -> str | None:
         return None
 
 
+def _instagram_shortcode_id(shortcode: str) -> str:
+    """Decode Instagram's base64-like shortcode into its numeric media id."""
+    value = 0
+    try:
+        for char in shortcode:
+            value = (value << 6) + _INSTAGRAM_SHORTCODE_ALPHABET.index(char)
+    except (TypeError, ValueError):
+        return ""
+    return str(value) if value else ""
+
+
+class _InstagramAnchorParser(HTMLParser):
+    """Read post links and their image metadata from rendered profile HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.posts: list[dict[str, str]] = []
+        self._anchor: dict[str, str] | None = None
+
+    def _finish_anchor(self) -> None:
+        if self._anchor is None:
+            return
+        self._anchor["text"] = " ".join(self._anchor["text"].split())
+        self.posts.append(self._anchor)
+        self._anchor = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "a":
+            href = unescape(values.get("href", "")).strip()
+            match = re.search(r"/(p|reel|reels)/([A-Za-z0-9_-]+)(?:[/?#]|$)", href, flags=re.I)
+            if match:
+                self._finish_anchor()
+                self._anchor = {
+                    "path": match.group(1).lower(),
+                    "shortcode": match.group(2),
+                    "href": href,
+                    "text": "",
+                    "alt": "",
+                    "image_url": "",
+                }
+        elif tag.lower() == "img" and self._anchor is not None:
+            if not self._anchor["alt"]:
+                self._anchor["alt"] = unescape(values.get("alt", "")).strip()
+            if not self._anchor["image_url"]:
+                self._anchor["image_url"] = unescape(
+                    values.get("src", "") or values.get("data-src", "")
+                ).strip()
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor is not None:
+            self._anchor["text"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a":
+            self._finish_anchor()
+
+
+def _instagram_html_anchor_posts(html: str) -> tuple[str, list[dict[str, str]]]:
+    parser = _InstagramAnchorParser()
+    try:
+        parser.feed(html or "")
+        parser.close()
+        parser._finish_anchor()
+    except (TypeError, ValueError):
+        return "", []
+
+    # Instagram repeats each post link in responsive/SEO markup. Preserve the
+    # first, most complete metadata for each shortcode.
+    unique: dict[str, dict[str, str]] = {}
+    for item in parser.posts:
+        shortcode = item.get("shortcode", "")
+        if not shortcode:
+            continue
+        previous = unique.get(shortcode)
+        item_score = len(item.get("alt", "")) + len(item.get("image_url", ""))
+        previous_score = len(previous.get("alt", "")) + len(previous.get("image_url", "")) if previous else -1
+        if item_score > previous_score:
+            unique[shortcode] = item
+
+    display_name = ""
+    for item in unique.values():
+        alt = item.get("alt", "")
+        match = re.search(r"(?:Photo|Video)\s+by\s+(.+?)\s+on\s+", alt, flags=re.I)
+        if match:
+            display_name = match.group(1).strip()
+            break
+    return display_name, list(unique.values())
+
+
 def instagram_posts_from_html(
     html: str,
     account_url: str,
@@ -316,8 +408,6 @@ def instagram_posts_from_html(
     """Normalize public posts from Instagram's server-rendered profile HTML."""
     profile, edges = _instagram_html_nodes(html)
     username = str(profile.get("username") or handle).strip().lstrip("@").lower()
-    if not username or not edges:
-        return []
     if profile.get("is_private"):
         raise FetchError("Instagram 账号为私密账号；自采仅支持公开账号。")
 
@@ -355,7 +445,7 @@ def instagram_posts_from_html(
             author=display_name,
             author_handle=username,
             author_url=account_url,
-            avatar_url=str(node.get("display_uri") or profile_pic),
+            avatar_url=profile_pic,
             occurred_at=_instagram_html_date(accessibility),
             follower_count=follower_count,
             raw={
@@ -366,6 +456,47 @@ def instagram_posts_from_html(
                 "is_verified": bool(profile.get("is_verified")),
                 "profile_pic_url": profile_pic,
                 "accessibility_caption": accessibility,
+            },
+        ))
+
+    if posts:
+        return posts
+
+    # Some logged-out responses omit the Polaris JSON and expose only the
+    # server-rendered post anchors/images. This is still public metadata and
+    # remains available when Instagram returns 401 for its legacy APIs.
+    dom_name, anchor_posts = _instagram_html_anchor_posts(html)
+    if dom_name and display_name == username:
+        display_name = dom_name
+    for item in anchor_posts[: max(1, limit)]:
+        shortcode = item.get("shortcode", "").strip()
+        if not shortcode or shortcode in seen:
+            continue
+        seen.add(shortcode)
+        path = "reel" if item.get("path", "").lower() in {"reel", "reels"} else "p"
+        alt = item.get("alt", "").strip()
+        caption = alt or item.get("text", "").strip()
+        is_video = item.get("path", "").lower() in {"reel", "reels"} or alt.lower().startswith("video ")
+        posts.append(CreatorPost(
+            platform="instagram",
+            external_id=_instagram_shortcode_id(shortcode) or shortcode,
+            url=f"https://www.instagram.com/{path}/{shortcode}/",
+            title=(caption or f"Instagram post by @{username}")[:200],
+            body=caption or f"Instagram post by @{username}",
+            author=display_name,
+            author_handle=username,
+            author_url=account_url,
+            avatar_url=item.get("image_url", "") or profile_pic,
+            occurred_at=_instagram_html_date(alt or item.get("text", "")),
+            follower_count=follower_count,
+            raw={
+                "collection_method": "instagram_public_html_dom",
+                "shortcode": shortcode,
+                "post_type": "video" if is_video else "image",
+                "is_video": is_video,
+                "is_verified": bool(profile.get("is_verified")),
+                "profile_pic_url": profile_pic,
+                "accessibility_caption": alt,
             },
         ))
     return posts

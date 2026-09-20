@@ -202,6 +202,49 @@ class PublicSocialNormalizerTests(unittest.TestCase):
         self.assertEqual(posts[0].follower_count, 147081)
         self.assertEqual(posts[0].raw["collection_method"], "instagram_public_html")
 
+    def test_instagram_rendered_post_anchors_work_without_polaris_json(self):
+        html = """
+        <html><body>
+          <a href="/plaud_official/p/Ddba4r5ABBq/">
+            <div><img alt="Photo by Plaud | Amplify Human Intelligence on September 18, 2026."
+              src="https://cdn.example/post.jpg"></div>
+          </a>
+          <a href="https://www.instagram.com/plaud_official/reel/Dci2CEQyefX/">
+            <img alt="Video by Plaud | Amplify Human Intelligence on September 1, 2026."
+              src="https://cdn.example/reel.jpg">
+          </a>
+        </body></html>
+        """
+        posts = instagram_posts_from_html(
+            html,
+            "https://www.instagram.com/plaud_official/",
+            "plaud_official",
+        )
+
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[0].external_id, "3988900139593896042")
+        self.assertEqual(posts[0].url, "https://www.instagram.com/p/Ddba4r5ABBq/")
+        self.assertEqual(posts[0].occurred_at, "2026-09-18T12:00:00+00:00")
+        self.assertEqual(posts[0].raw["collection_method"], "instagram_public_html_dom")
+        self.assertEqual(posts[1].url, "https://www.instagram.com/reel/Dci2CEQyefX/")
+        self.assertTrue(posts[1].raw["is_video"])
+
+    def test_instagram_401_responses_use_rendered_post_anchors(self):
+        html = (
+            '<a href="/plaud_official/p/Ddba4r5ABBq/">'
+            '<img alt="Photo by Plaud | Amplify Human Intelligence on September 18, 2026." '
+            'src="https://cdn.example/post.jpg"></a>'
+        )
+        posts = instagram_posts_from_responses(
+            {"profile_status": 401, "feed_status": 401, "html": html},
+            "https://www.instagram.com/plaud_official/",
+            "plaud_official",
+        )
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].external_id, "3988900139593896042")
+        self.assertEqual(posts[0].raw["collection_method"], "instagram_public_html_dom")
+
     def test_tiktok_playlist_entries_become_posts_with_metrics(self):
         profile = {
             "user": {
