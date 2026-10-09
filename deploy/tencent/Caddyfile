@@ -1,0 +1,4 @@
+{$MONITOR_SITE} {
+    encode gzip zstd
+    reverse_proxy monitor:8790
+}
