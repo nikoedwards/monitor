@@ -1,0 +1,58 @@
+name: monitor-vps
+services:
+  monitor:
+    image: ${MONITOR_IMAGE:?Set the verified release image}
+    env_file:
+      - /opt/monitor/shared/app.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8790
+      # Keep disabled during data acceptance. Restore the original schedule
+      # only after the old Railway writers and local API jobs are accounted for.
+      MONITOR_SCHEDULER: ${MONITOR_SCHEDULER:-0}
+    ports:
+      - "127.0.0.1:8790:8790"
+    volumes:
+      - type: bind
+        source: /opt/monitor/shared/data
+        target: /app/data
+        bind:
+          create_host_path: false
+    init: true
+    shm_size: 1gb
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 90s
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: [proxy]
+    environment:
+      MONITOR_SITE: ${MONITOR_SITE:?Set a verified public domain before enabling the proxy}
+    ports:
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:80:80"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:443:443"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
