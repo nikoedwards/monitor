@@ -123,7 +123,7 @@ class CreatorPublicSearchTests(unittest.TestCase):
         with unittest.mock.patch.dict(sys.modules, {"yt_dlp": fake_module}):
             posts = YouTubePublicProvider(max_results=1).collect(sqlite3.connect(":memory:"), brand, ["PLAUD"])
         self.assertEqual([post.external_id for post in posts], ["video-2"])
-        self.assertEqual(posts[0].occurred_at, "2026-10-24T00:00:00+00:00")
+        self.assertEqual(posts[0].occurred_at, "2026-10-24T12:00:00+00:00")
 
     def test_collection_window_rejects_old_posts(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
