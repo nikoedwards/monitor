@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
-from ...fetchers import FetchError, fetch_json, fetch_text
+from ...fetchers import FetchError, fetch_json, fetch_page, fetch_text
 from ...util import clean_text
 from .base import CreatorPost, CreatorProvider, collection_since, recent_creator_posts
 from .evidence import parse_transcript_payload, transcript_matches
@@ -189,8 +189,16 @@ class YouTubePublicProvider(CreatorProvider):
             "extractor_retries": 1,
             "dateafter": collection_since(brand).strftime("%Y%m%d"),
         }
+        flat_options = {
+            **options,
+            # YouTube often allows search results while blocking watch-page
+            # extraction with a bot-check.  Flat search is the safe fallback;
+            # page metadata is recovered below where possible.
+            "extract_flat": True,
+        }
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
+                flat_downloader = yt_dlp.YoutubeDL(flat_options)
                 after = collection_since(brand).date().isoformat()
                 for query in [str(q).strip() for q in queries if str(q).strip()][:8]:
                     try:
@@ -200,8 +208,22 @@ class YouTubePublicProvider(CreatorProvider):
                         successful_queries += 1
                     except Exception as exc:
                         failures.append(str(exc)[:160])
-                        continue
+                        # Keep collection useful when only watch-page details
+                        # are blocked.  Search results still expose the video
+                        # id/channel/title; the public watch page usually
+                        # exposes a schema.org uploadDate for the time window.
+                        try:
+                            result = flat_downloader.extract_info(
+                                f"ytsearch{self.max_results}:{query} after:{after}", download=False
+                            )
+                            if not isinstance(result, dict) or not (result.get("entries") or []):
+                                continue
+                            successful_queries += 1
+                        except Exception:
+                            continue
                     for item in (result or {}).get("entries") or []:
+                        if isinstance(item, dict) and item.get("_type") == "url":
+                            item = self._recover_watch_metadata(item)
                         post = self._normalize(item, query)
                         if not post:
                             continue
@@ -223,6 +245,46 @@ class YouTubePublicProvider(CreatorProvider):
         if successful_queries == 0 and failures:
             raise FetchError(f"YouTube 公开搜索失败：{failures[0]}")
         return recent_creator_posts(list(posts.values()), brand)
+
+    @staticmethod
+    def _recover_watch_metadata(item: dict) -> dict:
+        """Fill date/description fields from public watch-page JSON-LD.
+
+        yt-dlp's flat search result does not include a publication date, while
+        its full watch extraction may be rejected by YouTube's bot check.  A
+        normal page request is still commonly allowed and exposes a bounded,
+        structured ``VideoObject`` payload.
+        """
+        if not isinstance(item, dict):
+            return item
+        url = str(item.get("webpage_url") or item.get("url") or "").strip()
+        if not url:
+            video_id = str(item.get("id") or "").strip()
+            url = f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
+        if not url:
+            return item
+        try:
+            page = fetch_page(url, timeout=18)
+        except (FetchError, OSError, ValueError):
+            return item
+        structured = page.get("json_ld") or []
+        video = next(
+            (entry for entry in structured if isinstance(entry, dict) and entry.get("@type") == "VideoObject"),
+            None,
+        )
+        if not video:
+            return item
+        upload_date = str(video.get("uploadDate") or "").strip()
+        if upload_date and not item.get("upload_date"):
+            item["upload_date"] = upload_date[:10].replace("-", "")
+        if video.get("description") and not item.get("description"):
+            item["description"] = video.get("description")
+        if video.get("name") and not item.get("title"):
+            item["title"] = video.get("name")
+        if video.get("thumbnailUrl") and not item.get("thumbnail"):
+            item["thumbnail"] = video.get("thumbnailUrl")
+        item.setdefault("webpage_url", url)
+        return item
 
     @staticmethod
     def _transcript_terms(brand: dict, query: str, product_terms: list[str] | None = None) -> list[str]:
