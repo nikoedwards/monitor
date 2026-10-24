@@ -5,10 +5,12 @@ import json
 import re
 import sqlite3
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .. import ai
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
@@ -19,6 +21,8 @@ from .common import build_trend, get_conn, query_records, resolve_window
 router = APIRouter(prefix="/api", tags=["content"])
 
 _LEGACY_FIXED_PUBLICATION_TRAFFIC = {25_000, 80_000, 220_000, 500_000, 1_500_000, 5_000_000}
+_MARKETING_OVERVIEW_CACHE: dict[tuple, tuple[float, dict]] = {}
+_MARKETING_SUMMARY_TTL_SECONDS = 600
 
 VOC_SOURCE_CATALOG = (
     {"key": "sales_reviews", "label": "销售渠道评论", "description": "Amazon、独立站等销售平台的商品评论"},
@@ -814,3 +818,226 @@ def marketing_summary(
         "trend": build_trend(records, start, end),
         "recent": records[:50],
     }
+
+
+# -------------------------------------------------------- marketing overview
+def _marketing_number(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _marketing_delta(current: object, previous: object) -> dict:
+    if current is None:
+        return {"value": None, "previous": previous, "delta": None, "delta_pct": None}
+    current_value = _marketing_number(current)
+    previous_value = _marketing_number(previous)
+    delta = current_value - previous_value
+    return {
+        "value": current,
+        "previous": previous,
+        "delta": round(delta, 2),
+        "delta_pct": None if previous_value == 0 else round(delta / abs(previous_value) * 100, 1),
+    }
+
+
+def _marketing_status(conn: sqlite3.Connection, brand_id: str, has_data: bool) -> str:
+    if has_data:
+        return "ready"
+    try:
+        configured = conn.execute(
+            "SELECT COUNT(*) AS c FROM links WHERE brand_id = ? AND dimension = 'marketing'",
+            (brand_id,),
+        ).fetchone()["c"]
+    except sqlite3.OperationalError:
+        configured = 0
+    return "configured_no_data" if configured else "empty"
+
+
+def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel: str, start: str, end: str) -> dict:
+    records = query_records(
+        conn,
+        {"brand_id": brand_id, "dimension": "marketing", "channel": channel, "start_date": start, "end_date": end},
+        limit=5000,
+    )
+    totals = {"views": 0, "likes": 0, "comments": 0, "engagement": 0}
+    for record in records:
+        metrics = record.get("metrics") or {}
+        for key in totals:
+            totals[key] += int(_marketing_number(metrics.get(key)))
+    posts = sum(1 for record in records if record.get("data_type") != "community_reply")
+    replies = sum(1 for record in records if record.get("data_type") == "community_reply")
+    last_data_at = max((record.get("occurred_at") or "" for record in records), default=None)
+    base = {
+        "status": _marketing_status(conn, brand_id, bool(records)),
+        "total": len(records),
+        "posts": posts,
+        "replies": replies,
+        "total_views": totals["views"],
+        "total_likes": totals["likes"],
+        "total_comments": totals["comments"],
+        "total_engagement": totals["engagement"],
+        "trend": build_trend(records, start, end),
+        "last_data_at": last_data_at,
+    }
+    if channel == "media":
+        reach = 0
+        publications: set[str] = set()
+        ave = 0
+        tiers = Counter()
+        for record in records:
+            metrics = record.get("metrics") or {}
+            domain = str(metrics.get("publication_domain") or record.get("platform") or "unknown").strip().lower()
+            if domain not in publications:
+                publications.add(domain)
+                reach += int(_marketing_number(metrics.get("monthly_traffic") or metrics.get("estimated_reach")))
+            ave += int(_marketing_number(metrics.get("ave")))
+            if metrics.get("media_tier"):
+                tiers[str(metrics["media_tier"])] += 1
+        base.update({"mentions": len(records), "total_reach": reach, "total_ave": ave, "publication_count": len(publications), "by_tier": [{"tier": key, "total": value} for key, value in tiers.most_common()]})
+    elif channel == "creators":
+        handles = set()
+        collab_posts = 0
+        sponsored_posts = 0
+        for record in records:
+            metrics = record.get("metrics") or {}
+            handle = metrics.get("author_handle") or record.get("author")
+            if handle:
+                handles.add(str(handle).lower())
+            collab_posts += 1 if metrics.get("is_collab") else 0
+            sponsored_posts += 1 if metrics.get("is_sponsored") else 0
+        base.update({"creator_count": len(handles), "collab_posts": collab_posts, "sponsored_posts": sponsored_posts})
+    elif channel == "social":
+        base.update({"content_count": len(records), "engagement_rate": round(totals["engagement"] / totals["views"], 6) if totals["views"] else None})
+    elif channel == "community":
+        subchannels = set()
+        for record in records:
+            metrics = record.get("metrics") or {}
+            sub = metrics.get("subreddit") or metrics.get("scope") or record.get("platform")
+            if sub:
+                subchannels.add(str(sub))
+        base.update({"subchannel_count": len(subchannels), "data_source_count": len({record.get("source_id") for record in records if record.get("source_id")})})
+    return base
+
+
+def _marketing_ads_snapshot(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
+    try:
+        rows = conn.execute(
+            "SELECT * FROM ad_entities WHERE brand_id = ? AND date(first_seen_at) <= date(?) AND date(COALESCE(stopped_at, last_seen_at)) >= date(?) ORDER BY last_seen_at DESC",
+            (brand_id, end, start),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    ads = [dict(row) for row in rows]
+    active = [row for row in ads if row.get("active_status") == "active"]
+    new_ads = sum(1 for row in ads if start <= (row.get("first_seen_at") or "")[:10] <= end)
+    stopped_ads = sum(1 for row in ads if start <= (row.get("stopped_at") or "")[:10] <= end)
+    changed_ads = sum(1 for row in ads if (row.get("first_seen_at") or "")[:10] < start and start <= (row.get("updated_at") or "")[:10] <= end)
+    try:
+        daily_rows = conn.execute(
+            "SELECT observed_date AS date, COUNT(*) AS total, SUM(CASE WHEN active_status = 'active' THEN 1 ELSE 0 END) AS active FROM ad_snapshots WHERE brand_id = ? AND date(observed_date) BETWEEN date(?) AND date(?) GROUP BY observed_date ORDER BY observed_date",
+            (brand_id, start, end),
+        ).fetchall()
+        trend = [dict(row) for row in daily_rows]
+    except sqlite3.OperationalError:
+        trend = []
+    for point in trend:
+        point["new"] = sum(1 for row in ads if (row.get("first_seen_at") or "")[:10] == point.get("date"))
+        point["stopped"] = sum(1 for row in ads if (row.get("stopped_at") or "")[:10] == point.get("date"))
+    return {
+        "status": _marketing_status(conn, brand_id, bool(ads)),
+        "total_ads": len(ads), "active_ads": len(active), "new_ads": new_ads,
+        "stopped_ads": stopped_ads, "changed_ads": changed_ads, "trend": trend,
+        "last_data_at": max((row.get("last_seen_at") or "" for row in ads), default=None),
+    }
+
+
+def _marketing_previous_window(start: str, end: str) -> tuple[str, str]:
+    start_day, end_day = date.fromisoformat(start[:10]), date.fromisoformat(end[:10])
+    span = (end_day - start_day).days + 1
+    previous_end = start_day - timedelta(days=1)
+    return (previous_end - timedelta(days=span - 1)).isoformat(), previous_end.isoformat()
+
+
+def _marketing_overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
+    previous_start, previous_end = _marketing_previous_window(start, end)
+    channels = {key: _marketing_channel_snapshot(conn, brand_id, key, start, end) for key in ("media", "creators", "social", "community")}
+    channels["ads"] = _marketing_ads_snapshot(conn, brand_id, start, end)
+    previous_channels = {key: _marketing_channel_snapshot(conn, brand_id, key, previous_start, previous_end) for key in ("media", "creators", "social", "community")}
+    previous_channels["ads"] = _marketing_ads_snapshot(conn, brand_id, previous_start, previous_end)
+    content_total = sum(channels[key].get("total", 0) for key in ("media", "creators", "social", "community"))
+    previous_content_total = sum(previous_channels[key].get("total", 0) for key in ("media", "creators", "social", "community"))
+    total_views = sum(channels[key].get("total_views", 0) for key in ("media", "creators", "social", "community"))
+    total_engagement = sum(channels[key].get("total_engagement", 0) for key in ("media", "creators", "social", "community"))
+    content_ready = content_total > 0
+    kpis = {
+        "content_total": _marketing_delta(content_total if content_ready else None, previous_content_total if previous_content_total else None),
+        "total_views": _marketing_delta(total_views if content_ready else None, sum(previous_channels[key].get("total_views", 0) for key in previous_channels if key != "ads") or None),
+        "total_engagement": _marketing_delta(total_engagement if content_ready else None, sum(previous_channels[key].get("total_engagement", 0) for key in previous_channels if key != "ads") or None),
+        "media_reach": _marketing_delta(channels["media"].get("total_reach") if channels["media"].get("status") == "ready" else None, previous_channels["media"].get("total_reach") if previous_channels["media"].get("status") == "ready" else None),
+        "ads_total": _marketing_delta(channels["ads"].get("total_ads") if channels["ads"].get("status") == "ready" else None, previous_channels["ads"].get("total_ads") if previous_channels["ads"].get("status") == "ready" else None),
+        "ads_active": _marketing_delta(channels["ads"].get("active_ads") if channels["ads"].get("status") == "ready" else None, previous_channels["ads"].get("active_ads") if previous_channels["ads"].get("status") == "ready" else None),
+        "creator_count": _marketing_delta(channels["creators"].get("creator_count") if channels["creators"].get("status") == "ready" else None, previous_channels["creators"].get("creator_count") if previous_channels["creators"].get("status") == "ready" else None),
+        "community_replies": _marketing_delta(channels["community"].get("replies") if channels["community"].get("status") == "ready" else None, previous_channels["community"].get("replies") if previous_channels["community"].get("status") == "ready" else None),
+    }
+    signals = []
+    if channels["ads"].get("changed_ads") or channels["ads"].get("new_ads") or channels["ads"].get("stopped_ads"):
+        signals.append({"domain": "ads", "severity": "medium", "title": "广告素材有生命周期变化", "detail": f"新增 {channels['ads'].get('new_ads', 0)} 条、停止 {channels['ads'].get('stopped_ads', 0)} 条、更新 {channels['ads'].get('changed_ads', 0)} 条。", "href": f"/brand/{brand_id}/marketing"})
+    if channels["media"].get("total_reach", 0) and channels["media"].get("total", 0):
+        signals.append({"domain": "media", "severity": "low", "title": "媒体声量已覆盖", "detail": f"本期收录 {channels['media']['total']} 篇报道，估算触达 {channels['media']['total_reach']:,}。", "href": f"/brand/{brand_id}/marketing"})
+    for key, label in (("creators", "红人达人"), ("social", "社交媒体"), ("community", "社群")):
+        previous_total = previous_channels[key].get("total", 0)
+        current_total = channels[key].get("total", 0)
+        if current_total and previous_total and current_total < previous_total * 0.7:
+            signals.append({"domain": key, "severity": "medium", "title": f"{label}声量下降", "detail": f"本期 {current_total:,} 条，较上一周期减少 {previous_total - current_total:,} 条。", "href": f"/brand/{brand_id}/marketing"})
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    signals.sort(key=lambda item: severity_order.get(item["severity"], 9))
+    yesterday_day = date.fromisoformat(end[:10]) - timedelta(days=1)
+    yesterday = {"date": yesterday_day.isoformat(), "channels": {key: _marketing_channel_snapshot(conn, brand_id, key, yesterday_day.isoformat(), yesterday_day.isoformat()) if key != "ads" else _marketing_ads_snapshot(conn, brand_id, yesterday_day.isoformat(), yesterday_day.isoformat()) for key in channels}}
+    yesterday["has_data"] = any((value.get("total", 0) or value.get("total_ads", 0)) for value in yesterday["channels"].values())
+    coverage = {key: {"status": value.get("status", "empty"), "last_data_at": value.get("last_data_at")} for key, value in channels.items()}
+    return {"range": {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end}, "kpis": kpis, "modules": channels, "coverage": coverage, "yesterday": yesterday, "signals": signals[:12]}
+
+
+def _marketing_fallback_summary(payload: dict) -> dict:
+    modules = payload.get("modules") or {}
+    total = sum((modules.get(key) or {}).get("total", 0) for key in ("media", "creators", "social", "community"))
+    ads = modules.get("ads") or {}
+    summary = f"本期营销共收录 {total:,} 条内容，广告库有 {ads.get('total_ads', 0):,} 条素材。"
+    active = [item for item in (payload.get("signals") or []) if item.get("severity") in {"high", "medium"}]
+    highlights = [{"domain": item.get("domain"), "severity": item.get("severity"), "title": item.get("title"), "detail": item.get("detail")} for item in active[:6]]
+    focus = [{"domain": item.get("domain"), "action": f"查看{item.get('title', '营销信号')}", "reason": item.get("detail", "")} for item in active[:4]]
+    yesterday = payload.get("yesterday") or {}
+    yesterday_total = sum((value or {}).get("total", 0) + (value or {}).get("total_ads", 0) for value in (yesterday.get("channels") or {}).values())
+    return {"mode": "fallback", "summary": summary, "yesterday_summary": f"{yesterday.get('date', '')}：营销相关新增或变化 {yesterday_total:,} 条。" if yesterday.get("has_data") else f"{yesterday.get('date', '')}：暂无营销数据。", "highlights": highlights, "focus": focus, "caveats": ["当前为确定性系统速览；配置大模型后可生成更完整的营销总结。"], "range": payload.get("range")}
+
+
+@router.get("/marketing/overview")
+def marketing_overview(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
+    start, end = resolve_window(days, start_date, end_date)
+    return _marketing_overview_payload(conn, brand_id, start, end)
+
+
+@router.get("/marketing/overview/summary")
+def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+    start, end = resolve_window(days, start_date, end_date)
+    payload = _marketing_overview_payload(conn, brand_id, start, end)
+    cache_key = (brand_id, start, end)
+    now = time.monotonic()
+    cached = _MARKETING_OVERVIEW_CACHE.get(cache_key)
+    if not refresh and cached and now - cached[0] < _MARKETING_SUMMARY_TTL_SECONDS:
+        return {**cached[1], "cached": True}
+    if not ai.is_configured(conn):
+        result = _marketing_fallback_summary(payload)
+    else:
+        try:
+            from .. import ai
+            evidence = {"range": payload["range"], "coverage": payload["coverage"], "yesterday": payload["yesterday"], "signals": payload["signals"], "modules": {key: {field: value for field, value in module.items() if field != "trend"} for key, module in payload["modules"].items()}}
+            result = {"mode": "ai", **ai.summarize_marketing_overview(conn, evidence)}
+        except ai.LlmError:
+            result = _marketing_fallback_summary(payload)
+            result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
+    result.update({"range": payload["range"], "cached": False})
+    _MARKETING_OVERVIEW_CACHE[cache_key] = (now, result)
+    return result

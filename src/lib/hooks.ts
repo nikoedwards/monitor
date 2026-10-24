@@ -260,6 +260,26 @@ export function useMarketingSummary(brandId?: string, channel?: string, range?: 
   });
 }
 
+export function useMarketingOverview(brandId?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["marketing-overview", brandId, rp],
+    queryFn: () => api.get<any>(`/api/marketing/overview${qs({ brand_id: brandId, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 60_000,
+  });
+}
+
+export function useMarketingOverviewSummary(brandId?: string, range?: TimeRange, refreshKey = 0) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["marketing-overview-summary", brandId, rp, refreshKey],
+    queryFn: () => api.get<any>(`/api/marketing/overview/summary${qs({ brand_id: brandId, refresh: refreshKey > 0, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 10 * 60_000,
+  });
+}
+
 // Ad-library monitoring has a denormalized summary and a card-friendly list.
 // Keep these separate from the generic marketing records so a missing ad
 // source does not make the rest of the marketing page unusable.
