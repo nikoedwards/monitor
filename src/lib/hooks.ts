@@ -198,13 +198,13 @@ export function useVocSummary(brandId?: string, range?: TimeRange, sources?: str
   });
 }
 
-export function useVocRecords(brandId?: string, range?: TimeRange, sources?: string[], limit = 40) {
+export function useVocRecords(brandId?: string, range?: TimeRange, sources?: string[], limit = 40, sentiment?: string) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["voc-records", brandId, rp, sources, limit],
+    queryKey: ["voc-records", brandId, rp, sources, limit, sentiment],
     queryFn: () =>
       api
-        .get<{ records: RecordItem[] }>(`/api/voc/records${qs({ brand_id: brandId, sources: sources?.join(","), limit, ...rp })}`)
+        .get<{ records: RecordItem[] }>(`/api/voc/records${qs({ brand_id: brandId, sources: sources?.join(","), sentiment, limit, ...rp })}`)
         .then((data) => data.records),
     enabled: !!brandId,
   });

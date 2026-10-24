@@ -15,11 +15,12 @@ import {
 import { useParams } from "react-router-dom";
 import { TrendChart } from "../components/charts";
 import { RecordList } from "../components/RecordList";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Select, Spinner, StatCard, Textarea } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { useVocActions, useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
+import { useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import { fmtNum, STATUS_LABEL, TEAM_LABEL } from "../lib/format";
+import { fmtNum, TEAM_LABEL } from "../lib/format";
+import { SmartSummary } from "../components/SmartSummary";
 
 type SourceKey =
   | "sales_reviews"
@@ -59,7 +60,7 @@ const TOPIC_LABEL: Record<string, string> = {
 function priorityView(priority?: string): { level: string; label: string; tone: BadgeTone } {
   if (priority === "urgent") return { level: "P0", label: "立即响应", tone: "negative" };
   if (priority === "high") return { level: "P1", label: "高优先级", tone: "warning" };
-  if (priority === "medium") return { level: "P2", label: "持续跟进", tone: "accent" };
+  if (priority === "medium") return { level: "P2", label: "持续观察", tone: "accent" };
   return { level: "P3", label: "常规观察", tone: "neutral" };
 }
 
@@ -71,14 +72,16 @@ export default function Voice() {
   const [importOpen, setImportOpen] = useState(false);
   const [selectedSources, setSelectedSources] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
   const [sourceDraft, setSourceDraft] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
+  const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
   const { data: summary, isLoading } = useVocSummary(brandId, range, selectedSources);
-  const { data: actions = [] } = useVocActions(brandId);
-  const { data: records = [], isLoading: recordsLoading } = useVocRecords(brandId, range, selectedSources, 40);
+  const { data: records = [], isLoading: recordsLoading } = useVocRecords(brandId, range, selectedSources, 40, sentimentFilter === "all" ? undefined : sentimentFilter);
 
   if (isLoading || !summary) return <Spinner />;
   const totals = summary.totals;
   const p0 = summary.p0 || { total: 0, issue_count: 0, issues: [] };
-  const sourceCounts = Object.fromEntries((summary.source_catalog || []).map((source: any) => [source.key, source.count]));
+  const sourceCatalog = summary.source_catalog || [];
+  const sourceCounts = Object.fromEntries(sourceCatalog.map((source: any) => [source.key, source.count]));
+  const filteredRecords = records;
 
   const openSourcePicker = () => {
     setSourceDraft(selectedSources);
@@ -112,27 +115,37 @@ export default function Voice() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
-            {selectedSources.map((key) => (
-              <span
+            {VOICE_SOURCES.map(({ key }) => (
+              <button
                 key={key}
+                type="button"
+                onClick={() => setSelectedSources([key])}
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px]"
-                style={{ background: "var(--bg-soft-2)", color: "var(--body)" }}
+                title={`只查看${SOURCE_LABEL[key]}`}
+                style={{ background: selectedSources.length === 1 && selectedSources.includes(key) ? "rgba(0,112,243,0.12)" : "var(--bg-soft-2)", color: selectedSources.includes(key) ? "var(--accent)" : "var(--mute)", cursor: "pointer", opacity: selectedSources.includes(key) ? 1 : 0.72 }}
               >
                 {SOURCE_LABEL[key]}
                 <span className="tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(Number(sourceCounts[key] || 0))}</span>
-              </span>
+              </button>
             ))}
+            {selectedSources.length === 1 && (
+              <button type="button" onClick={() => setSelectedSources(ALL_SOURCE_KEYS)} className="text-[12px] px-2 py-1 cursor-pointer" style={{ color: "var(--mute)" }}>显示全部</button>
+            )}
             <button onClick={openSourcePicker} className="text-[12px] px-2 py-1 cursor-pointer" style={{ color: "var(--accent)" }}>更改</button>
           </div>
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <Card>
+        <SectionTitle title="用户之声智能总结" subtitle="结合当前时间范围与数据来源，提炼主要话题、情绪和需要关注的舆情" />
+        <SmartSummary brandId={brandId} dimension="voc" range={range} />
+      </Card>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard label="反馈总量" value={fmtNum(totals.total)} hint={`${selectedSources.length} 个来源`} />
         <StatCard label="负向反馈" value={fmtNum(totals.negative)} tone="negative" hint={`负向率 ${(totals.negative_rate * 100).toFixed(0)}%`} />
         <StatCard label="正向反馈" value={fmtNum(totals.positive)} tone="accent" hint={`中性 ${fmtNum(totals.neutral)}`} />
         <StatCard label="P0 风险" value={fmtNum(p0.total)} tone={p0.total ? "negative" : undefined} hint={p0.total ? `${p0.issue_count} 类问题需立即确认` : "未发现高危信号"} />
-        <StatCard label="待跟进任务" value={summary.actions.open} hint={`闭环率 ${(summary.actions.closure_rate * 100).toFixed(0)}%`} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -156,26 +169,35 @@ export default function Voice() {
         <Card className="lg:col-span-2">
           <SectionTitle
             title="突出问题与标签归类"
-            subtitle="按负向声量与集中度排序，并给出建议跟进部门"
+            subtitle="按负向声量与集中度排序，并给出建议关注部门"
             hint="P0 仅用于命中安全、隐私、数据丢失、异常扣款或大范围故障等高危信号的问题；其余问题按负向声量划分 P1-P3。"
           />
-          <IssueBoard topics={summary.topics || []} brandId={brandId!} />
+          <IssueBoard topics={summary.topics || []} />
         </Card>
         <div className="space-y-4">
           <Card>
             <SectionTitle title="P0 风险扫描" subtitle="高优先级用户问题自动筛查" />
             <P0Panel p0={p0} />
           </Card>
-          <Card>
-            <SectionTitle title="跟进闭环" subtitle={`已关闭 ${summary.actions.closed} / ${summary.actions.total}`} />
-            <ActionsBoard actions={actions} />
-          </Card>
         </div>
       </div>
 
       <Card>
-        <SectionTitle title="原始反馈明细" subtitle="查看情绪判断、标签、渠道和采集依据" />
-        {recordsLoading ? <Spinner /> : <RecordList records={records} emptyHint="当前时间和来源范围内暂无反馈，请调整数据来源或补充导入。" />}
+        <SectionTitle title="原始反馈明细" subtitle="每个数据源先给出摘要，再查看具体反馈、情绪判断、标签和采集依据" />
+        <SourceSummaryGrid sources={sourceCatalog} selectedSources={selectedSources} onSelect={(key) => setSelectedSources([key as SourceKey])} />
+        <div className="flex flex-wrap items-center gap-2 mt-4 mb-3">
+          <span className="text-[12px]" style={{ color: "var(--mute)" }}>情绪筛选</span>
+          {([
+            ["all", "全部"],
+            ["positive", "正向"],
+            ["neutral", "中性"],
+            ["negative", "负向"],
+          ] as const).map(([key, label]) => (
+            <button key={key} type="button" onClick={() => setSentimentFilter(key)} className="rounded-full px-2.5 py-1 text-[12px] cursor-pointer" style={{ background: sentimentFilter === key ? "var(--accent)" : "var(--bg-soft-2)", color: sentimentFilter === key ? "white" : "var(--body)" }}>{label}{key !== "all" && <span className="ml-1 opacity-70">{fmtNum(Number(totals[key] || 0))}</span>}</button>
+          ))}
+          {sentimentFilter !== "all" && <span className="text-[12px]" style={{ color: "var(--mute)" }}>当前显示 {filteredRecords.length} 条</span>}
+        </div>
+        {recordsLoading ? <Spinner /> : <RecordList records={filteredRecords} emptyHint="当前时间和来源范围内暂无反馈，请调整数据来源或补充导入。" />}
       </Card>
 
       <DataSourceModal
@@ -235,8 +257,34 @@ function SentimentDistribution({ totals }: { totals: any }) {
   );
 }
 
-function IssueBoard({ topics, brandId }: { topics: any[]; brandId: string }) {
-  const { addAction } = useVocMutations();
+function SourceSummaryGrid({ sources, selectedSources, onSelect }: { sources: any[]; selectedSources: SourceKey[]; onSelect: (key: string) => void }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+      {sources.map((source) => {
+        const selected = selectedSources.includes(source.key);
+        return (
+          <button key={source.key} type="button" onClick={() => onSelect(source.key)} className="text-left rounded-lg p-3 transition-colors cursor-pointer" style={{ border: selected ? "1px solid var(--accent)" : "1px solid var(--hairline)", background: selected ? "rgba(0,112,243,0.06)" : "var(--bg-soft)" }}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[13px] font-semibold" style={{ color: "var(--ink)" }}>{source.label}</span>
+              <span className="text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(Number(source.count || 0))} 条</span>
+            </div>
+            <p className="text-[12px] mt-1.5 leading-relaxed" style={{ color: "var(--body)" }}>{source.summary}</p>
+            <div className="flex items-center gap-2 mt-2 text-[11px]" style={{ color: "var(--mute)" }}>
+              <span style={{ color: "var(--accent)" }}>正 {fmtNum(Number(source.positive || 0))}</span>
+              <span>中 {fmtNum(Number(source.neutral || 0))}</span>
+              <span style={{ color: source.negative ? "var(--danger)" : "var(--mute)" }}>负 {fmtNum(Number(source.negative || 0))}</span>
+              {source.hot_risk_count > 0 && <Badge tone="negative">高热负向 {source.hot_risk_count}</Badge>}
+            </div>
+            {source.representative && <div className="text-[11px] mt-2 line-clamp-2" style={{ color: "var(--mute)" }}>代表反馈：“{source.representative}”</div>}
+            {!source.count && source.availability_note && <div className="text-[11px] mt-2 leading-relaxed" style={{ color: "var(--warning)" }}>{source.availability_note}</div>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function IssueBoard({ topics }: { topics: any[] }) {
   if (!topics.length) return <EmptyState title="暂无突出问题" hint="当前筛选范围内没有负向问题标签。" />;
   return (
     <div className="space-y-2">
@@ -257,30 +305,13 @@ function IssueBoard({ topics, brandId }: { topics: any[]; brandId: string }) {
                     {topic.total} 条反馈 · 负向 {topic.negative} 条 · 负向率 {(topic.negative_rate * 100).toFixed(0)}%
                   </span>
                 </div>
-                {topic.representative && (
-                  <p className="text-[12px] mt-1.5 line-clamp-2" style={{ color: "var(--body)" }}>“{topic.representative}”</p>
-                )}
+                {topic.summary && <p className="text-[12px] mt-1.5 leading-relaxed" style={{ color: "var(--body)" }}>{topic.summary}</p>}
                 <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                   {(topic.source_keys || []).map((key: string) => <Badge key={key} tone="neutral">{SOURCE_LABEL[key] || key}</Badge>)}
                 </div>
               </div>
-              <div className="flex md:flex-col items-center md:items-end gap-2 shrink-0">
-                <Badge tone="accent">建议：{TEAM_LABEL[topic.suggested_team] || topic.suggested_team}</Badge>
-                <Button
-                  size="sm"
-                  disabled={addAction.isPending}
-                  onClick={() => addAction.mutate({
-                    brand_id: brandId,
-                    title: `跟进「${topicLabel}」用户问题`,
-                    description: topic.representative,
-                    owner_team: topic.suggested_team,
-                    priority: topic.priority,
-                    topic: topic.topic,
-                    status: "open",
-                  })}
-                >
-                  创建跟进
-                </Button>
+              <div className="flex items-center shrink-0">
+                <Badge tone="accent">建议关注：{TEAM_LABEL[topic.suggested_team] || topic.suggested_team}</Badge>
               </div>
             </div>
           </div>
@@ -320,37 +351,6 @@ function P0Panel({ p0 }: { p0: any }) {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-function ActionsBoard({ actions }: { actions: any[] }) {
-  const { updateAction, delAction } = useVocMutations();
-  if (!actions.length) return <EmptyState title="暂无跟进任务" hint="可从左侧突出问题直接创建并分派任务。" />;
-  return (
-    <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-      {actions.map((action) => {
-        const priority = priorityView(action.priority);
-        return (
-          <div key={action.id} className="p-3 rounded-md" style={{ background: "var(--bg-soft)" }}>
-            <div className="flex items-start justify-between gap-2">
-              <span className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{action.title}</span>
-              <Badge tone={priority.tone}>{priority.level}</Badge>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <Badge tone="neutral">{TEAM_LABEL[action.owner_team] || action.owner_team}</Badge>
-              <Select
-                value={action.status}
-                onChange={(event) => updateAction.mutate({ id: action.id, status: event.target.value })}
-                className="h-7 text-[12px] min-w-0"
-              >
-                {Object.entries(STATUS_LABEL).map(([key, value]) => <option key={key} value={key}>{value}</option>)}
-              </Select>
-              <button onClick={() => delAction.mutate(action.id)} className="text-[12px] ml-auto cursor-pointer" style={{ color: "var(--mute)" }}>删除</button>
-            </div>
-          </div>
-        );
-      })}
     </div>
   );
 }

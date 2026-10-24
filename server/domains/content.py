@@ -106,6 +106,10 @@ def _voice_source_key(record: dict) -> str | None:
     channel = (record.get("channel") or "").lower()
     source_id = (record.get("source_id") or "").lower()
     platform = (record.get("platform") or "").lower()
+    data_type = (record.get("data_type") or "").lower()
+
+    if dimension == "sales" and ("review" in source_id or "review" in data_type or channel in _SALES_REVIEW_CHANNELS):
+        return "sales_reviews"
 
     if dimension == "voc":
         if source_id in {"manual", "manual_csv"}:
@@ -157,13 +161,91 @@ def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: s
             continue
         if record_id:
             seen.add(record_id)
-        records.append({**record, "voice_source": source_key})
+        records.append(_enrich_voice_record({**record, "voice_source": source_key}))
     return sorted(records, key=lambda item: item.get("occurred_at") or "", reverse=True)
 
 
 def _source_catalog(records: list[dict]) -> list[dict]:
-    counts = Counter(record.get("voice_source") for record in records)
-    return [{**item, "count": counts.get(item["key"], 0)} for item in VOC_SOURCE_CATALOG]
+    catalog: list[dict] = []
+    for item in VOC_SOURCE_CATALOG:
+        source_records = [record for record in records if record.get("voice_source") == item["key"]]
+        counts = Counter(record.get("sentiment") or "neutral" for record in source_records)
+        topic_counts = Counter(topic for record in source_records for topic in (record.get("topics") or []))
+        negative = counts.get("negative", 0)
+        total = len(source_records)
+        if not source_records:
+            summary = "当前时间范围内暂无已采集反馈。"
+        elif negative:
+            top_topic = topic_counts.most_common(1)[0][0] if topic_counts else "多个问题"
+            summary = f"共 {total} 条反馈，负向 {negative} 条，主要集中在「{top_topic}」。"
+        else:
+            summary = f"共 {total} 条反馈，当前未发现明显负向集中问题。"
+        catalog.append({
+            **item,
+            "count": total,
+            "positive": counts.get("positive", 0),
+            "neutral": counts.get("neutral", 0),
+            "negative": negative,
+            "negative_rate": round(negative / total, 4) if total else 0.0,
+            "summary": summary,
+            "representative": _representative_feedback(source_records),
+            "top_topics": [{"topic": topic, "count": count} for topic, count in topic_counts.most_common(3)],
+            "hot_risk_count": sum(1 for record in source_records if record.get("hot_risk")),
+            "availability_note": "数据会在对应业务板块完成采集后自动汇入；当前暂无记录时请先检查来源配置与采集状态。" if not source_records else "已接入当前时间范围内的已采集记录。",
+        })
+    return catalog
+
+
+def _enrich_voice_record(record: dict) -> dict:
+    """Add a readable summary and a transparent high-velocity risk signal."""
+    metrics = record.get("metrics") or {}
+    body = (record.get("body") or record.get("title") or "").strip()
+    sentiment = record.get("sentiment") or "neutral"
+    topics = record.get("topics") or []
+    topic_text = "、".join(str(topic) for topic in topics[:3])
+    if sentiment == "negative":
+        feedback_summary = f"负向反馈，主要涉及{topic_text or '当前内容'}。"
+    elif sentiment == "positive":
+        feedback_summary = f"正向反馈，主要提到{topic_text or '当前内容'}。"
+    else:
+        feedback_summary = f"中性反馈，讨论{topic_text or '当前内容'}。"
+    if body:
+        feedback_summary += f" 原因：{body[:92]}{'…' if len(body) > 92 else ''}"
+
+    def metric_number(*keys: str) -> float:
+        for key in keys:
+            try:
+                value = float(metrics.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value:
+                return value
+        return 0
+
+    engagement = metric_number("engagement")
+    comments = metric_number("comments", "replies")
+    likes = metric_number("likes", "upvotes")
+    interactions = max(engagement, comments + likes)
+    occurred_at = record.get("occurred_at")
+    age_hours = 9999.0
+    if occurred_at:
+        try:
+            parsed = datetime.fromisoformat(str(occurred_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_hours = max(0.25, (datetime.now(timezone.utc) - parsed).total_seconds() / 3600)
+        except (TypeError, ValueError):
+            pass
+    velocity = interactions / age_hours if interactions else 0.0
+    hot_risk = sentiment == "negative" and ((age_hours <= 24 and interactions >= 20) or (age_hours <= 72 and interactions >= 50) or velocity >= 8)
+    return {
+        **record,
+        "feedback_summary": feedback_summary,
+        "interaction_count": int(interactions),
+        "interaction_velocity": round(velocity, 2),
+        "age_hours": round(age_hours, 1) if age_hours < 9999 else None,
+        "hot_risk": hot_risk,
+    }
 
 
 def _representative_feedback(records: list[dict]) -> str:
@@ -242,6 +324,7 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
             "suggested_team": team_for_records(items, topic),
             "priority": _issue_priority(items),
             "representative": _representative_feedback(items),
+            "summary": f"围绕「{topic}」的反馈中，有 {negative} 条为负向，代表问题是：{_representative_feedback(items)}",
             "source_keys": [key for key, _ in source_counts.most_common(3)],
             "latest_at": max((item.get("occurred_at") or "" for item in items), default=""),
         })
@@ -342,6 +425,7 @@ def voc_records(
     end_date: str | None = None,
     q: str | None = None,
     sources: str | None = None,
+    sentiment: str | None = None,
     limit: int = 40,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
@@ -350,7 +434,7 @@ def voc_records(
     records = [
         record
         for record in _load_voice_records(conn, brand_id, start, end, q)
-        if record.get("voice_source") in selected_sources
+        if record.get("voice_source") in selected_sources and (not sentiment or record.get("sentiment") == sentiment)
     ]
     return {"records": records[:max(1, min(limit, 200))]}
 
