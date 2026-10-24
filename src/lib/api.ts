@@ -111,6 +111,11 @@ export interface RecordItem {
   topics: string[];
   metrics: Record<string, unknown>;
   raw?: Record<string, unknown>;
+  feedback_summary?: string;
+  interaction_count?: number;
+  interaction_velocity?: number;
+  age_hours?: number | null;
+  hot_risk?: boolean;
 }
 
 export interface Source {

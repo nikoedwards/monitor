@@ -490,6 +490,7 @@ export function RecordList({
                   <Badge tone="neutral">采集：{collectionSourceLabel(r.source_id)}</Badge>
                 )}
                 {r.intent && <span className="text-[12px]" style={{ color: "var(--mute)" }}>{r.intent}</span>}
+                {r.hot_risk && <Badge tone="negative">高热度负向 · 优先关注</Badge>}
               </div>
               {r.title && (
                 <div className="text-[14px] font-medium truncate" style={{ color: "var(--ink)" }}>
@@ -500,8 +501,10 @@ export function RecordList({
                   )}
                 </div>
               )}
+              {r.feedback_summary && <p className="text-[13px] mt-1.5 leading-relaxed" style={{ color: "var(--ink)" }}>{r.feedback_summary}</p>}
               <p className="text-[13px] mt-1 line-clamp-2" style={{ color: "var(--body)" }}>{r.body}</p>
               {r.metrics && (r.channel === "social" ? <SocialMeta metrics={r.metrics} /> : <MediaMeta metrics={r.metrics} />)}
+              {r.hot_risk && <div className="mt-2 rounded px-2 py-1.5 text-[12px]" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>短时间内负向情绪集中，互动 {fmtNum(Number(r.interaction_count || 0))} 次，建议优先查看原帖与讨论走势。</div>}
               <CreatorEvidenceDetails record={r} />
               {collectionReason(r) && (
                 <div
