@@ -223,7 +223,7 @@ class YouTubePublicProvider(CreatorProvider):
                         except Exception:
                             continue
                     for item in (result or {}).get("entries") or []:
-                        if isinstance(item, dict) and item.get("_type") == "url":
+                        if isinstance(item, dict):
                             item = self._recover_watch_metadata(item)
                             if not item.get("timestamp") and not item.get("upload_date"):
                                 # The search URL already carries the rolling

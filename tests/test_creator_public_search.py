@@ -140,7 +140,7 @@ class CreatorPublicSearchTests(unittest.TestCase):
             def extract_info(self, *_args, **_kwargs):
                 if not self.flat:
                     raise RuntimeError("Sign in to confirm you're not a bot")
-                return {"entries": [{"_type": "url", "id": "video-3", "url": "https://www.youtube.com/watch?v=video-3", "title": "PLAUD review", "channel": "Creator", "channel_id": "channel-3"}]}
+                return {"entries": [{"id": "video-3", "url": "https://www.youtube.com/watch?v=video-3", "title": "PLAUD review", "channel": "Creator", "channel_id": "channel-3"}]}
 
         fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
         brand = {"name": "PLAUD", "_collection_since": "2026-10-24T00:00:00+00:00"}
