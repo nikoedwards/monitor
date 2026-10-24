@@ -7,8 +7,8 @@ import { MonitorStatus } from "../components/MonitorStatus";
 import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
 import { CreatorCollectionLogic } from "../components/CreatorCollectionLogic";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { SmartSummary } from "../components/SmartSummary";
-import { useAds, useAdsSummary, useMarketingSummary, useRecords } from "../lib/hooks";
+import { ExecutiveMarketingSummary, SmartSummary } from "../components/SmartSummary";
+import { useAds, useAdsSummary, useMarketingOverview, useMarketingSummary, useRecords } from "../lib/hooks";
 import type { MarketingAd, MarketingAdsSummary } from "../lib/api";
 import { useTimeRange, rangeParams } from "../lib/timeRange";
 import { CHANNEL_LABEL, fmtDate, fmtNum } from "../lib/format";
@@ -144,6 +144,19 @@ export default function Marketing() {
   const isAds = view === "channel" && channel === "ads";
   const isSocial = view === "channel" && channel === "social";
   const selectedSection = view === "overview" ? "overview" : channel;
+  if (view === "overview") {
+    return (
+      <MarketingOverview
+        brandId={brandId}
+        range={range}
+        onSectionChange={(value) => {
+          if (value === "overview") return;
+          setChannel(value);
+          setView("channel");
+        }}
+      />
+    );
+  }
   if (isAds) {
     return <AdsChannel brandId={brandId} range={range} selectedSection={selectedSection} onSectionChange={(value) => {
       if (value === "overview") {
@@ -286,23 +299,6 @@ export default function Marketing() {
         </Card>
       </div>
 
-      {view === "overview" && (
-        <Card>
-          <SectionTitle title="渠道分布" subtitle="各营销渠道声量占比" />
-          {summary.by_channel?.length ? (
-            <Bars
-              data={summary.by_channel.map((c: any) => ({ ...c, label: CHANNEL_LABEL[c.channel] || c.channel }))}
-              dataKey="total"
-              nameKey="label"
-              name="声量"
-              color="var(--accent)"
-            />
-          ) : (
-            <p className="text-[13px]" style={{ color: "var(--mute)" }}>暂无渠道数据</p>
-          )}
-        </Card>
-      )}
-
       {isCommunity && (
         <Card>
           <SectionTitle
@@ -341,6 +337,116 @@ export default function Marketing() {
       />
     </div>
   );
+}
+
+function marketingDeltaLabel(delta: any): string {
+  if (!delta || delta.value == null) return "暂无数据";
+  if (delta.delta == null || delta.previous == null) return "暂无环比";
+  const sign = delta.delta > 0 ? "+" : "";
+  const pct = delta.delta_pct == null ? "" : ` · ${sign}${delta.delta_pct}%`;
+  return `环比 ${sign}${fmtNum(delta.delta)}${pct}`;
+}
+
+function marketingValue(delta: any, formatter: (value: number) => string = fmtNum): string {
+  return delta?.value == null ? "暂无数据" : formatter(Number(delta.value));
+}
+
+function MarketingOverview({
+  brandId,
+  range,
+  onSectionChange,
+}: {
+  brandId?: string;
+  range: ReturnType<typeof useTimeRange>[0];
+  onSectionChange: (value: string) => void;
+}) {
+  const overview = useMarketingOverview(brandId, range);
+  const data = overview.data;
+  const modules = data?.modules || {};
+  const kpis = data?.kpis || {};
+  const moduleMeta: { key: string; label: string; color: string; metrics: [string, (module: any) => string][] }[] = [
+    { key: "media", label: "媒体公关", color: "var(--violet)", metrics: [["报道量", (m: any) => fmtNum(m.total)], ["估算触达", (m: any) => m.total_reach ? fmtNum(m.total_reach) : "暂无数据"], ["AVE", (m: any) => m.total_ave ? `$${fmtNum(m.total_ave)}` : "暂无数据"]] },
+    { key: "ads", label: "广告投放", color: "var(--accent)", metrics: [["广告总量", (m: any) => fmtNum(m.total_ads)], ["当前活跃", (m: any) => fmtNum(m.active_ads)], ["本期变化", (m: any) => `新 ${fmtNum(m.new_ads)} · 停 ${fmtNum(m.stopped_ads)}`]] },
+    { key: "creators", label: "红人达人", color: "var(--warning)", metrics: [["内容量", (m: any) => fmtNum(m.total)], ["达人数", (m: any) => fmtNum(m.creator_count)], ["互动", (m: any) => fmtNum(m.total_engagement)] ] },
+    { key: "social", label: "社交媒体", color: "var(--success)", metrics: [["内容量", (m: any) => fmtNum(m.total)], ["播放", (m: any) => fmtNum(m.total_views)], ["互动", (m: any) => fmtNum(m.total_engagement)] ] },
+    { key: "community", label: "社群", color: "var(--danger)", metrics: [["帖子", (m: any) => fmtNum(m.posts)], ["回复", (m: any) => fmtNum(m.replies)], ["子渠道", (m: any) => fmtNum(m.subchannel_count)] ] },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <SectionTitle
+        title="营销监控"
+        subtitle="营销驾驶舱：媒体、公关、广告、红人、社交与社群统一判断"
+        action={<div className="flex flex-wrap items-center gap-2"><TimeRangePicker /><MonitorStatus brandId={brandId} dimension="marketing" /></div>}
+      />
+      <div className="flex flex-wrap items-center gap-3">
+        <SegmentGroup value="overview" options={[{ value: "overview", label: "总览" }, ...CHANNELS]} onChange={onSectionChange} />
+      </div>
+
+      <Card>
+        <SectionTitle title="智能总结" subtitle="自动整理所选周期的营销结论，并单独提示昨日发生的变化" />
+        <ExecutiveMarketingSummary brandId={brandId} range={range} />
+      </Card>
+
+      {overview.isLoading && <Spinner />}
+      {overview.isError && <EmptyState title="营销总览暂时不可用" hint="请稍后刷新；各营销详情页仍可单独查看。" />}
+      {data && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+            <MarketingKpi label="营销内容" value={marketingValue(kpis.content_total)} change={marketingDeltaLabel(kpis.content_total)} />
+            <MarketingKpi label="总播放" value={marketingValue(kpis.total_views)} change={marketingDeltaLabel(kpis.total_views)} />
+            <MarketingKpi label="总互动" value={marketingValue(kpis.total_engagement)} change={marketingDeltaLabel(kpis.total_engagement)} />
+            <MarketingKpi label="媒体触达" value={marketingValue(kpis.media_reach)} change={marketingDeltaLabel(kpis.media_reach)} />
+            <MarketingKpi label="广告总量" value={marketingValue(kpis.ads_total)} change={marketingDeltaLabel(kpis.ads_total)} />
+            <MarketingKpi label="合作达人" value={marketingValue(kpis.creator_count)} change={marketingDeltaLabel(kpis.creator_count)} />
+          </div>
+
+          <Card>
+            <SectionTitle title="重点营销信号" subtitle="按严重度聚合广告、媒体、红人、社交和社群的变化" />
+            {data.signals?.length ? (
+              <div className="space-y-2">
+                {data.signals.map((signal: any, index: number) => (
+                  <button key={`${signal.domain}-${index}`} type="button" className="w-full text-left flex items-start gap-3 p-3 rounded-md cursor-pointer" style={{ background: "var(--bg-soft-2)" }} onClick={() => onSectionChange(signal.domain === "ads" ? "ads" : signal.domain)}>
+                    <Badge tone={signal.severity === "high" ? "negative" : signal.severity === "medium" ? "warning" : "neutral"}>{signal.domain}</Badge>
+                    <div className="min-w-0"><div className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{signal.title}</div><div className="text-[12px] mt-0.5" style={{ color: "var(--body)" }}>{signal.detail}</div></div>
+                  </button>
+                ))}
+              </div>
+            ) : <EmptyState title="暂无需要重点关注的营销信号" hint="当前周期没有检测到明显异常或变化。" />}
+          </Card>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {moduleMeta.map((meta) => {
+              const module = modules[meta.key] || {};
+              const coverage = data.coverage?.[meta.key] || {};
+              const trend = module.trend || [];
+              const trendKeys = meta.key === "ads"
+                ? [{ key: "active", name: "活跃广告", color: meta.color }, { key: "new", name: "新增", color: "var(--warning)" }]
+                : [{ key: "total", name: meta.key === "media" ? "报道量" : "内容量", color: meta.color }];
+              return (
+                <Card key={meta.key}>
+                  <SectionTitle title={meta.label} subtitle={coverage.status === "ready" ? `最近更新 ${fmtDate(coverage.last_data_at)}` : coverage.status === "configured_no_data" ? "已配置，当前周期暂无数据" : "尚未配置或暂无数据"} action={<Button size="sm" onClick={() => onSectionChange(meta.key)}>查看详情</Button>} />
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    {meta.metrics.map(([label, formatter]) => <div key={label as string}><div className="text-[11px]" style={{ color: "var(--mute)" }}>{label}</div><div className="text-[16px] font-semibold mt-1" style={{ color: coverage.status === "ready" ? "var(--ink)" : "var(--mute)" }}>{coverage.status === "ready" ? formatter(module) : "暂无数据"}</div></div>)}
+                  </div>
+                  {trend.length ? <TrendChart data={trend} keys={trendKeys} valueFormatter={fmtNum} /> : <EmptyState title="暂无趋势数据" hint="采集到新的营销记录后将在此显示。" />}
+                </Card>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card><SectionTitle title="营销内容渠道分布" subtitle="不同营销子板块的内容量" />{moduleMeta.some((meta) => data.coverage?.[meta.key]?.status === "ready") ? <Bars data={moduleMeta.filter((meta) => data.coverage?.[meta.key]?.status === "ready").map((meta) => ({ label: meta.label, total: modules[meta.key]?.total ?? modules[meta.key]?.total_ads ?? 0 }))} dataKey="total" nameKey="label" name="数量" color="var(--accent)" /> : <EmptyState title="暂无可比较的营销数据" hint="采集到营销内容后将在此显示。" />}</Card>
+            <Card><SectionTitle title="数据覆盖说明" subtitle="按当前时间范围判断，缺失数据不会被显示为 0" /><div className="space-y-2">{moduleMeta.map((meta) => { const coverage = data.coverage?.[meta.key] || {}; return <div key={meta.key} className="flex items-center justify-between text-[13px]"><span style={{ color: "var(--ink)" }}>{meta.label}</span><Badge tone={coverage.status === "ready" ? "positive" : coverage.status === "configured_no_data" ? "warning" : "neutral"}>{coverage.status === "ready" ? "有数据" : coverage.status === "configured_no_data" ? "已配置待采集" : "暂无数据"}</Badge></div>; })}</div></Card>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MarketingKpi({ label, value, change }: { label: string; value: string; change: string }) {
+  return <Card className="p-4"><div className="text-[12px] uppercase tracking-wide" style={{ color: "var(--mute)" }}>{label}</div><div className="text-[24px] font-semibold mt-1 tabular-nums tracking-tight" style={{ color: value === "暂无数据" ? "var(--mute)" : "var(--ink)" }}>{value}</div><div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>{change}</div></Card>;
 }
 
 type PublicationStat = {
