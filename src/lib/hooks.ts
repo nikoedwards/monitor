@@ -124,12 +124,22 @@ export function useRecords(filters: Record<string, unknown>) {
 }
 
 // ---------------------------------------------------------------- overview / compare
-export function useOverview(brandId?: string, range?: TimeRange) {
+export function useOverview(brandId?: string, range?: TimeRange, marketBrandIds?: string[]) {
   const rp = rangeParams(range);
   return useQuery({
-    queryKey: ["overview", brandId, rp],
-    queryFn: () => api.get<any>(`/api/overview${qs({ brand_id: brandId, ...rp })}`),
+    queryKey: ["overview", brandId, rp, marketBrandIds],
+    queryFn: () => api.get<any>(`/api/overview${qs({ brand_id: brandId, market_brand_ids: marketBrandIds?.join(","), ...rp })}`),
     enabled: !!brandId,
+  });
+}
+
+export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[], refreshKey = 0) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["overview-summary", brandId, rp, marketBrandIds, refreshKey],
+    queryFn: () => api.get<any>(`/api/overview/summary${qs({ brand_id: brandId, market_brand_ids: marketBrandIds?.join(","), refresh: refreshKey > 0, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 10 * 60_000,
   });
 }
 

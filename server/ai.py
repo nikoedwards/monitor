@@ -216,6 +216,52 @@ def summarize_records(conn: sqlite3.Connection, records: list[dict], context: di
     return parsed
 
 
+# ---------------------------------------------------------- executive overview
+OVERVIEW_SUMMARY_SYSTEM = (
+    "你是品牌经营分析助手。基于销售、市场、招聘、营销、用户之声和网页变化的真实统计，"
+    "输出简洁、通俗、可执行的中文经营判断。只能使用输入中的证据，不得补造数字、事实、因果或链接。"
+    "仅返回 JSON 对象，不要 markdown。"
+)
+
+OVERVIEW_SUMMARY_PROMPT = """请分析品牌在 {start} 至 {end} 的经营情况，并特别关注所选周期结束日前一个完整自然日（{focus_day}）。
+
+经营数据：
+{overview}
+
+请严格返回以下结构：
+{{
+  "summary": "3-5 句话，先说整体经营状态，再说最值得关注的变化",
+  "yesterday_summary": "1-2 句话说明重点日发生了什么；没有数据就如实说明",
+  "highlights": [{{"domain": "sales|market|hiring|marketing|voice|web", "severity": "high|medium|low", "title": "短标题", "detail": "基于证据的说明"}}],
+  "focus": [{{"domain": "sales|market|hiring|marketing|voice|web", "action": "建议关注或跟进什么", "reason": "对应证据"}}],
+  "caveats": ["数据覆盖或口径限制"]
+}}
+
+要求：highlights 最多 6 条，focus 最多 4 条；没有充分证据时返回空数组；不要把“暂无数据”写成下降或增长。"""
+
+
+def summarize_overview(conn: sqlite3.Connection, overview: dict) -> dict:
+    """Generate a cross-dimension executive summary from normalized evidence."""
+    context = overview.get("range") or {}
+    focus_day = overview.get("yesterday", {}).get("date") or ""
+    prompt = OVERVIEW_SUMMARY_PROMPT.format(
+        start=context.get("start") or "",
+        end=context.get("end") or "",
+        focus_day=focus_day,
+        overview=json.dumps(overview, ensure_ascii=False),
+    )
+    text = call_llm(get_config(conn), OVERVIEW_SUMMARY_SYSTEM, prompt)
+    parsed = _extract_json(text)
+    if not isinstance(parsed, dict):
+        raise LlmError("大模型未返回有效的经营总结对象")
+    parsed.setdefault("summary", "")
+    parsed.setdefault("yesterday_summary", "")
+    for key in ("highlights", "focus", "caveats"):
+        if not isinstance(parsed.get(key), list):
+            parsed[key] = []
+    return parsed
+
+
 # ---------------------------------------------------------- web snapshot analysis
 WEB_ANALYSIS_SYSTEM = (
     "你是竞品网站视觉变化分析师。你会收到一个日期范围内的确定性统计、文本变化证据，"
