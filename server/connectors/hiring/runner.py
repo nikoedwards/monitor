@@ -691,6 +691,20 @@ def _record_activities(conn: sqlite3.Connection, profile: dict, activities: list
         text = clean_text(act.text)
         if not text:
             continue
+        # LinkedIn auth-wall copy is page chrome, not a person's activity.
+        # Keep it out of the Feed even if a renderer returns a 200 response.
+        lowered = text.casefold()
+        if any(
+            marker in lowered
+            for marker in (
+                "by clicking continue to join or sign in",
+                "password (6+ characters)",
+                "linkedin is better on the app",
+                "don't have the app? get it in the microsoft store",
+                "your california privacy choices",
+            )
+        ):
+            continue
         ext = (act.external_id or "").strip() or _jd_hash(text)[:32]
         dup = conn.execute(
             "SELECT 1 FROM linkedin_activities WHERE profile_id = ? AND external_id = ? LIMIT 1",
@@ -725,7 +739,7 @@ def discover_linkedin_people_candidates(
     link_id: str | None = None,
 ) -> dict:
     """Import employee candidates from configured LinkedIn company People pages."""
-    summary = {"links": 0, "profiles": 0, "errors": 0}
+    summary = {"links": 0, "profiles": 0, "errors": 0, "configured": False, "error_messages": []}
     link_clause = "AND id = ?" if link_id else ""
     link_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
     links = conn.execute(
@@ -742,7 +756,17 @@ def discover_linkedin_people_candidates(
         provider = pick_people_provider("linkedin", conn)
         if provider is None:
             continue
+        provider_cookie = getattr(provider, "cookie", None)
+        summary["configured"] = True if provider_cookie is None else bool(str(provider_cookie).strip())
         summary["links"] += 1
+        if not summary["configured"]:
+            error = "未配置 LinkedIn Cookie，请在设置中填写后再导入企业员工。"
+            summary["error_messages"].append(error)
+            conn.execute(
+                "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
+                ("partial", error, utc_now(), utc_now(), link["id"]),
+            )
+            continue
         try:
             refs = provider.expand_profiles(conn, link)
         except Exception as exc:  # noqa: BLE001
@@ -756,7 +780,12 @@ def discover_linkedin_people_candidates(
             _upsert_profile(conn, link, ref)
             summary["profiles"] += 1
         status = "ok" if refs else "partial"
-        error = "" if refs else "当前 LinkedIn People 页面没有发现可导入员工，请检查页面 URL、登录 Cookie 或访问状态。"
+        error = "" if refs else (
+            getattr(provider, "last_error", "")
+            or "当前 LinkedIn People 页面没有发现可导入员工，请检查页面 URL、登录 Cookie 或访问状态。"
+        )
+        if error:
+            summary["error_messages"].append(error)
         conn.execute(
             "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
             (status, error, utc_now(), utc_now(), link["id"]),
@@ -774,7 +803,7 @@ def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_i
     }
 
     provider = pick_people_provider("linkedin", conn)
-    if provider is not None:
+    if provider is not None and (getattr(provider, "cookie", None) is None or str(getattr(provider, "cookie", "")).strip()):
         profiles = conn.execute(
             f"""
             SELECT * FROM linkedin_profiles

@@ -290,6 +290,8 @@ export interface LinkedInEmployeeImportResult {
   links: number;
   profiles: number;
   errors: number;
+  configured?: boolean;
+  error_messages?: string[];
   candidates: LinkedInEmployee[];
 }
 
