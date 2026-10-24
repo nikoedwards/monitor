@@ -222,7 +222,21 @@ class YouTubePublicProvider(CreatorProvider):
                             successful_queries += 1
                         except Exception:
                             continue
-                    for item in (result or {}).get("entries") or []:
+                    entries = (result or {}).get("entries") or [] if isinstance(result, dict) else []
+                    # With ignoreerrors enabled yt-dlp can return a playlist
+                    # whose entries are all None instead of raising.  Treat
+                    # that as a blocked detail extraction and use flat search.
+                    if not any(isinstance(entry, dict) for entry in entries):
+                        try:
+                            flat_result = flat_downloader.extract_info(
+                                f"ytsearch{self.max_results}:{query} after:{after}", download=False
+                            )
+                            entries = (flat_result or {}).get("entries") or [] if isinstance(flat_result, dict) else []
+                            if entries:
+                                successful_queries += 1
+                        except Exception:
+                            entries = []
+                    for item in entries:
                         if isinstance(item, dict):
                             item = self._recover_watch_metadata(item)
                             if not item.get("timestamp") and not item.get("upload_date"):

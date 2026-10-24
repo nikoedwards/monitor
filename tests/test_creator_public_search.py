@@ -149,6 +149,28 @@ class CreatorPublicSearchTests(unittest.TestCase):
         self.assertEqual([post.external_id for post in posts], ["video-3"])
         self.assertEqual(posts[0].raw["publication_time_precision"], "approximate_window")
 
+    def test_all_none_playlist_entries_trigger_flat_search(self):
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.flat = options.get("extract_flat") is True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                if self.flat:
+                    return {"entries": [{"id": "video-4", "title": "PLAUD review", "channel": "Creator", "channel_id": "channel-4"}]}
+                return {"entries": [None, None]}
+
+        fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        brand = {"name": "PLAUD", "_collection_since": "2026-10-24T00:00:00+00:00"}
+        with unittest.mock.patch.dict(sys.modules, {"yt_dlp": fake_module}):
+            posts = YouTubePublicProvider(max_results=2).collect(sqlite3.connect(":memory:"), brand, ["PLAUD"])
+        self.assertEqual([post.external_id for post in posts], ["video-4"])
+
     def test_collection_window_rejects_old_posts(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         brand = {"_collection_since": (now - timedelta(days=1)).isoformat()}
