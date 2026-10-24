@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from ...util import canonical_url, clean_text, normalize_url
 from .base import (
@@ -28,7 +28,16 @@ from .base import (
 _JOB_VIEW_RE = re.compile(r"/jobs/view/[0-9]+", re.I)
 _JOB_ID_RE = re.compile(r"/jobs/view/([0-9]+)", re.I)
 _PROFILE_RE = re.compile(r"/in/[^\"'<>\s?/]+", re.I)
+_PROFILE_URL_RE = re.compile(
+    r"(?:https?:\\?/\\?/(?:www\\?\.)?linkedin\\?\.com)?\\?/in\\?/([A-Za-z0-9][A-Za-z0-9%_-]{1,120})",
+    re.I,
+)
 _CLOSED_MARKERS = ("no longer accepting", "not accepting applications", "已关闭", "不再接受")
+_AUTHWALL_MARKERS = (
+    "by clicking continue to join or sign in",
+    "password (6+ characters)",
+)
+_AUTHWALL_PATHS = ("/uas/login", "/login", "/signup", "/checkpoint/")
 
 
 class _ProfileAnchorParser(HTMLParser):
@@ -153,6 +162,7 @@ class LinkedInPeopleProvider(PeopleProvider):
     def __init__(self, cookie: str = "", max_profiles: int = 40) -> None:
         self.cookie = cookie or ""
         self.max_profiles = max(1, max_profiles)
+        self.last_error = ""
 
     def expand_profiles(self, conn: sqlite3.Connection, link: dict) -> list[ProfileRef]:
         url = link.get("url") or ""
@@ -160,14 +170,21 @@ class LinkedInPeopleProvider(PeopleProvider):
             start = normalize_url(url)
         except ValueError:
             return []
-        page = render(start, self.cookie)
+        self.last_error = ""
+        page = render(start, self.cookie, wait_ms=4000, scroll=True)
+        blocked_reason = _linkedin_block_reason(page)
+        if blocked_reason:
+            self.last_error = blocked_reason
+            return []
         if page.status != "ok" or not (page.html or page.anchors):
+            self.last_error = page.error or "无法读取 LinkedIn People 页面。"
             return []
         seen: set[str] = set()
         found: list[ProfileRef] = []
         detailed = _profile_anchor_details(page.html or "")
         candidates = detailed + [(href, "") for href in (page.anchors or [])]
         candidates += [(href, "") for href in _PROFILE_RE.findall(page.html or "")]
+        candidates += [(f"/in/{slug}", "") for slug in _profile_slugs(page.html or "")]
         for href, anchor_text in candidates:
             if not href or "/in/" not in href:
                 continue
@@ -191,6 +208,11 @@ class LinkedInPeopleProvider(PeopleProvider):
         url = profile.get("profile_url") or ""
         snap = ProfileSnapshot()
         page = render(url, self.cookie)
+        blocked_reason = _linkedin_block_reason(page)
+        if blocked_reason:
+            snap.status = "blocked"
+            snap.error = blocked_reason
+            return snap
         if page.status != "ok":
             snap.status = "blocked" if not page.html else "partial"
             snap.error = page.error or "无法读取 LinkedIn 个人页（需登录 Cookie 或被反爬拦截）。"
@@ -225,7 +247,7 @@ class LinkedInPeopleProvider(PeopleProvider):
             return []
         activity_url = f"{base}/recent-activity/all/"
         page = render(activity_url, self.cookie)
-        if page.status != "ok" or not page.text:
+        if _linkedin_block_reason(page) or page.status != "ok" or not page.text:
             return []
         activities: list[ActivityRef] = []
         for block in _activity_blocks(page.text):
@@ -243,6 +265,37 @@ def _job_id(url: str) -> str:
 def _profile_slug(url: str) -> str:
     match = re.search(r"/in/([^/]+)", url or "")
     return match.group(1) if match else ""
+
+
+def _profile_slugs(value: str) -> list[str]:
+    """Extract profile slugs from HTML/JSON where slashes are escaped."""
+    normalized = (value or "").replace("\\/", "/").replace("\\u002F", "/")
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in _PROFILE_URL_RE.finditer(normalized):
+        slug = match.group(1)
+        key = slug.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(slug)
+    return out
+
+
+def _linkedin_block_reason(page) -> str:
+    """Return a user-facing reason when LinkedIn served an auth wall."""
+    final_path = urlparse(page.final_url or "").path.lower()
+    if any(marker in final_path for marker in _AUTHWALL_PATHS):
+        return "LinkedIn 页面要求登录或安全验证，请检查登录 Cookie。"
+    # Inspect rendered text/title only. The raw HTML contains LinkedIn's
+    # generic sign-in strings in scripts and translations even for valid
+    # authenticated pages.
+    title = (page.title or "").lower()
+    if any(marker in title for marker in ("sign up", "join linkedin", "sign in to linkedin", "登录领英")):
+        return "LinkedIn 页面要求登录或安全验证，请检查登录 Cookie。"
+    text = (page.text or "").lower()
+    if any(marker in text for marker in _AUTHWALL_MARKERS):
+        return "LinkedIn 页面要求登录或安全验证，请检查登录 Cookie。"
+    return ""
 
 
 def _extract_jd(text: str) -> str:

@@ -170,6 +170,31 @@ class HiringPeopleTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(manual_row["monitor"], 1)
 
+    def test_import_reports_missing_linkedin_cookie_without_fetching_login_page(self):
+        now = utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO links (id, brand_id, dimension, channel, platform, url, canonical_url,
+                cadence, status, config_json, created_at, updated_at)
+            VALUES ('people-link', 'brand-1', 'hiring', 'linkedin_people', 'linkedin_people',
+                'https://www.linkedin.com/company/example/people/',
+                'https://linkedin.com/company/example/people', 'daily', 'active', '{}', ?, ?)
+            """,
+            (now, now),
+        )
+        provider = LinkedInPeopleProvider(cookie="")
+        with patch(
+            "server.connectors.hiring.runner.pick_people_provider",
+            return_value=provider,
+        ), patch("server.connectors.hiring.linkedin.render") as render:
+            summary = discover_linkedin_people_candidates(self.conn, {"id": "brand-1"})
+
+        self.assertFalse(summary["configured"])
+        self.assertEqual(summary["profiles"], 0)
+        render.assert_not_called()
+        link = self.conn.execute("SELECT last_error FROM links WHERE id = 'people-link'").fetchone()
+        self.assertIn("Cookie", link["last_error"])
+
     def test_linkedin_profile_parser_uses_page_metadata(self):
         page = RenderResult(
             text="Ada Example\nVP of AI",
@@ -206,6 +231,34 @@ class HiringPeopleTests(unittest.TestCase):
 
         self.assertEqual(len(refs), 1)
         self.assertEqual(refs[0].name, "Ada Example")
+
+    def test_linkedin_people_parser_reads_escaped_profile_urls(self):
+        page = RenderResult(
+            html=r'''<script type="application/json">{"profile":"https:\\/\\/www.linkedin.com\\/in\\/grace-example\\/"}</script>''',
+            status="ok",
+            final_url="https://www.linkedin.com/company/example/people/",
+        )
+        with patch("server.connectors.hiring.linkedin.render", return_value=page):
+            refs = LinkedInPeopleProvider().expand_profiles(
+                self.conn, {"url": page.final_url}
+            )
+
+        self.assertEqual([ref.external_id for ref in refs], ["grace-example"])
+
+    def test_linkedin_auth_wall_is_not_saved_as_profile_data(self):
+        page = RenderResult(
+            text="By clicking Continue to join or sign in, you agree to LinkedIn's",
+            title="Sign Up | LinkedIn",
+            status="ok",
+            final_url="https://www.linkedin.com/uas/login?session_redirect=%2Fin%2Fade-example%2F",
+        )
+        with patch("server.connectors.hiring.linkedin.render", return_value=page):
+            snapshot = LinkedInPeopleProvider().fetch_profile(
+                self.conn, {"profile_url": "https://www.linkedin.com/in/ada-example/"}
+            )
+
+        self.assertEqual(snapshot.status, "blocked")
+        self.assertIn("登录", snapshot.error)
 
 
 if __name__ == "__main__":

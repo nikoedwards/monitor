@@ -55,7 +55,7 @@ def _cookies_for(cookie_header: str, url: str) -> list[dict]:
     return cookies
 
 
-def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResult | None:
+def _render_playwright(url: str, cookie_header: str, wait_ms: int, scroll: bool = False) -> RenderResult | None:
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is False:
         return None
@@ -93,6 +93,14 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int) -> RenderResu
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
             if wait_ms:
                 page.wait_for_timeout(wait_ms)
+            if scroll:
+                # LinkedIn People pages progressively render employee cards as
+                # the viewport reaches the list. Scroll a bounded number of
+                # times so imports see the initial roster without hanging on
+                # an endlessly loading page.
+                for _ in range(6):
+                    page.mouse.wheel(0, 1200)
+                    page.wait_for_timeout(350)
             result.html = page.content()
             result.final_url = page.url
             result.title = page.title()
@@ -143,12 +151,12 @@ def _render_http(url: str) -> RenderResult:
     return result
 
 
-def render(url: str, cookie_header: str = "", wait_ms: int = 2500) -> RenderResult:
+def render(url: str, cookie_header: str = "", wait_ms: int = 2500, scroll: bool = False) -> RenderResult:
     """Render a page with cookies via Playwright, falling back to a plain HTTP GET.
 
     Never raises: a failed render returns a RenderResult with status error/blocked.
     """
-    pw = _render_playwright(url, cookie_header, wait_ms)
+    pw = _render_playwright(url, cookie_header, wait_ms, scroll=scroll)
     if pw is not None and pw.status == "ok" and (pw.html or pw.text):
         return pw
     http = _render_http(url)

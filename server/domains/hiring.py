@@ -35,7 +35,20 @@ from .common import fetch_brand, get_conn, resolve_window
 
 router = APIRouter(prefix="/api/hiring", tags=["hiring"])
 
-PLATFORM_LABEL = {"boss": "Boss 直聘", "linkedin": "LinkedIn", "linkedin_people": "LinkedIn 员工"}
+PLATFORM_LABEL = {"boss": "Boss 直聘", "linkedin": "LinkedIn", "linkedin_people": "LinkedIn 企业员工"}
+_AUTHWALL_ACTIVITY_MARKERS = (
+    "by clicking continue to join or sign in",
+    "password (6+ characters)",
+    "linkedin is better on the app",
+    "don't have the app? get it in the microsoft store",
+    "your california privacy choices",
+)
+_AUTHWALL_PROFILE_MARKERS = ("750 million+ members", "manage your professional identity")
+
+
+def _is_authwall_text(value: str | None) -> bool:
+    lowered = (value or "").casefold()
+    return any(marker in lowered for marker in _AUTHWALL_ACTIVITY_MARKERS)
 
 
 def posting_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -65,9 +78,20 @@ def snapshot_to_dict(row: sqlite3.Row) -> dict:
 def profile_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     item = dict(row)
     item.pop("raw_json", None)
+    if any(
+        marker in (item.get(key) or "").casefold()
+        for key in ("name", "headline", "title")
+        for marker in _AUTHWALL_PROFILE_MARKERS
+    ):
+        item["name"] = ""
+        item["headline"] = ""
+        item["title"] = ""
+        item["last_status"] = "blocked"
+        item["last_error"] = "LinkedIn 返回了登录页，尚未读取到个人资料。"
     item["monitor"] = bool(item.get("monitor"))
     item["activity_count"] = conn.execute(
-        "SELECT COUNT(*) AS c FROM linkedin_activities WHERE profile_id = ?", (item["id"],)
+        "SELECT COUNT(*) AS c FROM linkedin_activities WHERE profile_id = ? AND lower(text) NOT LIKE '%by clicking continue to join or sign in%' AND lower(text) NOT LIKE '%password (6+ characters)%' AND lower(text) NOT LIKE '%linkedin is better on the app%' AND lower(text) NOT LIKE '%don''t have the app? get it in the microsoft store%' AND lower(text) NOT LIKE '%your california privacy choices%'",
+        (item["id"],)
     ).fetchone()["c"]
     item["snapshot_count"] = conn.execute(
         "SELECT COUNT(*) AS c FROM linkedin_profile_snapshots WHERE profile_id = ?", (item["id"],)
@@ -420,6 +444,8 @@ def list_activities(
     activities = []
     for r in rows:
         item = dict(r)
+        if _is_authwall_text(item.get("text")):
+            continue
         item.pop("raw_json", None)
         activities.append(item)
     return {"activities": activities}

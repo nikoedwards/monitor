@@ -28,7 +28,7 @@ import { fmtDate, fmtDateTime, fmtNum } from "../lib/format";
 const PLATFORM_LABEL: Record<string, string> = {
   boss: "Boss 直聘",
   linkedin: "LinkedIn 职位",
-  linkedin_people: "LinkedIn 人员",
+  linkedin_people: "LinkedIn 企业员工",
 };
 
 const PLATFORM_FILTERS = [
@@ -557,6 +557,15 @@ function EmployeeImportModal({
         )}
         {!!result?.errors && (
           <p className="text-[12px]" style={{ color: "var(--warning)" }}>有 {result.errors} 个采集源读取失败，请检查 LinkedIn Cookie、People 页面 URL 或访问状态。</p>
+        )}
+        {result?.configured === false && (
+          <div className="p-3 rounded-md" style={{ background: "var(--warning-soft)", color: "var(--body)" }}>
+            <p className="text-[12px] font-medium" style={{ color: "var(--ink)" }}>LinkedIn Cookie 未配置</p>
+            <p className="text-[12px] mt-1">当前 People 页面会被重定向到登录页，因此无法发现员工。请在设置中填写 LinkedIn Cookie 后重试。</p>
+          </div>
+        )}
+        {!!result?.error_messages?.length && result.configured !== false && (
+          <p className="text-[12px]" style={{ color: "var(--warning)" }}>{result.error_messages[0]}</p>
         )}
 
         {candidates.length ? (
