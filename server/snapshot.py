@@ -3,7 +3,7 @@
 Capture strategy (first that works wins):
   1. Playwright Chromium: full-page PNG plus a self-contained HTML archive.
   2. Installed Edge/Chrome: PNG plus a limited HTML fallback.
-  3. SVG text fallback so a snapshot always has a visual artifact.
+  3. Rasterized text fallback so a snapshot always has a visual artifact.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import unicodedata
+import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from html import escape as html_escape
 from pathlib import Path
@@ -49,6 +50,7 @@ _ARCHIVE_DATA_IMAGE_RE = re.compile(
     r"data:(?P<mime>image/(?:png|jpe?g|webp|avif));base64,(?P<payload>[A-Za-z0-9+/=]+)",
     re.I,
 )
+_FALLBACK_FONT_CACHE: dict[bool, object] = {}
 
 
 class SnapshotCaptureError(RuntimeError):
@@ -1066,6 +1068,127 @@ def _subprocess_capture(url: str, png_path: Path) -> dict | None:
     return None
 
 
+def _fallback_font(*, bold: bool = False):
+    """Return a font with CJK coverage when the raster fallback is used.
+
+    SVG text is rendered with LCD subpixel antialiasing by Chromium. When the
+    resulting SVG is scaled down into a timeline card, the red/blue subpixels
+    become visible as coloured ghosts around every glyph. Drawing the fallback
+    with Pillow avoids that artifact and also gives Chinese text a predictable
+    font on Windows and Linux.
+    """
+    cached = _FALLBACK_FONT_CACHE.get(bold)
+    if cached is not None:
+        return cached
+    try:
+        from PIL import ImageFont
+
+        configured = os.environ.get("MONITOR_SNAPSHOT_FONT", "").strip()
+        candidates = [configured] if configured else []
+        if os.name == "nt":
+            candidates += [
+                r"C:\Windows\Fonts\msyh.ttc",
+                r"C:\Windows\Fonts\msyhbd.ttc",
+                r"C:\Windows\Fonts\segoeui.ttf",
+            ]
+        candidates += [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+        for candidate in candidates:
+            if not candidate or not Path(candidate).is_file():
+                continue
+            try:
+                font = ImageFont.truetype(candidate, 26, index=0)
+                _FALLBACK_FONT_CACHE[bold] = font
+                return font
+            except Exception:
+                continue
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    _FALLBACK_FONT_CACHE[bold] = font
+    return font
+
+
+def _fit_text(draw, text: str, font, max_width: int) -> str:
+    """Trim a single line to a pixel width without splitting surrogate text."""
+    if not text:
+        return ""
+    try:
+        if draw.textlength(text, font=font) <= max_width:
+            return text
+        suffix = "…"
+        value = text
+        while value and draw.textlength(value + suffix, font=font) > max_width:
+            value = value[:-1]
+        return (value + suffix) if value else suffix
+    except Exception:
+        return text[:150]
+
+
+def _wrap_fallback_lines(draw, text: str, font, max_width: int) -> list[str]:
+    lines: list[str] = []
+    for raw in (text or "").splitlines():
+        line = clean_text(raw)
+        if not line:
+            continue
+        current = ""
+        for character in line:
+            candidate = current + character
+            try:
+                fits = draw.textlength(candidate, font=font) <= max_width
+            except Exception:
+                fits = len(candidate) <= 150
+            if current and not fits:
+                lines.append(current)
+                current = character
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+    return lines
+
+
+def _write_raster_fallback(
+    filename: str,
+    url: str,
+    title: str,
+    text: str,
+    error: str = "",
+    *,
+    root: Path | None = None,
+) -> str:
+    """Write a crisp PNG fallback instead of an SVG with coloured text fringes."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    output_root = root or SNAPSHOT_DIR
+    output_root.mkdir(parents=True, exist_ok=True)
+    path = output_root / filename
+    image = Image.new("RGB", (1440, 1200), (10, 10, 10))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((48, 48, 1392, 1152), radius=16, fill=(17, 17, 17), outline=(42, 42, 42), width=2)
+    body_font = _fallback_font() or ImageFont.load_default()
+    muted_font = body_font
+    title_font = body_font
+    url_font = body_font
+    draw.text((72, 72), "Generated visual snapshot fallback", fill=(150, 150, 150), font=muted_font)
+    draw.text((72, 124), _fit_text(draw, title or "Untitled page", title_font, 1296), fill=(250, 250, 250), font=title_font)
+    draw.text((72, 174), _fit_text(draw, url or "", url_font, 1296), fill=(59, 130, 246), font=url_font)
+    lines = []
+    if error:
+        lines.append(f"Capture note: {error[:180]}")
+    lines.extend(_wrap_fallback_lines(draw, text, body_font, 1296))
+    y = 226
+    for line in lines[:22]:
+        draw.text((72, y), line, fill=(229, 229, 229), font=body_font)
+        y += 42
+    image.save(path, format="PNG", optimize=True)
+    return filename
+
+
 def _write_svg(filename: str, url: str, title: str, text: str, error: str = "") -> str:
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     path = SNAPSHOT_DIR / filename
@@ -1084,6 +1207,36 @@ def _write_svg(filename: str, url: str, title: str, text: str, error: str = "") 
   <text class="muted" x="72" y="104">Generated visual snapshot fallback</text><text class="title" x="72" y="166">{html_escape((title or "Untitled page")[:80])}</text><text class="url" x="72" y="204">{html_escape(url[:120])}</text>{''.join(rows)}</svg>"""
     path.write_text(svg, encoding="utf-8")
     return filename
+
+
+def upgrade_snapshot_fallback_images(root: Path = SNAPSHOT_DIR) -> dict[str, str]:
+    """Rasterize legacy SVG fallback snapshots and return old->new filenames."""
+    root.mkdir(parents=True, exist_ok=True)
+    migrated: dict[str, str] = {}
+    for svg_path in root.glob("*.svg"):
+        try:
+            source = svg_path.read_text(encoding="utf-8")
+            if "Generated visual snapshot fallback" not in source:
+                continue
+            document = ET.fromstring(source)
+            values = [clean_text("".join(node.itertext())) for node in document.iter() if node.tag.rsplit("}", 1)[-1] == "text"]
+            values = [value for value in values if value]
+            if len(values) < 3:
+                continue
+            title = values[1]
+            url = values[2]
+            body = values[3:]
+            error = ""
+            if body and body[0].startswith("Capture note:"):
+                error = body.pop(0)
+            png_name = f"{svg_path.stem}.png"
+            png_path = root / png_name
+            if not png_path.exists():
+                _write_raster_fallback(png_name, url, title, "\n".join(body), error, root=root)
+            migrated[svg_path.name] = png_name
+        except Exception:
+            logger.exception("Failed to rasterize legacy fallback snapshot %s", svg_path)
+    return migrated
 
 
 def capture_artifacts(
@@ -1148,12 +1301,12 @@ def capture_artifacts(
         return png_filename, html_filename, sub_result
 
     error = (pw_result or {}).get("error", "") or (sub_result or {}).get("error", "") or "No headless browser available"
-    logger.warning("Falling back to SVG snapshot for %s: %s", url, error)
-    svg_filename = f"{base_name}.svg"
-    _write_svg(svg_filename, url, title, text, error)
+    logger.warning("Falling back to raster snapshot for %s: %s", url, error)
+    png_filename = f"{base_name}.png"
+    _write_raster_fallback(png_filename, url, title, text, error)
     _write_fallback_archive(html_filename, url, title, html, text, error)
-    return svg_filename, html_filename, {
-        "method": "svg_fallback",
+    return png_filename, html_filename, {
+        "method": "raster_fallback",
         "error": error,
         "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
     }

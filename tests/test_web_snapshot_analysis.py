@@ -39,6 +39,7 @@ from server.snapshot import (
     capture_artifacts,
     compare_visuals,
     upgrade_snapshot_archives,
+    upgrade_snapshot_fallback_images,
 )
 
 
@@ -94,6 +95,43 @@ class VisualDiffTests(unittest.TestCase):
             self.assertTrue(result["available"])
             self.assertGreater(result["score"], 0.1)
             self.assertTrue(result["regions"])
+
+    def test_capture_fallback_is_raster_png(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch("server.snapshot._playwright_capture", return_value=None),
+                patch("server.snapshot._subprocess_capture", return_value={"error": "browser unavailable"}),
+            ):
+                screenshot, _archive, meta = capture_artifacts(
+                    "https://example.com",
+                    "示例页面",
+                    "中文内容\nReadable page text",
+                    "",
+                    "fallback",
+                )
+            self.assertEqual(screenshot, "fallback.png")
+            self.assertEqual(meta["method"], "raster_fallback")
+            with Image.open(root / screenshot) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertEqual(image.size, (1440, 1200))
+
+    def test_legacy_svg_fallbacks_are_migrated_to_png(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "legacy.svg"
+            legacy.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<text>Generated visual snapshot fallback</text>'
+                '<text>示例页面</text><text>https://example.com</text>'
+                '<text>中文内容</text></svg>',
+                encoding="utf-8",
+            )
+            migrated = upgrade_snapshot_fallback_images(root)
+            self.assertEqual(migrated, {"legacy.svg": "legacy.png"})
+            self.assertTrue((root / "legacy.png").is_file())
+            self.assertTrue(legacy.exists())
 
 
 class PeriodStatsTests(unittest.TestCase):
