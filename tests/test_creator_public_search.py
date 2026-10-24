@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import sqlite3
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -36,6 +38,56 @@ class CreatorPublicSearchTests(unittest.TestCase):
         self.assertEqual(post.platform, "youtube")
         self.assertEqual(post.external_id, "video-1")
         self.assertEqual(post.views, 100)
+
+    def test_malformed_caption_descriptor_is_ignored(self):
+        item = {
+            "automatic_captions": {
+                "en": [
+                    {"url": {"unexpected": "nested"}},
+                    {"data": ["unexpected", "list"]},
+                    {"url": "https://captions.example.test/ok.vtt", "ext": "vtt"},
+                ]
+            }
+        }
+        self.assertEqual(
+            YouTubePublicProvider._caption_source(item),
+            ("https://captions.example.test/ok.vtt", "automatic_caption", "vtt"),
+        )
+
+    def test_public_search_keeps_valid_entries_when_playlist_contains_failed_item(self):
+        captured = {}
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                captured.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                return {
+                    "entries": [
+                        None,
+                        {
+                            "id": "video-1",
+                            "upload_date": datetime.now(timezone.utc).strftime("%Y%m%d"),
+                            "webpage_url": "https://www.youtube.com/watch?v=video-1",
+                            "title": "PLAUD review",
+                            "channel": "Creator",
+                            "channel_id": "channel-1",
+                        },
+                    ]
+                }
+
+        fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        brand = {"name": "PLAUD", "_collection_since": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}
+        with unittest.mock.patch.dict(sys.modules, {"yt_dlp": fake_module}):
+            posts = YouTubePublicProvider(max_results=2).collect(sqlite3.connect(":memory:"), brand, ["PLAUD"])
+        self.assertEqual([post.external_id for post in posts], ["video-1"])
+        self.assertTrue(captured["ignoreerrors"])
 
     def test_collection_window_rejects_old_posts(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)

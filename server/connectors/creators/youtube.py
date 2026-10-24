@@ -174,6 +174,11 @@ class YouTubePublicProvider(CreatorProvider):
         options = {
             "quiet": True,
             "no_warnings": True,
+            # A single deleted/private/age-restricted result must not abort the
+            # whole playlist search.  YouTube search mixes such entries into
+            # otherwise valid results, and yt-dlp can otherwise raise while
+            # expanding one of them.
+            "ignoreerrors": True,
             # Full metadata is needed for likes/comments. Nothing is downloaded;
             # yt-dlp only opens the public watch page for each bounded result.
             "extract_flat": False,
@@ -241,6 +246,8 @@ class YouTubePublicProvider(CreatorProvider):
 
     @staticmethod
     def _caption_source(item: dict) -> tuple[str, str, str] | None:
+        if not isinstance(item, dict):
+            return None
         for key, source in (("subtitles", "manual_subtitle"), ("automatic_captions", "automatic_caption")):
             tracks = item.get(key)
             if not isinstance(tracks, dict):
@@ -254,18 +261,25 @@ class YouTubePublicProvider(CreatorProvider):
                     continue
                 ordered = sorted((fmt for fmt in formats if isinstance(fmt, dict)), key=lambda fmt: (str(fmt.get("ext") or "") not in {"vtt", "json3", "srv3"}, str(fmt.get("ext") or "")))
                 for fmt in ordered:
-                    value = clean_text(fmt.get("url") or fmt.get("data") or fmt.get("content"))
+                    candidate = fmt.get("url") or fmt.get("data") or fmt.get("content")
+                    # yt-dlp has returned nested/partially populated caption
+                    # descriptors across extractor versions.  Only scalar
+                    # payloads can be fetched or parsed as transcript text.
+                    if not isinstance(candidate, (str, bytes)):
+                        continue
+                    value = clean_text(candidate.decode("utf-8", errors="replace") if isinstance(candidate, bytes) else candidate)
                     if value:
-                        return value, source, clean_text(fmt.get("ext"))
+                        extension = fmt.get("ext")
+                        return value, source, clean_text(extension if isinstance(extension, str) else str(extension or ""))
         return None
 
     @classmethod
     def _transcript_evidence(cls, item: dict, terms: list[str]) -> dict:
-        track = cls._caption_source(item)
-        if not track:
-            return {"transcript_status": "unavailable"}
-        value, source, extension = track
         try:
+            track = cls._caption_source(item)
+            if not track:
+                return {"transcript_status": "unavailable"}
+            value, source, extension = track
             text = fetch_text(value, accept="text/vtt,application/json,text/plain,*/*", timeout=12) if value.startswith(("http://", "https://")) else value
             cues = parse_transcript_payload(text, source=source, limit=500)
             matches = transcript_matches(cues, terms, limit=12)
