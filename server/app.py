@@ -20,7 +20,7 @@ from .db import db, init_db
 from .domains import brands, content, creators, hiring, insights, market_share, sales, settings, sources, web
 from . import media
 from .scheduler import start_scheduler
-from .snapshot import upgrade_snapshot_archives
+from .snapshot import upgrade_snapshot_archives, upgrade_snapshot_fallback_images
 
 
 @asynccontextmanager
@@ -32,9 +32,15 @@ async def lifespan(app: FastAPI):
         apply_credential_overrides(stored)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     upgraded_archives = upgrade_snapshot_archives()
-    if upgraded_archives:
+    migrated_fallbacks = upgrade_snapshot_fallback_images()
+    if upgraded_archives or migrated_fallbacks:
         root = SNAPSHOT_DIR.resolve()
         with db() as conn:
+            for old_name, new_name in migrated_fallbacks.items():
+                conn.execute(
+                    "UPDATE web_snapshots SET screenshot_path = ? WHERE screenshot_path = ?",
+                    (new_name, old_name),
+                )
             rows = conn.execute("SELECT id, html_path FROM web_snapshots WHERE html_path IS NOT NULL").fetchall()
             for row in rows:
                 path = (SNAPSHOT_DIR / row["html_path"]).resolve()
