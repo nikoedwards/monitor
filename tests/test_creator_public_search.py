@@ -11,6 +11,7 @@ from server.connectors.base import ConnectorSpec, run_collector
 from server.connectors.creators.base import CreatorPost, occurred_in_collection_window
 from server.connectors.creators.public_search import discover_profile_urls
 from server.connectors.creators.youtube import YouTubePublicProvider
+from server.connectors.creators.runner import _has_trusted_creator_search_hit
 from server.connectors.registry import BY_ID
 
 
@@ -182,6 +183,22 @@ class CreatorPublicSearchTests(unittest.TestCase):
         )
         self.assertTrue(occurred_in_collection_window(recent, brand, now=now))
         self.assertFalse(occurred_in_collection_window(old, brand, now=now))
+
+    def test_exact_configured_keyword_is_search_evidence_when_metadata_is_blocked(self):
+        brand = {"name": "Comu", "monitoring_keywords": ["Comulytic"]}
+        self.assertTrue(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["Comulytic"], "search_query_evidence": True}, brand, []
+            )
+        )
+
+    def test_short_brand_name_is_not_broad_search_evidence(self):
+        brand = {"name": "Comu", "monitoring_keywords": ["Comulytic"]}
+        self.assertFalse(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["Comu"], "search_query_evidence": True}, brand, []
+            )
+        )
 
     def test_runner_passes_daily_window_to_collector(self):
         conn = sqlite3.connect(":memory:")
