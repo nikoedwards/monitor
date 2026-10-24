@@ -88,7 +88,7 @@ BOSS 与 LinkedIn 采用不同采集方式。LinkedIn 保持后台 Cookie 采集
 # 1) 后端依赖
 pip install -r requirements.txt
 
-# 可选：整页截图（不装则用本机浏览器/SVG 回退）
+# 可选：整页截图（不装则用本机浏览器/栅格文字回退）
 pip install playwright && python -m playwright install chromium
 
 # 2) 前端依赖与构建
