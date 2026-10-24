@@ -171,6 +171,7 @@ class YouTubePublicProvider(CreatorProvider):
         except (sqlite3.OperationalError, TypeError, ValueError):
             pass
         transcript_budget = _MAX_TRANSCRIPT_VIDEOS
+        window_fallback_timestamp = collection_since(brand).timestamp() + 1
         options = {
             "quiet": True,
             "no_warnings": True,
@@ -224,6 +225,14 @@ class YouTubePublicProvider(CreatorProvider):
                     for item in (result or {}).get("entries") or []:
                         if isinstance(item, dict) and item.get("_type") == "url":
                             item = self._recover_watch_metadata(item)
+                            if not item.get("timestamp") and not item.get("upload_date"):
+                                # The search URL already carries the rolling
+                                # date filter.  If the watch page is blocked
+                                # as well, retain the result with an explicit
+                                # approximate timestamp instead of dropping an
+                                # otherwise valid search hit.
+                                item["timestamp"] = window_fallback_timestamp
+                                item["_publication_time_fallback"] = True
                         post = self._normalize(item, query)
                         if not post:
                             continue
@@ -401,5 +410,6 @@ class YouTubePublicProvider(CreatorProvider):
             raw={"query": query, "collection_method": "youtube_public_ytdlp", "description": description,
                  "tags": [clean_text(tag) for tag in (item.get("tags") or []) if clean_text(tag)],
                  "categories": [clean_text(category) for category in (item.get("categories") or []) if clean_text(category)],
-                 "duration_seconds": _to_int(item.get("duration"))},
+                 "duration_seconds": _to_int(item.get("duration")),
+                 "publication_time_precision": "approximate_window" if item.get("_publication_time_fallback") else "exact"},
         )
