@@ -232,6 +232,28 @@ class CreatorProductAttributionTests(unittest.TestCase):
             payloads = _collect_platform(self.conn, brand, "youtube")
         self.assertEqual(["brand-1:youtube:relevant"], [item["external_id"] for item in payloads])
 
+    def test_flat_search_keyword_hit_is_kept_without_watch_page_metadata(self):
+        class FakeProvider:
+            def collect(self, conn, brand, search_queries):
+                return [CreatorPost(
+                    platform="youtube",
+                    external_id="flat-hit",
+                    title="A review with blocked watch metadata",
+                    body="",
+                    author="Reviewer",
+                    raw={
+                        "query": "Comulytic",
+                        "matched_queries": ["Comulytic"],
+                        "search_query_evidence": True,
+                    },
+                )]
+
+        brand = {"id": "brand-1", "name": "Comu", "monitoring_keywords": ["Comulytic"]}
+        with patch("server.connectors.creators.runner.pick_provider", return_value=FakeProvider()):
+            payloads = _collect_platform(self.conn, brand, "youtube")
+        self.assertEqual(["brand-1:youtube:flat-hit"], [item["external_id"] for item in payloads])
+        self.assertFalse(payloads[0]["metrics"]["is_collab"])
+
 
 if __name__ == "__main__":
     unittest.main()
