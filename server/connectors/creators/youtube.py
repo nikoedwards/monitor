@@ -275,8 +275,18 @@ class YouTubePublicProvider(CreatorProvider):
         if not video:
             return item
         upload_date = str(video.get("uploadDate") or "").strip()
-        if upload_date and not item.get("upload_date"):
-            item["upload_date"] = upload_date[:10].replace("-", "")
+        if upload_date:
+            try:
+                published = datetime.fromisoformat(upload_date.replace("Z", "+00:00"))
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=timezone.utc)
+                # Preserve the time of day.  A date-only fallback would turn a
+                # video from yesterday into 00:00 UTC and incorrectly exclude
+                # it from the rolling 24-hour collection window.
+                item["timestamp"] = published.timestamp()
+            except (TypeError, ValueError, OSError, OverflowError):
+                if not item.get("upload_date"):
+                    item["upload_date"] = upload_date[:10].replace("-", "")
         if video.get("description") and not item.get("description"):
             item["description"] = video.get("description")
         if video.get("name") and not item.get("title"):
