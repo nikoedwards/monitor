@@ -584,7 +584,9 @@ function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsCha
     status: status === "all" ? undefined : status,
     source: source === "all" ? undefined : source,
     sort,
-    limit: 60,
+    // Pull the complete candidate pool so the conclusion card is not biased
+    // toward the most recently seen 60 ads. Rendering remains capped below.
+    limit: 500,
   });
 
   const ads = [...fetchedAds].sort((a, b) => {
@@ -600,6 +602,7 @@ function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsCha
   const longRunningCount = durationRanked.filter((ad) => (adDuration(ad) || 0) >= 30).length;
   const activeLongRunningCount = durationRanked.filter((ad) => (adDuration(ad) || 0) >= 30 && normalizeAdStatus(ad.status || ad.lifecycle) === "active").length;
   const displayAds = longOnly ? ads.filter((ad) => (adDuration(ad) || 0) >= 30) : ads;
+  const visibleAds = displayAds.slice(0, 60);
   const sourceOptions = (safeSummary.by_source || []).map((item) => {
     const value = item.source || item.source_id || "unknown";
     return { value, label: AD_SOURCE_LABEL[value] || value };
@@ -663,7 +666,7 @@ function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsCha
                   <MiniMetric label="≥ 30 天素材" value={`${longRunningCount} 条`} />
                   <MiniMetric label="仍在投放" value={`${activeLongRunningCount} 条`} />
                   <MiniMetric label="最长持续" value={`${Math.round(adDuration(topResearchAds[0]) || 0)} 天`} />
-                  <MiniMetric label="当前排序" value="按持续时间" />
+                  <MiniMetric label="平均稳定度" value={`${Math.round(safeSummary.persistence_score ?? averageScore(ads))}/100`} />
                 </div>
               </div>
             ) : (
@@ -707,7 +710,7 @@ function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsCha
           <Card>
             <SectionTitle
               title={longOnly ? "长投放素材候选" : "广告素材研究清单"}
-              subtitle={longOnly ? "已筛选持续 ≥ 30 天的素材，优先用于反向拆解" : "优先按持续时间查看公开广告快照，先找值得研究的素材"}
+              subtitle={longOnly ? `已筛选持续 ≥ 30 天的素材，优先用于反向拆解 · ${fmtNum(displayAds.length)} 条` : `优先按持续时间查看公开广告快照，先找值得研究的素材 · ${fmtNum(displayAds.length)} 条`}
               action={<div className="flex flex-wrap items-center gap-2">
                 {longOnly && <Button size="sm" variant="ghost" onClick={() => setLongOnly(false)}>清除长投放筛选</Button>}
                 <SegmentGroup value={status as any} options={AD_STATUS_OPTIONS as any} onChange={setStatus} />
@@ -722,9 +725,9 @@ function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsCha
                 </select>
               </div>}
             />
-            {displayAds.length ? (
+            {visibleAds.length ? (
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                {displayAds.map((ad) => <AdCard key={ad.id || ad.source_ad_id} ad={ad} onOpen={() => setSelectedAd(ad)} />)}
+                {visibleAds.map((ad) => <AdCard key={ad.id || ad.source_ad_id} ad={ad} onOpen={() => setSelectedAd(ad)} />)}
               </div>
             ) : (
               <EmptyState title={longOnly ? "暂无 30 天以上的素材" : "暂无广告数据"} hint={longOnly ? "可以先清除筛选，查看全部素材；持续采集几轮后再判断长投放候选。" : "请先在数据源页配置 Meta Ad Library 或 Google Ads Transparency 的广告主/关键词，再发起采集。"} />
