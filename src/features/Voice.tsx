@@ -310,6 +310,7 @@ function IssueBoard({ topics }: { topics: any[] }) {
                     {topic.total} 条反馈 · 负向 {topic.negative} 条 · 负向率 {(topic.negative_rate * 100).toFixed(0)}%
                   </span>
                 </div>
+                {topic.priority_reason && <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>{topic.priority_reason}</div>}
                 <div className="mt-2">
                   <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>问题概述</div>
                   <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{topic.problem_summary || "当前未生成明确的问题描述。"}</p>

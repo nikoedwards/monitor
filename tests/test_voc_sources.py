@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from server.domains.content import _highlight_terms, _load_voice_records, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
+from server.domains.content import _highlight_terms, _issue_priority, _load_voice_records, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
 from server.domains.common import build_trend
 from server.domains.insights import _summary_records
 
@@ -134,6 +134,24 @@ class VocSourceTests(unittest.TestCase):
             records = _load_voice_records(None, "brand-1", "2026-01-01", "2026-01-31")
 
         self.assertEqual(["review"], [record["id"] for record in records])
+
+    def test_negative_high_reach_feedback_is_high_priority(self):
+        records = [{
+            "sentiment": "negative",
+            "intent": "complaint",
+            "metrics": {"views": 25_000, "comments": 8, "likes": 120},
+        }]
+
+        self.assertEqual("high", _issue_priority(records))
+
+    def test_negative_high_discussion_feedback_is_high_priority(self):
+        records = [{
+            "sentiment": "negative",
+            "intent": "observation",
+            "metrics": {"comments": 120},
+        }]
+
+        self.assertEqual("high", _issue_priority(records))
 
 
 if __name__ == "__main__":
