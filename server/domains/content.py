@@ -388,17 +388,76 @@ def _p0_summary(records: list[dict]) -> dict:
     return {"total": sum(item["count"] for item in issues), "issue_count": len(issues), "issues": issues}
 
 
+def _impact_metrics(record: dict) -> dict[str, float]:
+    metrics = record.get("metrics") or {}
+
+    def number(*keys: str) -> float:
+        for key in keys:
+            try:
+                value = float(str(metrics.get(key) or 0).replace(",", ""))
+            except (TypeError, ValueError):
+                value = 0
+            if value:
+                return value
+        return 0
+
+    comments = number("comments", "replies")
+    likes = number("likes", "upvotes")
+    try:
+        record_interactions = float(record.get("interaction_count") or 0)
+    except (TypeError, ValueError):
+        record_interactions = 0
+    return {
+        "views": number("views", "view_count", "plays", "impressions"),
+        "comments": comments,
+        "interactions": max(number("engagement"), comments + likes, number("interaction_count"), record_interactions),
+        "reach": number("reach", "estimated_reach", "monthly_traffic"),
+    }
+
+
+def _issue_impact(records: list[dict]) -> dict:
+    negative_records = [record for record in records if record.get("sentiment") == "negative"]
+    metrics = [_impact_metrics(record) for record in negative_records]
+    maximum = {
+        key: max((item[key] for item in metrics), default=0)
+        for key in ("views", "comments", "interactions", "reach")
+    }
+    hot_risk = any(record.get("hot_risk") for record in negative_records)
+    high = hot_risk or maximum["views"] >= 10_000 or maximum["comments"] >= 100 or maximum["interactions"] >= 200 or maximum["reach"] >= 10_000
+    moderate = high or maximum["views"] >= 1_000 or maximum["comments"] >= 20 or maximum["interactions"] >= 50 or maximum["reach"] >= 5_000
+    return {**maximum, "hot_risk": hot_risk, "high": high, "moderate": moderate}
+
+
 def _issue_priority(records: list[dict]) -> str:
     if any(_p0_match(record) for record in records):
         return "urgent"
     negative = sum(1 for record in records if record.get("sentiment") == "negative")
     complaints = sum(1 for record in records if record.get("intent") == "complaint")
     rate = negative / len(records) if records else 0.0
-    if negative >= 5 or complaints >= 5 or (negative >= 3 and rate >= 0.5):
+    impact = _issue_impact(records)
+    if impact["high"] or negative >= 5 or complaints >= 5 or (negative >= 3 and rate >= 0.5):
         return "high"
     if negative >= 2 or complaints >= 2:
         return "medium"
     return "low"
+
+
+def _issue_priority_reason(records: list[dict]) -> str:
+    impact = _issue_impact(records)
+    if impact["high"]:
+        details = []
+        if impact["views"]:
+            details.append(f"浏览 {int(impact['views']):,}")
+        if impact["comments"]:
+            details.append(f"评论/回复 {int(impact['comments']):,}")
+        if impact["interactions"]:
+            details.append(f"互动 {int(impact['interactions']):,}")
+        if impact["hot_risk"]:
+            details.append("短时间互动速度高")
+        return f"负向内容传播影响高：{'、'.join(details)}。"
+    if impact["moderate"]:
+        return "负向内容已有一定浏览或讨论量，已纳入传播影响评估。"
+    return "当前主要依据负向反馈量、投诉量和负向率判断。"
 
 
 def _topic_breakdown(records: list[dict]) -> list[dict]:
@@ -439,6 +498,8 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
             "suggested_team": suggested_teams[0] if suggested_teams else team_for_records(items, topics[0]),
             "suggested_teams": suggested_teams,
             "priority": _issue_priority(items),
+            "priority_reason": _issue_priority_reason(items),
+            "impact": _issue_impact(items),
             "representative": _representative_feedback(items),
             "problem_summary": group["problem_summary"],
             "source_keys": [key for key, _ in source_counts.most_common(3)],

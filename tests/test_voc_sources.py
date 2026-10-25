@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from server.domains.content import _highlight_terms, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
+from server.domains.content import _highlight_terms, _issue_priority, _load_voice_records, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
 from server.domains.common import build_trend
 from server.domains.insights import _summary_records
 
@@ -119,6 +119,39 @@ class VocSourceTests(unittest.TestCase):
             {key: trend[0][key] for key in ("total", "positive", "neutral", "negative")},
         )
 
+    def test_voice_records_exclude_app_store_rating_metrics(self):
+        records_by_filter = {
+            ("platform", "app"): [
+                {"id": "metric", "dimension": "platform", "channel": "app", "source_id": "app_store_reviews", "data_type": "app_metric"},
+                {"id": "review", "dimension": "voc", "channel": "app", "source_id": "app_store_reviews", "data_type": "user_voice", "body": "The app is useful."},
+            ],
+        }
+
+        def fake_query_records(_conn, filters, limit=200):
+            return records_by_filter.get((filters.get("dimension"), filters.get("channel")), [])
+
+        with patch("server.domains.content.query_records", side_effect=fake_query_records):
+            records = _load_voice_records(None, "brand-1", "2026-01-01", "2026-01-31")
+
+        self.assertEqual(["review"], [record["id"] for record in records])
+
+    def test_negative_high_reach_feedback_is_high_priority(self):
+        records = [{
+            "sentiment": "negative",
+            "intent": "complaint",
+            "metrics": {"views": 25_000, "comments": 8, "likes": 120},
+        }]
+
+        self.assertEqual("high", _issue_priority(records))
+
+    def test_negative_high_discussion_feedback_is_high_priority(self):
+        records = [{
+            "sentiment": "negative",
+            "intent": "observation",
+            "metrics": {"comments": 120},
+        }]
+
+        self.assertEqual("high", _issue_priority(records))
 
 if __name__ == "__main__":
     unittest.main()
