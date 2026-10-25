@@ -16,7 +16,7 @@ from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
 from ..schemas import ImportIn, RecordIn, VocActionIn, VocActionUpdate
 from ..util import compact_key, new_id, utc_now
-from .common import build_trend, get_conn, query_records, resolve_window
+from .common import build_trend, community_post_views, get_conn, query_records, resolve_window
 
 router = APIRouter(prefix="/api", tags=["content"])
 
@@ -669,6 +669,7 @@ def marketing_summary(
     coverage = Counter((r.get("metrics") or {}).get("coverage_type") for r in records if (r.get("metrics") or {}).get("coverage_type"))
     posts = sum(1 for r in records if r.get("data_type") != "community_reply")
     replies = sum(1 for r in records if r.get("data_type") == "community_reply")
+    community_views = [views for r in records if (views := community_post_views(r)) is not None]
     social_totals = {"views": 0, "likes": 0, "comments": 0, "engagement": 0}
     for record in records:
         metrics = record.get("metrics") or {}
@@ -794,6 +795,8 @@ def marketing_summary(
         "total": len(records),
         "posts": posts,
         "replies": replies,
+        "total_community_views": sum(community_views) if community_views else None,
+        "community_view_records": len(community_views),
         "total_views": social_totals["views"],
         "total_likes": social_totals["likes"],
         "total_comments": social_totals["comments"],

@@ -3,10 +3,66 @@ import unittest
 from unittest.mock import patch
 
 from server.domains.content import marketing_summary
+from server.domains.common import build_trend, community_post_views
 from test_publication_traffic import PUBLICATIONS_SCHEMA
 
 
 class MarketingSummaryTests(unittest.TestCase):
+    def community_summary(self, records):
+        with sqlite3.connect(":memory:") as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(PUBLICATIONS_SCHEMA)
+            with patch("server.domains.content.query_records", return_value=records):
+                return marketing_summary(conn=conn, channel="community", start_date="2026-10-19", end_date="2026-10-25")
+
+    def test_unpublished_community_views_are_not_zero_or_estimated_from_votes(self):
+        records = [{
+            "channel": "community", "data_type": "community_post", "platform": platform,
+            "occurred_at": "2026-10-23T10:00:00Z", "metrics": metrics,
+        } for platform, metrics in [
+            ("reddit", {"score": 42, "num_comments": 5}),
+            ("frill", {"vote_count": 10, "follower_count": 30, "comment_count": 2}),
+        ]]
+        result = self.community_summary(records)
+        self.assertIsNone(result["total_community_views"])
+        self.assertEqual(0, result["community_view_records"])
+        self.assertTrue(all(point["community_views"] is None for point in result["trend"]))
+        self.assertEqual(2, result["trend"][4]["total"])
+
+    def test_public_topic_views_include_real_zero_and_exclude_replies(self):
+        records = [{
+            "channel": "community", "data_type": data_type, "platform": "discourse",
+            "occurred_at": date + "T10:00:00Z", "metrics": metrics,
+        } for data_type, date, metrics in [
+            ("community_post", "2026-10-19", {"views": 120}),
+            ("community_post", "2026-10-19", {"views": "30"}),
+            ("community_post", "2026-10-20", {"views": 0}),
+            ("community_post", "2026-10-21", {}),
+            ("community_reply", "2026-10-19", {"views": 120}),
+        ]]
+        result = self.community_summary(records)
+        self.assertEqual(150, result["total_community_views"])
+        self.assertEqual(3, result["community_view_records"])
+        self.assertEqual([150, 0, None, None, None, None, None], [point["community_views"] for point in result["trend"]])
+        zero = self.community_summary([records[2]])
+        self.assertEqual(0, zero["total_community_views"])
+        self.assertEqual(1, zero["community_view_records"])
+
+    def test_invalid_or_other_channel_views_are_unavailable(self):
+        for value in [None, "", "unknown", -1, True, float("nan"), float("inf")]:
+            with self.subTest(value=value):
+                self.assertIsNone(community_post_views({"channel": "community", "metrics": {"views": value}}))
+        self.assertIsNone(community_post_views({"channel": "social", "metrics": {"views": 100}}))
+
+    def test_community_views_follow_weekly_buckets(self):
+        records = [{"channel": "community", "occurred_at": day, "metrics": {"views": views}}
+                   for day, views in [("2026-10-19", 10), ("2026-10-20", 20), ("2026-10-26", 0)]]
+        trend = build_trend(records, "2026-08-01", "2026-10-31")
+        by_date = {point["date"]: point for point in trend}
+        self.assertEqual(30, by_date["2026-10-19"]["community_views"])
+        self.assertEqual(0, by_date["2026-10-26"]["community_views"])
+        self.assertIsNone(by_date["2026-10-12"]["community_views"])
+
     def test_social_metrics_are_aggregated(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

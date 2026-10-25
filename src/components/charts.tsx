@@ -31,7 +31,7 @@ function TooltipBox({ active, payload, label, valueFormatter }: any) {
   );
 }
 
-export function TrendChart({ data, keys, valueFormatter }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string }) {
+export function TrendChart({ data, keys, valueFormatter, showPoints = false }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string; showPoints?: boolean }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -48,7 +48,7 @@ export function TrendChart({ data, keys, valueFormatter }: { data: any[]; keys: 
         <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 52 : 36} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
         {keys.map((k) => (
-          <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} />
+          <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} dot={showPoints ? { r: 3 } : false} />
         ))}
       </AreaChart>
     </ResponsiveContainer>
