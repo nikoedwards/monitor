@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from server.domains.content import _highlight_terms, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
+from server.domains.common import build_trend
 from server.domains.insights import _summary_records
 
 
@@ -99,6 +100,22 @@ class VocSourceTests(unittest.TestCase):
         self.assertEqual(2, result[0]["total"])
         self.assertEqual(["ads", "support"], result[0]["topics"])
         self.assertEqual(["marketing_team", "support_team"], result[0]["suggested_teams"])
+
+    def test_voice_trend_contains_total_and_each_sentiment_series(self):
+        trend = build_trend(
+            [
+                {"occurred_at": "2026-10-24T01:00:00+00:00", "sentiment": "positive"},
+                {"occurred_at": "2026-10-24T02:00:00+00:00", "sentiment": "neutral"},
+                {"occurred_at": "2026-10-24T03:00:00+00:00", "sentiment": "negative"},
+            ],
+            "2026-10-24",
+            "2026-10-24",
+        )
+
+        self.assertEqual(
+            {"total": 3, "positive": 1, "neutral": 1, "negative": 1},
+            {key: trend[0][key] for key in ("total", "positive", "neutral", "negative")},
+        )
 
 
 if __name__ == "__main__":

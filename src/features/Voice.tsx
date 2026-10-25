@@ -155,8 +155,11 @@ export default function Voice() {
             data={summary.trend}
             keys={[
               { key: "total", name: "全部反馈", color: "var(--accent)" },
+              { key: "positive", name: "正向反馈", color: "#16a34a" },
+              { key: "neutral", name: "中性反馈", color: "#a3a3a3" },
               { key: "negative", name: "负向反馈", color: "var(--danger)" },
             ]}
+            interactive
           />
         </Card>
         <Card>
