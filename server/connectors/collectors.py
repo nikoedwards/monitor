@@ -733,6 +733,7 @@ def _app_store_review_payloads(
             title = clean_text((entry.get("title", {}) or {}).get("label"))
             review_id = (entry.get("id", {}) or {}).get("label") or f"{app_id}:{title}"
             rating = (entry.get("im:rating", {}) or {}).get("label")
+            occurred_at = clean_text((entry.get("updated", {}) or {}).get("label")) or utc_now()
             payloads.append({
                 "source_id": "app_store_reviews",
                 "brand_id": brand.get("id"),
@@ -748,6 +749,7 @@ def _app_store_review_payloads(
                 "body": body or title,
                 "url": url or f"https://apps.apple.com/{country.lower()}/app/id{app_id}",
                 "region": country,
+                "occurred_at": occurred_at,
                 "metrics": {"rating": rating},
                 "raw": {"rating": rating},
             })
