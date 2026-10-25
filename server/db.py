@@ -1,6 +1,7 @@
 """SQLite data layer: brand-rooted schema, migrations, and seed data."""
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -805,6 +806,7 @@ def init_db() -> None:
         backfill_sales_metrics(conn)
         conn.executescript(INDEXES)
         _backfill_brand_ids(conn)
+        _repair_legacy_sentiment_false_positives(conn)
         _cleanup_fake_boss_login_postings(conn)
 
 
@@ -825,6 +827,49 @@ def _cleanup_fake_boss_login_postings(conn: sqlite3.Connection) -> None:
     for row in rows:
         conn.execute("DELETE FROM job_snapshots WHERE posting_id = ?", (row["id"],))
         conn.execute("DELETE FROM job_postings WHERE id = ?", (row["id"],))
+
+
+def _repair_legacy_sentiment_false_positives(conn: sqlite3.Connection) -> None:
+    """Repair records misclassified by the old substring keyword matcher.
+
+    Before keyword boundaries were enforced, words such as the Spanish
+    ``grabadoras`` matched the English negative token ``bad``.  Re-analyse
+    only rows that still contain that exact legacy pattern and have no current
+    negative evidence, so explicitly supplied genuine negative labels remain
+    untouched.
+    """
+    from .nlp import NEGATIVE_TERMS, _term_matches, analyze_text
+
+    rows = conn.execute(
+        "SELECT id, title, body, sentiment FROM records WHERE sentiment = 'negative'"
+    ).fetchall()
+    for row in rows:
+        text = f"{row['title'] or ''} {row['body'] or ''}".strip()
+        lowered = text.lower()
+        analysis = analyze_text(text)
+        explanation = analysis.get("sentiment_explanation") or {}
+        if analysis["sentiment"] == "negative" or explanation.get("negative_terms"):
+            continue
+        legacy_matches = [
+            term for term in NEGATIVE_TERMS
+            if term in lowered and not _term_matches(lowered, term)
+        ]
+        if not legacy_matches:
+            continue
+        conn.execute(
+            """
+            UPDATE records
+            SET sentiment = ?, sentiment_score = ?, intent = ?, topics_json = ?
+            WHERE id = ?
+            """,
+            (
+                analysis["sentiment"],
+                analysis["sentiment_score"],
+                analysis["intent"],
+                json.dumps(analysis["topics"], ensure_ascii=False),
+                row["id"],
+            ),
+        )
 
 
 def _backfill_brand_ids(conn: sqlite3.Connection) -> None:

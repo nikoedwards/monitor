@@ -11,11 +11,19 @@ import re
 POSITIVE_TERMS = {
     "amazing", "love", "loved", "great", "excellent", "easy", "fast", "helpful",
     "reliable", "recommend", "smooth", "好用", "喜欢", "推荐", "稳定", "快", "满意",
+    "excelente", "genial", "increíble", "increible", "me encanta", "me gusta",
+    "recomiendo", "bueno", "buena", "fácil", "facil", "rápido", "rapido",
+    "útil", "util", "perfecto", "perfecta", "satisfecho", "satisfecha",
 }
 NEGATIVE_TERMS = {
     "bad", "broken", "confusing", "crash", "delayed", "difficult", "expensive",
     "hate", "refund", "slow", "stopped", "terrible", "unstable", "差", "难用",
     "太贵", "退款", "慢", "崩溃", "投诉", "不稳定",
+    "malo", "mala", "peor", "odio", "horrible", "problema", "problemas", "fallo",
+    "falla", "fallando", "no funciona", "no puedo", "difícil", "dificil", "caro",
+    "decepcionado", "decepcionante", "queja", "reembolso", "estafa", "lento",
+    "se bloquea", "no sirve", "molesto", "insatisfecho", "publicidad engañosa",
+    "anuncio engañoso",
 }
 NEGATION_TERMS = {"not", "no", "never", "don't", "doesn't", "isn't", "wasn't", "没", "不", "无"}
 
@@ -26,7 +34,7 @@ TOPIC_TERMS = {
     "feature": {"feature", "integration", "dashboard", "workflow", "功能", "接口"},
     "support": {"support", "service", "agent", "ticket", "客服", "售后"},
     "experience": {"app", "ios", "android", "ux", "experience", "crash", "卡顿", "闪退", "体验", "不好用"},
-    "ads": {"ad", "ads", "campaign", "creative", "广告", "投放", "素材"},
+    "ads": {"ad", "ads", "advertising", "advertisement", "campaign", "creative", "anuncio", "publicidad", "广告", "投放", "素材"},
     "creator": {"creator", "influencer", "tiktok", "reels", "达人", "红人"},
     "retail": {"amazon", "shopify", "store", "checkout", "电商", "订单"},
     "pr": {"press", "media", "publication", "journalist", "媒体", "报道"},
@@ -73,16 +81,33 @@ VOC_ACTION_STATUSES = {"open", "assigned", "in_progress", "resolved", "closed"}
 OWNER_TEAMS = {"experience_team", "support_team", "product_team", "marketing_team"}
 
 
+def _term_matches(lowered: str, term: str) -> bool:
+    """Match words without treating an English keyword as part of another word."""
+    candidate = str(term or "").strip().lower()
+    if not candidate:
+        return False
+    # CJK terms do not have whitespace-delimited word boundaries.  Keep the
+    # substring behavior for those terms, but require boundaries for Latin
+    # keywords so ``grabadoras`` cannot match ``bad`` or ``ad``.
+    if any(ord(char) > 127 for char in candidate if char.isalpha()):
+        return candidate in lowered
+    return re.search(rf"(?<![a-z]){re.escape(candidate)}(?![a-z])", lowered) is not None
+
+
+def _contains_any(lowered: str, terms: set[str] | tuple[str, ...]) -> bool:
+    return any(_term_matches(lowered, term) for term in terms)
+
+
 def _count_terms(text: str, lowered: str, terms: set[str]) -> int:
-    return sum(1 for term in terms if term in lowered or term in text)
+    return sum(1 for term in terms if _term_matches(lowered, term))
 
 
 def _has_negation(lowered: str) -> bool:
-    return any(term in lowered for term in NEGATION_TERMS)
+    return _contains_any(lowered, NEGATION_TERMS)
 
 
 def _matched_terms(text: str, lowered: str, terms: set[str]) -> list[str]:
-    return sorted(term for term in terms if term in lowered or term in text)
+    return sorted(term for term in terms if _term_matches(lowered, term))
 
 
 def _evidence_snippets(text: str, terms: list[str], limit: int = 2) -> list[str]:
@@ -117,11 +142,11 @@ def analyze_text(text: str) -> dict:
     else:
         sentiment = "neutral"
 
-    if any(t in lowered or t in text for t in ("refund", "退款", "broken", "crash", "投诉")):
+    if _contains_any(lowered, ("refund", "退款", "broken", "crash", "投诉", "reembolso", "queja", "problema")):
         intent = "complaint"
-    elif any(t in lowered or t in text for t in ("wish", "need", "希望", "能不能", "feature")):
+    elif _contains_any(lowered, ("wish", "need", "希望", "能不能", "feature")):
         intent = "request"
-    elif any(t in lowered or t in text for t in ("buy", "switch", "competitor", "换成", "购买")):
+    elif _contains_any(lowered, ("buy", "switch", "competitor", "换成", "购买")):
         intent = "purchase_signal"
     elif sentiment == "positive":
         intent = "praise"
@@ -131,7 +156,7 @@ def analyze_text(text: str) -> dict:
     topics = [
         topic
         for topic, terms in TOPIC_TERMS.items()
-        if any(t in lowered or t in text for t in terms)
+        if _contains_any(lowered, terms)
     ][:4]
 
     matched_terms = positive_terms + negative_terms + negation_terms
@@ -169,13 +194,13 @@ def team_for_record(record: dict, topic: str = "") -> str:
         for key in ("body", "title", "product", "platform", "data_type")
     ).lower()
     if "experience" in topics or any(
-        t in haystack for t in ("app", "ios", "android", "ux", "crash", "卡顿", "闪退", "体验")
+        _term_matches(haystack, t) for t in ("app", "app store", "ios", "android", "ux", "crash", "卡顿", "闪退", "体验")
     ):
         return "experience_team"
     if (
         record.get("intent") == "complaint"
         or topics & {"support", "delivery"}
-        or any(t in haystack for t in ("refund", "ticket", "投诉", "退款", "售后"))
+        or any(_term_matches(haystack, t) for t in ("refund", "ticket", "投诉", "退款", "售后"))
     ):
         return "support_team"
     if record.get("intent") == "request" or topics & {"quality", "feature"}:
