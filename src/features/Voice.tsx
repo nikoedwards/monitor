@@ -281,12 +281,6 @@ function SourceSummaryGrid({ sources, selectedSources, onSelect }: { sources: an
               <span style={{ color: source.negative ? "var(--danger)" : "var(--mute)" }}>负 {fmtNum(Number(source.negative || 0))}</span>
               {source.hot_risk_count > 0 && <Badge tone="negative">高热负向 {source.hot_risk_count}</Badge>}
             </div>
-            {source.representative && (
-              <div className="mt-2">
-                <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>代表原文</div>
-                <div className="text-[11px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>“{source.representative}”</div>
-              </div>
-            )}
           </button>
         );
       })}
