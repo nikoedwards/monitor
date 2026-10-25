@@ -88,7 +88,7 @@ class AppStoreCollectorTests(unittest.TestCase):
         self.assertTrue(all(item["data_type"] == "app_metric" for item in payloads))
         self.assertTrue(all(item["raw"]["discovery"] == "portfolio_market_lookup" for item in payloads))
         self.assertTrue(all(item["metrics"]["rating_count_observed"] for item in payloads))
-        self.assertEqual(1 + len(_DEFAULT_APP_STORE_COUNTRIES), fetch_json.call_count)
+        self.assertEqual(1 + len(_DEFAULT_APP_STORE_COUNTRIES) + 2, fetch_json.call_count)
 
     @patch("server.connectors.collectors.fetch_json")
     def test_configured_link_collects_total_rating_count_and_latest_reviews(self, fetch_json):

@@ -503,6 +503,8 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
             "priority_reason": _issue_priority_reason(items),
             "impact": _issue_impact(items),
             "representative": _representative_feedback(items),
+            "representative_url": representative_record.get("url"),
+            "representative_record_id": representative_record.get("id"),
             "problem_summary": group["problem_summary"],
             "source_keys": [key for key, _ in source_counts.most_common(3)],
             "latest_at": max((item.get("occurred_at") or "" for item in items), default=""),

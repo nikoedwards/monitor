@@ -683,8 +683,41 @@ def _configured_review_payloads(
         return []
     app_id = match.group(1)
     country = (row["region"] or "US").upper()[:2]
-    payloads: list[dict] = []
     errors: list[str] = []
+
+    try:
+        payloads = _app_store_review_payloads(
+            brand,
+            app_id,
+            country,
+            link_id=row["id"],
+            product_id=row["product_id"],
+            url=row["url"],
+        )
+    except FetchError as exc:
+        payloads = []
+        errors.append(str(exc))
+
+    _touch_link(
+        conn,
+        row["id"],
+        status="ok" if payloads or has_metric else "network" if errors else "empty",
+        error="; ".join(errors) if not payloads and not has_metric else "",
+    )
+    return payloads
+
+
+def _app_store_review_payloads(
+    brand: dict,
+    app_id: str,
+    country: str,
+    *,
+    link_id: str | None = None,
+    product_id: str | None = None,
+    url: str = "",
+) -> list[dict]:
+    """Fetch concrete recent App Store reviews for one app and storefront."""
+    payloads: list[dict] = []
 
     feed = (
         f"https://itunes.apple.com/{country.lower()}/rss/customerreviews/"
@@ -703,8 +736,8 @@ def _configured_review_payloads(
             payloads.append({
                 "source_id": "app_store_reviews",
                 "brand_id": brand.get("id"),
-                "product_id": row["product_id"],
-                "link_id": row["id"],
+                "product_id": product_id,
+                "link_id": link_id,
                 "external_id": review_id,
                 "data_type": "user_voice",
                 "dimension": "voc",
@@ -713,20 +746,13 @@ def _configured_review_payloads(
                 "title": title,
                 "author": clean_text((entry.get("author", {}) or {}).get("name", {}).get("label")),
                 "body": body or title,
-                "url": row["url"],
+                "url": url or f"https://apps.apple.com/{country.lower()}/app/id{app_id}",
                 "region": country,
                 "metrics": {"rating": rating},
                 "raw": {"rating": rating},
             })
     except FetchError as exc:
-        errors.append(str(exc))
-
-    _touch_link(
-        conn,
-        row["id"],
-        status="ok" if payloads or has_metric else "network" if errors else "empty",
-        error="; ".join(errors) if not payloads and not has_metric else "",
-    )
+        raise exc
     return payloads
 
 
@@ -753,6 +779,19 @@ def _discovered_app_payloads(brand: dict) -> list[dict]:
 
     for _country, market_payloads in _collect_app_store_markets(collect_market):
         payloads.extend(market_payloads)
+    for app in portfolio:
+        app_id = clean_text(str(app.get("trackId") or ""))
+        if app_id:
+            try:
+                payloads.extend(_app_store_review_payloads(
+                    brand,
+                    app_id,
+                    "US",
+                    link_id=f"auto-app-store:US:{app_id}",
+                    url=clean_text(app.get("trackViewUrl")),
+                ))
+            except FetchError:
+                continue
     return payloads
 
 
