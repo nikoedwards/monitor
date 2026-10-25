@@ -235,7 +235,10 @@ export function Topbar({ brandId }: { brandId?: string }) {
 
 export function Sidebar({ brandId }: { brandId: string }) {
   return (
-    <aside className="w-56 shrink-0 px-3 py-4" style={{ borderRight: "1px solid var(--hairline)" }}>
+    <aside
+      className="w-56 shrink-0 self-start sticky top-14 h-[calc(100vh-3.5rem)] px-3 py-4"
+      style={{ borderRight: "1px solid var(--hairline)" }}
+    >
       <nav className="space-y-0.5">
         {NAV.map(({ to, label, icon: Icon }) => (
           <NavLink
