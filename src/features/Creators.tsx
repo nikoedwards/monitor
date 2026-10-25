@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
-import { Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
+import { AsyncProgress, Badge, Button, Card, EmptyState, Input, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
 import { CreatorCollectionLogic } from "../components/CreatorCollectionLogic";
@@ -278,9 +278,12 @@ export default function Creators() {
               title={selectedProduct ? `${selectedProduct.name} 红人库` : brand?.is_competitor ? "竞品红人库" : "红人库"}
               subtitle={selectedProduct ? "仅聚合明确归因到该产品的内容；「重叠品牌」标记达人也合作过其他品牌" : "按合作内容聚合的达人；「重叠品牌」标记同时合作过其他品牌的达人"}
               action={
-                <Button size="sm" variant="primary" onClick={runReport} disabled={reportMut.isPending}>
-                  <Sparkles size={14} /> {reportMut.isPending ? "分析中…" : "生成分析报告"}
-                </Button>
+                <div className="flex flex-col items-end">
+                  <Button size="sm" variant="primary" onClick={runReport} disabled={reportMut.isPending}>
+                    <Sparkles size={14} /> {reportMut.isPending ? "分析中…" : "生成分析报告"}
+                  </Button>
+                  <AsyncProgress active={reportMut.isPending} label="正在整理红人报告" />
+                </div>
               }
             />
             {reportError && <div className="text-[13px] p-2 mb-3 rounded-md" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>{reportError}</div>}

@@ -170,6 +170,35 @@ export function Spinner() {
   );
 }
 
+export function AsyncProgress({ active, label = "正在处理", className }: { active: boolean; label?: string; className?: string }) {
+  const [elapsed, setElapsed] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!active) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  if (!active) return null;
+  return (
+    <div className={cx("w-full max-w-[240px] mt-1.5", className)} role="status" aria-live="polite">
+      <div className="flex items-center justify-between gap-2 text-[11px]" style={{ color: "var(--mute)" }}>
+        <span>{label}</span>
+        <span className="tabular-nums">已用 {elapsed} 秒</span>
+      </div>
+      <div className="h-1.5 mt-1 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+        <div className="h-full w-2/5 rounded-full animate-[progress-slide_1.4s_ease-in-out_infinite]" style={{ background: "var(--accent)" }} />
+      </div>
+    </div>
+  );
+}
+
 export function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
   return (
     <label className="block">
