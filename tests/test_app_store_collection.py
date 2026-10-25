@@ -117,6 +117,7 @@ class AppStoreCollectorTests(unittest.TestCase):
                         "title": {"label": "Useful"},
                         "content": {"label": "Works well"},
                         "author": {"name": {"label": "A User"}},
+                        "updated": {"label": "2026-10-20T12:34:56-07:00"},
                         "im:rating": {"label": "5"},
                     }]
                 }
@@ -134,6 +135,7 @@ class AppStoreCollectorTests(unittest.TestCase):
             item["region"] for item in payloads if item["data_type"] == "app_metric"
         })
         self.assertEqual("review-1", review["external_id"])
+        self.assertEqual("2026-10-20T12:34:56-07:00", review["occurred_at"])
         status = self.conn.execute("SELECT last_status FROM links WHERE id = 'plaud-us'").fetchone()
         self.assertEqual("ok", status["last_status"])
 
