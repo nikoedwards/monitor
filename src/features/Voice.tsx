@@ -173,7 +173,7 @@ export default function Voice() {
           <SectionTitle
             title="突出问题与标签归类"
             subtitle="按负向声量与集中度排序，并给出建议关注部门"
-            hint="P0 仅用于命中安全、隐私、数据丢失、异常扣款或大范围故障等高危信号的问题；其余问题按负向声量划分 P1-P3。"
+            hint="P0 仅用于命中安全、隐私、数据丢失、异常扣款或大范围故障等高危信号；其余问题结合负向声量、负向率和帖子在当前范围内的相对传播排名划分 P1-P3。"
           />
           <IssueBoard topics={summary.topics || []} />
         </Card>
@@ -311,6 +311,7 @@ function IssueBoard({ topics }: { topics: any[] }) {
                   </span>
                 </div>
                 {topic.priority_reason && <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>{topic.priority_reason}</div>}
+                {topic.impact && <ImpactMetrics impact={topic.impact} />}
                 <div className="mt-2">
                   <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>问题概述</div>
                   <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{topic.problem_summary || "当前未生成明确的问题描述。"}</p>
@@ -338,6 +339,31 @@ function IssueBoard({ topics }: { topics: any[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function ImpactMetrics({ impact }: { impact: any }) {
+  const metrics = [
+    ["浏览", "views"],
+    ["评论/回复", "comments"],
+    ["互动", "interactions"],
+    ["触达", "reach"],
+    ["互动速度", "velocity"],
+  ] as const;
+  const visible = metrics.filter(([, key]) => Number(impact[key] || 0) > 0);
+  if (!visible.length) return null;
+  return (
+    <div className="mt-2 rounded-md px-2.5 py-2" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+      <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>传播数据（相对当前范围 {fmtNum(Number(impact.comparison_count || 0))} 条帖子）</div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1 text-[11px]" style={{ color: "var(--body)" }}>
+        {visible.map(([label, key]) => {
+          const relative = impact.relative?.[key];
+          const percentile = relative?.percentile;
+          const percentileLabel = percentile == null ? "暂无对比" : `前${Math.max(1, Math.ceil((relative.rank || 1) / Math.max(relative.sample_size || 1, 1) * 100))}%`;
+          return <span key={key}><span style={{ color: "var(--mute)" }}>{label}</span> {fmtNum(Number(impact[key]))} · <span style={{ color: percentile != null && percentile >= 0.75 ? "var(--warning)" : "var(--body)" }}>{percentileLabel}</span></span>;
+        })}
+      </div>
     </div>
   );
 }

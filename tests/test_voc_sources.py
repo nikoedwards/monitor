@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from server.domains.content import _highlight_terms, _issue_priority, _load_voice_records, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
+from server.domains.content import _highlight_terms, _issue_impact, _issue_priority, _load_voice_records, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
 from server.domains.common import build_trend
 from server.domains.insights import _summary_records
 
@@ -152,6 +152,43 @@ class VocSourceTests(unittest.TestCase):
         }]
 
         self.assertEqual("high", _issue_priority(records))
+
+    def test_issue_priority_uses_relative_post_metrics(self):
+        negative = [{
+            "sentiment": "negative",
+            "intent": "observation",
+            "metrics": {"views": 900},
+        }]
+        comparison = negative + [
+            {"sentiment": "positive", "metrics": {"views": 10}},
+            {"sentiment": "neutral", "metrics": {"views": 20}},
+            {"sentiment": "positive", "metrics": {"views": 50}},
+            {"sentiment": "neutral", "metrics": {"views": 100}},
+        ]
+
+        impact = _issue_impact(negative, comparison)
+
+        self.assertEqual("high", _issue_priority(negative, comparison))
+        self.assertEqual(1.0, impact["relative"]["views"]["percentile"])
+        self.assertEqual(5, impact["comparison_count"])
+
+    def test_issue_priority_does_not_use_absolute_views_alone(self):
+        negative = [{
+            "sentiment": "negative",
+            "intent": "observation",
+            "metrics": {"views": 10_000},
+        }]
+        comparison = negative + [
+            {"sentiment": "positive", "metrics": {"views": 20_000}},
+            {"sentiment": "neutral", "metrics": {"views": 30_000}},
+            {"sentiment": "positive", "metrics": {"views": 40_000}},
+            {"sentiment": "neutral", "metrics": {"views": 50_000}},
+        ]
+
+        impact = _issue_impact(negative, comparison)
+
+        self.assertEqual("low", _issue_priority(negative, comparison))
+        self.assertLess(impact["relative"]["views"]["percentile"], 0.75)
 
 if __name__ == "__main__":
     unittest.main()
