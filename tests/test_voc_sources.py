@@ -1,6 +1,6 @@
 import unittest
 
-from server.domains.content import _p0_summary, _voice_source_key
+from server.domains.content import _highlight_terms, _p0_summary, _problem_summary, _voice_source_key
 
 
 class VocSourceTests(unittest.TestCase):
@@ -43,6 +43,19 @@ class VocSourceTests(unittest.TestCase):
         self.assertEqual(1, result["total"])
         self.assertEqual("privacy_security", result["issues"][0]["key"])
         self.assertEqual("experience_team", result["issues"][0]["owner_team"])
+
+    def test_problem_summary_is_specific_and_highlights_sentiment_evidence(self):
+        record = {
+            "title": "Plaud doesn't fit on the iPhone Duo",
+            "body": "The magnetic case doesn't work on it. It's a little too big for the back panel and hangs past the bottom edge.",
+            "sentiment": "negative",
+            "topics": ["support"],
+        }
+        self.assertEqual(
+            "磁吸保护壳与 iPhone Duo 尺寸不兼容，保护壳过大并影响手机折叠。",
+            _problem_summary(record),
+        )
+        self.assertIn("too big", _highlight_terms(record))
 
 
 if __name__ == "__main__":

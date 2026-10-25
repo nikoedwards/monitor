@@ -368,6 +368,30 @@ function SentimentBadge({ record }: { record: RecordItem }) {
   );
 }
 
+function HighlightedText({ record }: { record: RecordItem }) {
+  const text = (record.body || record.title || "").trim();
+  const terms = Array.from(new Set((record.highlight_terms || []).filter((term) => term && term.length >= 3)))
+    .sort((a, b) => b.length - a.length);
+  if (!text || !terms.length) return <>{text}</>;
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(${terms.map(escape).join("|")})`, "gi");
+  const tone = record.sentiment === "negative"
+    ? { background: "rgba(238, 0, 0, 0.12)", color: "var(--danger)" }
+    : record.sentiment === "positive"
+      ? { background: "rgba(0, 148, 80, 0.12)", color: "#087443" }
+      : { background: "rgba(0, 112, 243, 0.10)", color: "var(--accent)" };
+  return (
+    <>
+      {text.split(pattern).map((part, index) => {
+        const highlighted = terms.some((term) => term.toLowerCase() === part.toLowerCase());
+        return highlighted ? (
+          <span key={`${part}-${index}`} className="rounded px-0.5" style={tone}>{part}</span>
+        ) : part;
+      })}
+    </>
+  );
+}
+
 function SocialThumbnail({ record }: { record: RecordItem }) {
   const [failed, setFailed] = useState(false);
   const thumbnail = thumbnailSrc(recordThumbnail(record));
@@ -501,8 +525,16 @@ export function RecordList({
                   )}
                 </div>
               )}
-              {r.feedback_summary && <p className="text-[13px] mt-1.5 leading-relaxed" style={{ color: "var(--ink)" }}>{r.feedback_summary}</p>}
-              <p className="text-[13px] mt-1 line-clamp-2" style={{ color: "var(--body)" }}>{r.body}</p>
+              {r.problem_summary && (
+                <div className="mt-2">
+                  <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>问题概述</div>
+                  <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{r.problem_summary}</p>
+                </div>
+              )}
+              <div className="mt-2">
+                <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>原文</div>
+                <p className="text-[13px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}><HighlightedText record={r} /></p>
+              </div>
               {r.metrics && (r.channel === "social" ? <SocialMeta metrics={r.metrics} /> : <MediaMeta metrics={r.metrics} />)}
               {r.hot_risk && <div className="mt-2 rounded px-2 py-1.5 text-[12px]" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>短时间内负向情绪集中，互动 {fmtNum(Number(r.interaction_count || 0))} 次，建议优先查看原帖与讨论走势。</div>}
               <CreatorEvidenceDetails record={r} />

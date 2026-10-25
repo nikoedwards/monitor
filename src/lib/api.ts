@@ -112,6 +112,8 @@ export interface RecordItem {
   metrics: Record<string, unknown>;
   raw?: Record<string, unknown>;
   feedback_summary?: string;
+  problem_summary?: string;
+  highlight_terms?: string[];
   interaction_count?: number;
   interaction_velocity?: number;
   age_hours?: number | null;

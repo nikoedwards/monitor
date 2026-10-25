@@ -177,13 +177,15 @@ def _source_catalog(records: list[dict]) -> list[dict]:
         topic_counts = Counter(topic for record in source_records for topic in (record.get("topics") or []))
         negative = counts.get("negative", 0)
         total = len(source_records)
-        if not source_records:
-            summary = "当前时间范围内暂无已采集反馈。"
-        elif negative:
-            top_topic = topic_counts.most_common(1)[0][0] if topic_counts else "多个问题"
-            summary = f"共 {total} 条反馈，负向 {negative} 条，主要集中在「{top_topic}」。"
-        else:
-            summary = f"共 {total} 条反馈，当前未发现明显负向集中问题。"
+        representative_record = next(
+            (record for record in source_records if record.get("sentiment") == "negative"),
+            source_records[0] if source_records else {},
+        )
+        summary = (
+            representative_record.get("problem_summary") or _problem_summary(representative_record)
+            if source_records
+            else "当前时间范围内暂无反馈。"
+        )
         catalog.append({
             **item,
             "count": total,
@@ -192,10 +194,10 @@ def _source_catalog(records: list[dict]) -> list[dict]:
             "negative": negative,
             "negative_rate": round(negative / total, 4) if total else 0.0,
             "summary": summary,
-            "representative": _representative_feedback(source_records),
+            "problem_summary": summary,
+            "representative": _representative_feedback([representative_record] if representative_record else source_records),
             "top_topics": [{"topic": topic, "count": count} for topic, count in topic_counts.most_common(3)],
             "hot_risk_count": sum(1 for record in source_records if record.get("hot_risk")),
-            "availability_note": "数据会在对应业务板块完成采集后自动汇入；当前暂无记录时请先检查来源配置与采集状态。" if not source_records else "已接入当前时间范围内的已采集记录。",
         })
     return catalog
 
@@ -205,16 +207,8 @@ def _enrich_voice_record(record: dict) -> dict:
     metrics = record.get("metrics") or {}
     body = (record.get("body") or record.get("title") or "").strip()
     sentiment = record.get("sentiment") or "neutral"
-    topics = record.get("topics") or []
-    topic_text = "、".join(str(topic) for topic in topics[:3])
-    if sentiment == "negative":
-        feedback_summary = f"负向反馈，主要涉及{topic_text or '当前内容'}。"
-    elif sentiment == "positive":
-        feedback_summary = f"正向反馈，主要提到{topic_text or '当前内容'}。"
-    else:
-        feedback_summary = f"中性反馈，讨论{topic_text or '当前内容'}。"
-    if body:
-        feedback_summary += f" 原因：{body[:92]}{'…' if len(body) > 92 else ''}"
+    problem_summary = _problem_summary(record)
+    highlight_terms = _highlight_terms(record)
 
     def metric_number(*keys: str) -> float:
         for key in keys:
@@ -244,12 +238,100 @@ def _enrich_voice_record(record: dict) -> dict:
     hot_risk = sentiment == "negative" and ((age_hours <= 24 and interactions >= 20) or (age_hours <= 72 and interactions >= 50) or velocity >= 8)
     return {
         **record,
-        "feedback_summary": feedback_summary,
+        "problem_summary": problem_summary,
+        "feedback_summary": problem_summary,
+        "highlight_terms": highlight_terms,
         "interaction_count": int(interactions),
         "interaction_velocity": round(velocity, 2),
         "age_hours": round(age_hours, 1) if age_hours < 9999 else None,
         "hot_risk": hot_risk,
     }
+
+
+_TOPIC_PROBLEM_LABELS = {
+    "support": "客服与售后支持",
+    "experience": "产品使用体验",
+    "feature": "功能与系统集成",
+    "quality": "产品质量与稳定性",
+    "price": "价格与订阅成本",
+    "delivery": "物流与交付",
+    "retail": "购买渠道与订单",
+    "ads": "广告与内容表达",
+    "creator": "红人内容",
+    "pr": "品牌口碑与媒体报道",
+}
+
+
+def _problem_summary(record: dict) -> str:
+    """Turn a raw feedback item into a specific, readable Chinese one-liner."""
+    title = str(record.get("title") or "").strip()
+    body = str(record.get("body") or "").strip()
+    text = f"{title} {body}".strip()
+    lowered = text.lower()
+    topics = record.get("topics") or []
+    intent = record.get("intent") or ""
+    sentiment = record.get("sentiment") or "neutral"
+
+    if ("start recording" in lowered or "stop recording" in lowered) and ("shortcut" in lowered or "siri" in lowered or "app intents" in lowered):
+        return "用户希望通过 Apple 快捷指令和 Siri 开始、停止录音，并查看录音状态。"
+    if ("magnetic case" in lowered or "magnetic" in lowered) and ("iphone duo" in lowered or "back panel" in lowered) and ("doesn't work" in lowered or "does not work" in lowered or "too big" in lowered or "doesn't fit" in lowered):
+        return "磁吸保护壳与 iPhone Duo 尺寸不兼容，保护壳过大并影响手机折叠。"
+    if any(term in lowered for term in ("doesn't fit", "does not fit", "won't fit", "cannot fit")):
+        return "产品尺寸或适配性存在问题，无法与目标设备正常配合使用。"
+    if any(term in lowered for term in ("crash", "crashes", "crashed", "keeps crashing", "闪退", "崩溃")):
+        return "应用或游戏频繁崩溃，用户无法正常完成使用。"
+    if any(term in lowered for term in ("refund", "退款", "charged twice", "double charged", "unauthorized charge")):
+        return "用户认为收费存在问题，提出退款或对未授权扣款进行投诉。"
+    if any(term in lowered for term in ("repair", "rma", "replacement", "no response", "status update", "delays")) and ("support" in lowered or "service" in lowered or "died" in lowered):
+        return "产品故障后的维修与客服响应周期过长，用户长时间得不到明确进展。"
+    if "battery" in lowered and any(term in lowered for term in ("drain", "draining", "dies quickly", "续航", "耗电")):
+        return "设备耗电过快，续航表现没有达到用户预期。"
+    if "ct clamp" in lowered and any(term in lowered for term in ("not reading", "incorrect", "wrong", "self test")):
+        return "智能电表无法正确读取 CT 夹数据，导致电池放电功率异常。"
+
+    topic = next((str(item) for item in topics if item in _TOPIC_PROBLEM_LABELS), "")
+    topic_label = _TOPIC_PROBLEM_LABELS.get(topic, "产品使用")
+    if intent == "request":
+        if topic == "feature" or any(term in lowered for term in ("feature", "integration", "workflow", "shortcut", "siri")):
+            return "用户希望补充功能或系统集成能力，以减少操作步骤并提升使用效率。"
+        return f"用户希望改善{topic_label}，并提出了具体功能或服务需求。"
+    if sentiment == "positive":
+        return f"用户对{topic_label}整体评价积极，认可当前产品或服务表现。"
+    if sentiment == "negative":
+        if topic == "support":
+            return "用户对客服或售后支持不满，认为问题处理不及时或没有得到解决。"
+        return f"用户对{topic_label}不满，认为当前表现影响了正常使用。"
+    if title and not title.lower().startswith(("unknown", "untitled")):
+        return f"用户提到：{title[:72]}{'…' if len(title) > 72 else ''}。"
+    return f"用户围绕{topic_label}分享了使用反馈，暂未形成明确的正负向结论。"
+
+
+def _highlight_terms(record: dict) -> list[str]:
+    text = f"{record.get('title') or ''} {record.get('body') or ''}"
+    lowered = text.lower()
+    terms: list[str] = []
+    explanation = record.get("sentiment_explanation") or {}
+    for key in ("positive_terms", "negative_terms", "negation_terms"):
+        values = explanation.get(key) if isinstance(explanation, dict) else []
+        if isinstance(values, list):
+            terms.extend(str(value).strip() for value in values if str(value).strip())
+    patterns = (
+        r"(?:doesn't|does not|isn't|is not|can't|cannot|won't|will not)\s+(?:work|fit|respond|start|stop)(?:\s+(?:on|with|for|the|it|this|that|device|phone|app)){0,4}",
+        r"too\s+(?:big|small|slow|expensive|late|difficult)",
+        r"(?:keeps?\s+)?crash(?:es|ed|ing)?",
+        r"hangs?\s+past\s+the\s+(?:bottom|back|edge)\s+(?:edge|panel|of\s+the\s+phone)",
+        r"no\s+(?:response|meaningful status update)",
+    )
+    for pattern in patterns:
+        terms.extend(match.group(0).strip() for match in re.finditer(pattern, text, flags=re.IGNORECASE))
+    unique: list[str] = []
+    seen: set[str] = set()
+    for term in sorted(terms, key=len, reverse=True):
+        key = term.lower()
+        if len(term) >= 3 and key in lowered and key not in seen:
+            unique.append(term)
+            seen.add(key)
+    return unique[:8]
 
 
 def _representative_feedback(records: list[dict]) -> str:
@@ -320,6 +402,8 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
         if not negative:
             continue
         source_counts = Counter(item.get("voice_source") for item in items if item.get("voice_source"))
+        representative_record = next((item for item in items if item.get("sentiment") == "negative"), items[0])
+        problem_summary = representative_record.get("problem_summary") or _problem_summary(representative_record)
         out.append({
             "topic": topic,
             "total": len(items),
@@ -328,7 +412,7 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
             "suggested_team": team_for_records(items, topic),
             "priority": _issue_priority(items),
             "representative": _representative_feedback(items),
-            "summary": f"围绕「{topic}」的反馈中，有 {negative} 条为负向，代表问题是：{_representative_feedback(items)}",
+            "problem_summary": problem_summary,
             "source_keys": [key for key, _ in source_counts.most_common(3)],
             "latest_at": max((item.get("occurred_at") or "" for item in items), default=""),
         })

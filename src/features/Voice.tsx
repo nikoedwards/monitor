@@ -268,15 +268,22 @@ function SourceSummaryGrid({ sources, selectedSources, onSelect }: { sources: an
               <span className="text-[13px] font-semibold" style={{ color: "var(--ink)" }}>{source.label}</span>
               <span className="text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(Number(source.count || 0))} 条</span>
             </div>
-            <p className="text-[12px] mt-1.5 leading-relaxed" style={{ color: "var(--body)" }}>{source.summary}</p>
+            <div className="mt-2">
+              <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>主要问题</div>
+              <p className="text-[12px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{source.problem_summary || source.summary}</p>
+            </div>
             <div className="flex items-center gap-2 mt-2 text-[11px]" style={{ color: "var(--mute)" }}>
               <span style={{ color: "var(--accent)" }}>正 {fmtNum(Number(source.positive || 0))}</span>
               <span>中 {fmtNum(Number(source.neutral || 0))}</span>
               <span style={{ color: source.negative ? "var(--danger)" : "var(--mute)" }}>负 {fmtNum(Number(source.negative || 0))}</span>
               {source.hot_risk_count > 0 && <Badge tone="negative">高热负向 {source.hot_risk_count}</Badge>}
             </div>
-            {source.representative && <div className="text-[11px] mt-2 line-clamp-2" style={{ color: "var(--mute)" }}>代表反馈：“{source.representative}”</div>}
-            {!source.count && source.availability_note && <div className="text-[11px] mt-2 leading-relaxed" style={{ color: "var(--warning)" }}>{source.availability_note}</div>}
+            {source.representative && (
+              <div className="mt-2">
+                <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>代表原文</div>
+                <div className="text-[11px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>“{source.representative}”</div>
+              </div>
+            )}
           </button>
         );
       })}
@@ -305,7 +312,16 @@ function IssueBoard({ topics }: { topics: any[] }) {
                     {topic.total} 条反馈 · 负向 {topic.negative} 条 · 负向率 {(topic.negative_rate * 100).toFixed(0)}%
                   </span>
                 </div>
-                {topic.summary && <p className="text-[12px] mt-1.5 leading-relaxed" style={{ color: "var(--body)" }}>{topic.summary}</p>}
+                <div className="mt-2">
+                  <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>问题概述</div>
+                  <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{topic.problem_summary || "当前未生成明确的问题描述。"}</p>
+                </div>
+                {topic.representative && (
+                  <div className="mt-2">
+                    <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>代表原文</div>
+                    <p className="text-[12px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>“{topic.representative}”</p>
+                  </div>
+                )}
                 <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                   {(topic.source_keys || []).map((key: string) => <Badge key={key} tone="neutral">{SOURCE_LABEL[key] || key}</Badge>)}
                 </div>
