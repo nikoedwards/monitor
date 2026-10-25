@@ -771,6 +771,9 @@ def marketing_summary(
     )
     by_channel = Counter(r.get("channel") or "unknown" for r in records)
     by_platform = Counter(r.get("platform") or "unknown" for r in records)
+    if channel == "creators":
+        for platform in ("youtube", "instagram", "tiktok", "x"):
+            by_platform.setdefault(platform, 0)
     by_source = Counter(r.get("source_id") or "unknown" for r in records)
     coverage = Counter((r.get("metrics") or {}).get("coverage_type") for r in records if (r.get("metrics") or {}).get("coverage_type"))
     posts = sum(1 for r in records if r.get("data_type") != "community_reply")

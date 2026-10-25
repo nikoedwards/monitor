@@ -7,6 +7,7 @@ which do not use credentials or bypass private/login-gated content.
 from __future__ import annotations
 
 import base64
+import json
 import re
 import sqlite3
 from datetime import datetime
@@ -85,8 +86,10 @@ def discover_profile_urls(
 ) -> list[tuple[str, str]]:
     """Return distinct public account URLs from one Bing result page."""
     freshness = _bing_freshness(cadence)
-    date_operator = f" after:{(since or datetime.now()).date().isoformat()}"
-    search = f"site:{platform}.com {query}{date_operator}"
+    # Account pages are evergreen. Applying a publication date operator to the
+    # profile discovery query makes search engines hide stable profiles before
+    # post collection can apply the precise time window.
+    search = f"site:{platform}.com {query}"
     url = f"{_BING}?q={quote_plus(search)}&freshness={freshness}"
     page = fetch_page(url, timeout=18)
     found: list[tuple[str, str]] = []
@@ -121,6 +124,18 @@ class PublicSearchCreatorProvider(CreatorProvider):
         discovery_succeeded = 0
         cadence = str(brand.get("_collection_cadence") or "daily")
         since = collection_since(brand)
+        social_links = brand.get("social_links") or brand.get("social_links_json") or {}
+        if isinstance(social_links, str):
+            try:
+                social_links = json.loads(social_links or "{}")
+            except (TypeError, ValueError):
+                social_links = {}
+        configured = social_links.get(self.platform) if isinstance(social_links, dict) else None
+        if configured:
+            profile, handle = _profile_url(self.platform, str(configured))
+            if profile and handle:
+                candidates.append((profile, handle, "configured_account"))
+                seen_profiles.add(profile)
         for query in [str(q).strip() for q in queries[:_MAX_QUERIES] if str(q).strip()]:
             try:
                 discovered = discover_profile_urls(self.platform, query, cadence=cadence, since=since)
