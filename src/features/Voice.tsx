@@ -317,7 +317,13 @@ function IssueBoard({ topics }: { topics: any[] }) {
                 {topic.representative && (
                   <div className="mt-2">
                     <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>代表原文</div>
-                    <p className="text-[12px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>“{topic.representative}”</p>
+                    {topic.representative_url ? (
+                      <a href={topic.representative_url} target="_blank" rel="noreferrer" className="block text-[12px] mt-0.5 line-clamp-2 leading-relaxed hover:underline" style={{ color: "var(--accent)" }} title="打开原文">
+                        “{topic.representative}” ↗
+                      </a>
+                    ) : (
+                      <p className="text-[12px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>“{topic.representative}”</p>
+                    )}
                   </div>
                 )}
                 <div className="flex items-center gap-1.5 mt-2 flex-wrap">

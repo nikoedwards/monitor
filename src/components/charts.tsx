@@ -7,7 +7,6 @@ import {
   Cell,
   Line,
   LineChart,
-  Legend,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -33,12 +32,11 @@ function TooltipBox({ active, payload, label, valueFormatter }: any) {
   );
 }
 
-function TrendLegend({ payload, hiddenKeys, onToggle }: { payload?: ReadonlyArray<any>; hiddenKeys: string[]; onToggle: (key: string) => void }) {
-  if (!payload?.length) return null;
+function TrendLegend({ keys, hiddenKeys, onToggle }: { keys: { key: string; name: string; color: string }[]; hiddenKeys: string[]; onToggle: (key: string) => void }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 pb-1 text-[12px]">
-      {payload.map((entry) => {
-        const key = String(entry.dataKey || entry.value);
+      {keys.map((entry) => {
+        const key = entry.key;
         const hidden = hiddenKeys.includes(key);
         return (
           <button
@@ -50,7 +48,7 @@ function TrendLegend({ payload, hiddenKeys, onToggle }: { payload?: ReadonlyArra
             aria-pressed={!hidden}
           >
             <span className="inline-block h-2 w-2 rounded-full" style={{ background: entry.color }} />
-            <span>{entry.value}</span>
+            <span>{entry.name}</span>
           </button>
         );
       })}
@@ -63,8 +61,9 @@ export function TrendChart({ data, keys, valueFormatter, interactive = false }: 
   const visibleKeys = interactive ? keys.filter((key) => !hiddenKeys.includes(key.key)) : keys;
 
   return (
-    <ResponsiveContainer width="100%" height={220}>
-      <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+    <div>
+      <ResponsiveContainer width="100%" height={220}>
+        <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
         <defs>
           {keys.map((k) => (
             <linearGradient key={k.key} id={`g-${k.key}`} x1="0" y1="0" x2="0" y2="1">
@@ -77,12 +76,13 @@ export function TrendChart({ data, keys, valueFormatter, interactive = false }: 
         <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
         <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 52 : 36} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
-        {interactive && <Legend content={(props) => <TrendLegend {...props} hiddenKeys={hiddenKeys} onToggle={(key) => setHiddenKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} />} />}
         {visibleKeys.map((k) => (
           <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} />
         ))}
-      </AreaChart>
-    </ResponsiveContainer>
+        </AreaChart>
+      </ResponsiveContainer>
+      {interactive && <TrendLegend keys={keys} hiddenKeys={hiddenKeys} onToggle={(key) => setHiddenKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} />}
+    </div>
   );
 }
 
