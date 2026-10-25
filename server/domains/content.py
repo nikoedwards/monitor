@@ -11,10 +11,11 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
+from ..community_summaries import summarize_community_records
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
-from ..schemas import ImportIn, RecordIn, VocActionIn, VocActionUpdate
+from ..schemas import CommunitySummariesIn, ImportIn, RecordIn, VocActionIn, VocActionUpdate
 from ..util import compact_key, new_id, utc_now
 from .common import build_trend, community_post_views, get_conn, query_records, resolve_window
 
@@ -72,6 +73,11 @@ def list_records(
         filters["product_id"] = None
         filters["matched_product_id"] = product_id
     return {"records": query_records(conn, filters, limit=limit)}
+
+
+@router.post("/records/community-summaries")
+def community_summaries(payload: CommunitySummariesIn, conn: sqlite3.Connection = Depends(get_conn)):
+    return summarize_community_records(conn, payload.record_ids)
 
 
 @router.post("/records", status_code=201)

@@ -4,6 +4,7 @@ import {
   api,
   qs,
   type Brand,
+  type CommunityPostSummary,
   type Link,
   type MarketShareModelKey,
   type MarketShareResponse,
@@ -251,6 +252,44 @@ export function useVocMutations() {
 }
 
 // ---------------------------------------------------------------- marketing
+export function useCommunitySummaries(records: RecordItem[]) {
+  const qc = useQueryClient();
+  const targets = records.filter((record) => record.channel === "community");
+  const queryKey = ["community-post-summaries", targets.map((record) => [record.id, record.title, record.body])];
+  return useQuery({
+    queryKey,
+    enabled: targets.length > 0,
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    queryFn: async ({ signal }) => {
+      const summaries: Record<string, CommunityPostSummary> = {};
+      // Publish each small batch as it finishes; the original content remains
+      // usable while summaries are generated and persisted on the server.
+      for (let index = 0; index < targets.length && !signal.aborted; index += 12) {
+        const batch = targets.slice(index, index + 12);
+        try {
+          const response = await api.post<{ summaries: Record<string, CommunityPostSummary> }>(
+            "/api/records/community-summaries", { record_ids: batch.map((record) => record.id) },
+          );
+          Object.assign(summaries, response.summaries);
+          if (Object.values(response.summaries).some((item) => item.status === "unconfigured")) {
+            targets.slice(index + 12).forEach((record) => { summaries[record.id] = { status: "unconfigured", summary: null }; });
+            qc.setQueryData(queryKey, { ...summaries });
+            break;
+          }
+        } catch {
+          targets.slice(index).forEach((record) => { summaries[record.id] = { status: "error", summary: null }; });
+          qc.setQueryData(queryKey, { ...summaries });
+          break;
+        }
+        qc.setQueryData(queryKey, { ...summaries });
+      }
+      return summaries;
+    },
+  });
+}
+
 export function useMarketingSummary(brandId?: string, channel?: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({

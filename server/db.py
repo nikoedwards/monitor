@@ -578,6 +578,14 @@ CREATE TABLE IF NOT EXISTS linkedin_profile_snapshots (
   created_at TEXT NOT NULL
 );
 
+-- Chinese summaries keyed to the current community post title/body.
+CREATE TABLE IF NOT EXISTS community_post_summaries (
+  record_id TEXT PRIMARY KEY REFERENCES records(id) ON DELETE CASCADE,
+  source_hash TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 -- LinkedIn employee activity feed (posts / comments / job changes).
 CREATE TABLE IF NOT EXISTS linkedin_activities (
   id TEXT PRIMARY KEY,
