@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterator
@@ -209,6 +210,20 @@ def resolve_window(days: int | None = None, start_date: str | None = None, end_d
     return start.isoformat(), end.isoformat()
 
 
+def community_post_views(record: dict) -> int | None:
+    """Public topic views, when supplied; replies and missing counts are not views."""
+    if record.get("channel") != "community" or record.get("data_type") == "community_reply":
+        return None
+    value = (record.get("metrics") or {}).get("views")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return int(number) if math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days: int = 70) -> list[dict]:
     """Zero-filled sentiment trend across [start, end]; auto-switch to weekly buckets for long spans."""
     start_d = _safe_date(start) or (datetime.now(timezone.utc).date() - timedelta(days=29))
@@ -225,7 +240,7 @@ def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days
     step = timedelta(days=7 if weekly else 1)
     while cursor <= end_d:
         key = cursor.isoformat()
-        buckets[key] = {"date": key, "total": 0, "negative": 0, "estimated_reach": 0}
+        buckets[key] = {"date": key, "total": 0, "negative": 0, "estimated_reach": 0, "community_views": None}
         cursor += step
 
     for record in records:
@@ -239,6 +254,9 @@ def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days
             if record.get("sentiment") == "negative":
                 bucket["negative"] += 1
             metrics = record.get("metrics") or {}
+            views = community_post_views(record)
+            if views is not None:
+                bucket["community_views"] = (bucket["community_views"] or 0) + views
             try:
                 bucket["estimated_reach"] += int(metrics.get("monthly_traffic") or metrics.get("estimated_reach") or 0)
             except (TypeError, ValueError):
