@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { SimpleLine, Bars } from "../components/charts";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
+import { AsyncProgress, Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { MonitorStatus } from "../components/MonitorStatus";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { useListingAutomap, useListingHistory, useListingMutations, useProducts, useSalesChanges, useSalesListings, useSalesMetrics, useSalesMutations, useSalesSummary, useSettings } from "../lib/hooks";
@@ -471,9 +471,12 @@ function ChannelView({
         action={
           <div className="flex flex-wrap items-center gap-2">
             {settings?.configured && (
-              <Button onClick={runAutomap} disabled={automap.isPending || !products.length} title={!products.length ? "请先在品牌管理添加产品" : "用大模型按标题/ASIN 自动映射未映射的 Listing"}>
-                {automap.isPending ? "AI 映射中…" : `AI 自动映射${unmapped ? ` (${unmapped})` : ""}`}
-              </Button>
+              <div className="flex flex-col items-end">
+                <Button onClick={runAutomap} disabled={automap.isPending || !products.length} title={!products.length ? "请先在品牌管理添加产品" : "用大模型按标题/ASIN 自动映射未映射的 Listing"}>
+                  {automap.isPending ? "AI 映射中…" : `AI 自动映射${unmapped ? ` (${unmapped})` : ""}`}
+                </Button>
+                <AsyncProgress active={automap.isPending} label="正在匹配 Listing 与产品" />
+              </div>
             )}
             <SegmentGroup value={channel} options={CHANNELS} onChange={setChannel} />
           </div>

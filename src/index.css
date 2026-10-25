@@ -102,6 +102,12 @@ body {
   border: 2px solid var(--bg);
 }
 
+@keyframes progress-slide {
+  0% { transform: translateX(-140%); }
+  55% { transform: translateX(180%); }
+  100% { transform: translateX(330%); }
+}
+
 /* Utility shorthands mapped to design tokens */
 @layer components {
   .panel {

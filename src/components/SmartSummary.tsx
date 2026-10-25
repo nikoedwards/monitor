@@ -3,7 +3,7 @@ import { AlertTriangle, RefreshCw, Sparkles } from "lucide-react";
 import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary } from "../lib/hooks";
 import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
-import { Badge, Button } from "./ui";
+import { AsyncProgress, Badge, Button } from "./ui";
 
 export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { brandId?: string; range: TimeRange; marketBrandIds?: string[] }) {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -17,10 +17,13 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { bran
           <Badge tone={data?.mode === "ai" ? "accent" : "neutral"}>{data?.mode === "ai" ? "AI 经营判断" : "系统速览"}</Badge>
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
         </div>
-        <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={summary.isFetching}>
-          <RefreshCw size={13} className={summary.isFetching ? "animate-spin" : ""} />
-          {summary.isFetching ? "更新中…" : "刷新总结"}
-        </Button>
+        <div className="flex flex-col items-end">
+          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={summary.isFetching}>
+            <RefreshCw size={13} className={summary.isFetching ? "animate-spin" : ""} />
+            {summary.isFetching ? "更新中…" : "刷新总结"}
+          </Button>
+          <AsyncProgress active={summary.isFetching} label="正在整理经营数据" />
+        </div>
       </div>
 
       {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在整理经营数据…</p>}
@@ -91,10 +94,13 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
           <Badge tone={data?.mode === "ai" ? "accent" : "neutral"}>{data?.mode === "ai" ? "AI 营销判断" : "系统速览"}</Badge>
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
         </div>
-        <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={summary.isFetching}>
-          <RefreshCw size={13} className={summary.isFetching ? "animate-spin" : ""} />
-          {summary.isFetching ? "更新中…" : "刷新总结"}
-        </Button>
+        <div className="flex flex-col items-end">
+          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={summary.isFetching}>
+            <RefreshCw size={13} className={summary.isFetching ? "animate-spin" : ""} />
+            {summary.isFetching ? "更新中…" : "刷新总结"}
+          </Button>
+          <AsyncProgress active={summary.isFetching} label="正在整理营销数据" />
+        </div>
       </div>
 
       {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在整理营销数据…</p>}
@@ -159,10 +165,13 @@ export function SmartSummary({ brandId, dimension, channel, range, label = "智�
 
   return (
     <div>
-      <div className="flex items-center gap-2">
-        <Button size="sm" variant="primary" disabled={!brandId || summarize.isPending} onClick={run}>
-          <Sparkles size={14} /> {summarize.isPending ? "生成中…" : label}
-        </Button>
+      <div className="flex items-start gap-2">
+        <div className="flex flex-col items-start">
+          <Button size="sm" variant="primary" disabled={!brandId || summarize.isPending} onClick={run}>
+            <Sparkles size={14} /> {summarize.isPending ? "生成中…" : label}
+          </Button>
+          <AsyncProgress active={summarize.isPending} label="正在生成智能总结" />
+        </div>
         <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)}{channel ? ` · ${channel}` : ""}</span>
       </div>
 
