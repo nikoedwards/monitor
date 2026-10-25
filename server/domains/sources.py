@@ -26,6 +26,28 @@ def _parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+def _cadence_delta(cadence: str) -> timedelta:
+    value = (cadence or "daily").lower()
+    if value == "hourly":
+        return timedelta(hours=1)
+    if value == "weekly":
+        return timedelta(days=7)
+    return timedelta(days=1)
+
+
+def _next_collect_at(last_collect_at: str | None, cadence: str, now: datetime) -> datetime:
+    """Return the next elapsed-cadence deadline for a source.
+
+    The scheduler uses the same elapsed cadence when deciding whether a source
+    is due. Keeping this calculation in the status endpoint makes the UI show
+    the actual source deadline instead of estimating from an unrelated source.
+    """
+    last = _parse_dt(last_collect_at)
+    if last is None:
+        return now
+    return last.astimezone(timezone.utc) + _cadence_delta(cadence)
+
+
 @router.get("")
 def list_sources(conn: sqlite3.Connection = Depends(get_conn)):
     rows = conn.execute("SELECT * FROM sources ORDER BY tier, category, name").fetchall()
@@ -70,6 +92,8 @@ def monitoring_status(
         }
     items: list[dict] = []
     last_run: datetime | None = None
+    now = datetime.now(timezone.utc)
+    next_due: datetime | None = None
     for spec in specs:
         row = rows.get(spec.id, {})
         run = brand_runs.get(spec.id, {})
@@ -77,6 +101,9 @@ def monitoring_status(
         parsed = _parse_dt(last_collect_at)
         if parsed and (last_run is None or parsed > last_run):
             last_run = parsed
+        due_at = _next_collect_at(last_collect_at, spec.cadence, now)
+        if spec.status == "ready" and (next_due is None or due_at < next_due):
+            next_due = due_at
         items.append({
             "id": spec.id,
             "name": spec.name,
@@ -88,6 +115,8 @@ def monitoring_status(
             "last_status": run.get("last_status") if brand_id else row.get("last_status"),
             "last_error": (run.get("last_error") if brand_id else row.get("last_error")) or "",
             "item_count": (run.get("item_count") or 0) if brand_id else (row.get("item_count") or 0),
+            "next_collect_at": due_at.isoformat(),
+            "due": due_at <= now,
         })
 
     interval = SCHEDULER_SECONDS
@@ -95,14 +124,13 @@ def monitoring_status(
     has_active = any(s.status == "ready" and s.collect is not None for s in specs)
     next_run: datetime | None = None
     if SCHEDULER_ENABLED and (has_active or dimension == "sales"):
-        now = datetime.now(timezone.utc)
         if dimension == "sales":
             next_run = (last_run or now) + timedelta(days=1)
-        elif last_run:
-            candidate = last_run + timedelta(seconds=interval)
-            next_run = candidate if candidate > now else now + timedelta(seconds=interval)
         else:
-            next_run = now + timedelta(seconds=interval)
+            # For connector-driven dimensions, report the earliest actual
+            # source deadline. This is usually a daily source deadline rather
+            # than the hourly scheduler loop interval.
+            next_run = next_due or (now + timedelta(seconds=interval))
 
     return {
         "dimension": dimension,
