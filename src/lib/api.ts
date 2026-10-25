@@ -137,6 +137,8 @@ export interface Source {
   credential_key?: string;
   cadence: string;
   last_collect_at?: string;
+  next_collect_at?: string;
+  due?: boolean;
   last_status?: string;
   last_error?: string;
   item_count: number;
