@@ -297,7 +297,8 @@ function IssueBoard({ topics }: { topics: any[] }) {
     <div className="space-y-2">
       {topics.map((topic) => {
         const priority = priorityView(topic.priority);
-        const topicLabel = TOPIC_LABEL[topic.topic] || topic.topic;
+        const topicLabels = (topic.topics || [topic.topic]).map((item: string) => TOPIC_LABEL[item] || item);
+        const suggestedTeams = topic.suggested_teams?.length ? topic.suggested_teams : [topic.suggested_team];
         return (
           <div key={topic.topic} className="rounded-lg p-3.5" style={{ border: "1px solid var(--hairline)" }}>
             <div className="flex flex-col md:flex-row md:items-start gap-3">
@@ -307,7 +308,7 @@ function IssueBoard({ topics }: { topics: any[] }) {
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[14px] font-semibold" style={{ color: "var(--ink)" }}>#{topicLabel}</span>
+                  <span className="text-[14px] font-semibold" style={{ color: "var(--ink)" }}>{topicLabels.map((label: string) => `#${label}`).join("、")}</span>
                   <span className="text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>
                     {topic.total} 条反馈 · 负向 {topic.negative} 条 · 负向率 {(topic.negative_rate * 100).toFixed(0)}%
                   </span>
@@ -327,7 +328,7 @@ function IssueBoard({ topics }: { topics: any[] }) {
                 </div>
               </div>
               <div className="flex items-center shrink-0">
-                <Badge tone="accent">建议关注：{TEAM_LABEL[topic.suggested_team] || topic.suggested_team}</Badge>
+                <Badge tone="accent">建议关注：{suggestedTeams.map((team: string) => TEAM_LABEL[team] || team).join("、")}</Badge>
               </div>
             </div>
           </div>
