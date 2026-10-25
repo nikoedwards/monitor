@@ -223,6 +223,19 @@ class CreatorPublicSearchTests(unittest.TestCase):
             )
         )
 
+    def test_bare_brand_name_is_not_trusted_for_ambiguous_catalog_brand(self):
+        brand = {"name": "PLAUD", "monitoring_keywords": ["PLAUD", "PLAUD AI"]}
+        self.assertFalse(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["PLAUD"], "search_query_evidence": True}, brand, []
+            )
+        )
+        self.assertTrue(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["PLAUD AI"], "search_query_evidence": True}, brand, []
+            )
+        )
+
     def test_runner_passes_daily_window_to_collector(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
