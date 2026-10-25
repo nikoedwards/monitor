@@ -12,6 +12,7 @@ from server.connectors.creators.products import (
 from server.connectors.creators.runner import _collect_platform
 from server.db import SCHEMA
 from server.domains.content import list_records
+from server.domains.common import query_records
 from server.domains.creators import creators_roster, creators_summary
 from server.records import insert_record
 
@@ -253,6 +254,53 @@ class CreatorProductAttributionTests(unittest.TestCase):
             payloads = _collect_platform(self.conn, brand, "youtube")
         self.assertEqual(["brand-1:youtube:flat-hit"], [item["external_id"] for item in payloads])
         self.assertFalse(payloads[0]["metrics"]["is_collab"])
+
+    def test_catalog_brand_requires_product_or_explicit_disambiguated_search_evidence(self):
+        class FakeProvider:
+            def collect(self, conn, brand, search_queries):
+                return [CreatorPost(
+                    platform="youtube",
+                    external_id="surname-noise",
+                    title="The murder of Félix Plaud",
+                    body="A Spanish-language crime report.",
+                    author="News Channel",
+                    raw={"query": "PLAUD", "matched_queries": ["PLAUD"]},
+                )]
+
+        brand = {"id": "brand-1", "name": "PLAUD", "monitoring_keywords": ["PLAUD"]}
+        with patch("server.connectors.creators.runner.pick_provider", return_value=FakeProvider()):
+            payloads = _collect_platform(self.conn, brand, "youtube")
+        self.assertEqual([], payloads)
+
+    def test_query_hides_legacy_catalog_noise_with_only_bare_brand_match(self):
+        self.conn.execute(
+            "UPDATE brands SET name = 'PLAUD', monitoring_keywords_json = ? WHERE id = 'brand-1'",
+            ('["PLAUD"]',),
+        )
+        insert_record(
+            self.conn,
+            {
+                "id": "legacy-surname-noise",
+                "source_id": "youtube_search",
+                "brand_id": "brand-1",
+                "external_id": "legacy-surname-noise",
+                "data_type": "creator_post",
+                "dimension": "marketing",
+                "channel": "creators",
+                "platform": "youtube",
+                "title": "The murder of Félix Plaud",
+                "body": "A Spanish-language crime report.",
+                "url": "https://youtube.com/watch?v=noise",
+                "occurred_at": "2026-08-03T10:00:00+00:00",
+                "raw": {"query": "PLAUD", "matched_queries": ["PLAUD"]},
+            },
+        )
+        records = query_records(
+            self.conn,
+            {"brand_id": "brand-1", "channel": "creators", "start_date": "2026-08-01", "end_date": "2026-08-05"},
+            limit=50,
+        )
+        self.assertNotIn("legacy-surname-noise", {item["id"] for item in records})
 
 
 if __name__ == "__main__":

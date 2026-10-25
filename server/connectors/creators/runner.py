@@ -8,7 +8,6 @@ table so the dashboard and the LLM report can read a per-creator view.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 
 from ...util import clean_text, new_id, utc_now
@@ -44,12 +43,16 @@ def _creator_search_terms(brand: dict, product_queries: list[str]) -> set[str]:
             keywords = []
     values.extend(str(value).strip() for value in (keywords or []) if str(value).strip())
     values.extend(str(value).strip() for value in product_queries if str(value).strip())
-    name = clean_text(brand.get("name"))
-    # Keep normal brand names as a fallback, while avoiding ambiguous short
-    # names unless the user explicitly configured them as a keyword.
-    if len(re.sub(r"\W+", "", name)) >= 5:
-        values.append(name)
-    return {value.casefold() for value in values if value}
+    name = clean_text(brand.get("name")).casefold()
+    # A bare brand name is not safe search evidence for a catalog brand: names
+    # can also be people, places, or unrelated terms (for example, PLAUD is a
+    # surname in several Spanish-language news videos). Only configured terms
+    # that add information beyond the bare brand remain trusted here.
+    return {
+        value.casefold()
+        for value in values
+        if value and value.casefold() != name
+    }
 
 
 def _has_trusted_creator_search_hit(raw: dict | None, brand: dict, product_queries: list[str]) -> bool:
@@ -65,6 +68,28 @@ def _has_trusted_creator_search_hit(raw: dict | None, brand: dict, product_queri
         values = [values]
     trusted = _creator_search_terms(brand, product_queries)
     return any(str(value).strip().casefold() in trusted for value in values if str(value).strip())
+
+
+def _creator_record_is_relevant(
+    *,
+    raw: dict | None,
+    brand: dict,
+    products: list[dict],
+    product_matches: list[dict],
+    transcript_hit: bool,
+    brand_mentions: bool,
+    product_queries: list[str],
+) -> bool:
+    """Apply the same evidence gate to new and already stored creator posts."""
+    if product_matches or transcript_hit:
+        return True
+    trusted_search_hit = _has_trusted_creator_search_hit(raw, brand, product_queries)
+    # Once a brand has a product catalog, a bare brand mention is ambiguous and
+    # cannot pass review by itself. This is what prevents person-name collisions
+    # such as “Félix Plaud” from entering the PLAUD hardware feed.
+    if products:
+        return trusted_search_hit
+    return brand_mentions or trusted_search_hit
 
 
 def _payload(brand: dict, post: CreatorPost, collab: dict, source_id: str, *, product_matches: list[dict] | None = None, signals: dict | None = None) -> dict:
@@ -148,10 +173,15 @@ def _collect_platform(conn: sqlite3.Connection, brand: dict, platform: str) -> l
         if transcript_hit and not collab["is_collab"]:
             mentions = {clean_text(item.get("matched_text") or item.get("matched_query")) for item in transcript_matches if isinstance(item, dict)}
             collab = {**collab, "is_collab": True, "collab_type": "transcript", "mentions": sorted(item for item in mentions if item)}
-        # Search APIs are relevance-ranked rather than exact-match. Visible
-        # content normally must contain brand/product proof; the explicit flat
-        # search marker is the controlled exception when YouTube blocks details.
-        if not collab["mentions"] and not product_matches and not transcript_hit and not trusted_search_hit:
+        if not _creator_record_is_relevant(
+            raw=post.raw,
+            brand=brand,
+            products=products,
+            product_matches=product_matches,
+            transcript_hit=transcript_hit,
+            brand_mentions=bool(collab["mentions"]),
+            product_queries=product_queries,
+        ):
             continue
         # TODO(multimodal): soft placements (product shown on-screen, no caption
         # mention) are invisible to text detection. A future vision pass over the
