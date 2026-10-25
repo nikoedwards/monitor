@@ -14,6 +14,7 @@ class VocSourceTests(unittest.TestCase):
             ({"dimension": "marketing", "channel": "community", "platform": "reddit"}, "social_posts_comments"),
             ({"dimension": "marketing", "channel": "creators", "platform": "tiktok"}, "creator_comments"),
             ({"dimension": "voc", "channel": "app", "source_id": "app_store_reviews"}, "app_reviews"),
+            ({"dimension": "platform", "channel": "app", "source_id": "app_store_reviews", "platform": "app_store"}, "app_reviews"),
             ({"dimension": "voc", "source_id": "manual_csv"}, "manual_feedback"),
         ]
 
@@ -66,6 +67,7 @@ class VocSourceTests(unittest.TestCase):
             ("marketing", "social"): [{"id": "video", "dimension": "marketing", "channel": "social", "platform": "youtube", "body": "video feedback"}],
             ("marketing", "community"): [{"id": "community", "dimension": "marketing", "channel": "community", "platform": "reddit", "body": "community feedback"}],
             ("marketing", "creators"): [{"id": "creator", "dimension": "marketing", "channel": "creators", "platform": "tiktok", "body": "creator feedback"}],
+            ("platform", "app"): [{"id": "app-metric", "dimension": "platform", "channel": "app", "source_id": "app_store_reviews", "platform": "app_store", "body": "US App Store rating count"}],
         }
 
         def fake_query_records(_conn, filters, limit=200):
@@ -74,7 +76,7 @@ class VocSourceTests(unittest.TestCase):
         with patch("server.domains.content.query_records", side_effect=fake_query_records):
             records = _summary_records(None, "brand-1", "voc", None, "2026-01-01", "2026-01-31")
 
-        self.assertEqual({"manual", "video", "community", "creator"}, {record["id"] for record in records})
+        self.assertEqual({"manual", "video", "community", "creator", "app-metric"}, {record["id"] for record in records})
 
     def test_topic_breakdown_merges_same_problem_and_keeps_all_teams(self):
         records = [

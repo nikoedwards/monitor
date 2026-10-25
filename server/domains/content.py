@@ -115,11 +115,14 @@ def _voice_source_key(record: dict) -> str | None:
     if dimension == "sales" and ("review" in source_id or "review" in data_type or channel in _SALES_REVIEW_CHANNELS):
         return "sales_reviews"
 
+    if dimension in {"voc", "platform"} and (
+        channel == "app" or "app_store" in source_id or platform in {"app_store", "google_play"}
+    ):
+        return "app_reviews"
+
     if dimension == "voc":
         if source_id in {"manual", "manual_csv"}:
             return "manual_feedback"
-        if channel == "app" or "app_store" in source_id or platform in {"app_store", "google_play"}:
-            return "app_reviews"
         if channel in _SALES_REVIEW_CHANNELS or source_id in {"amazon_reviews", "shopify_reviews", "sales_reviews"}:
             return "sales_reviews"
         return "manual_feedback"
@@ -153,6 +156,7 @@ def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: s
         {**base, "dimension": "marketing", "channel": "social"},
         {**base, "dimension": "marketing", "channel": "community"},
         {**base, "dimension": "marketing", "channel": "creators"},
+        {**base, "dimension": "platform", "channel": "app"},
     ):
         candidates.extend(query_records(conn, filters, limit=1000))
 
