@@ -14,6 +14,12 @@ const STATUS_LABELS: Record<string, string> = {
   skipped: "跳过",
 };
 
+const PLATFORM_LABELS: Record<string, string> = {
+  youtube_search: "YouTube",
+  tiktok_listening: "TikTok",
+  instagram_listening: "Instagram",
+};
+
 export function CreatorSourceStatus({ brandId }: { brandId?: string }) {
   const { data } = useMonitoringStatus(brandId, "marketing");
   const sources = (data?.sources || []).filter((source: any) => source.category === "creators");
@@ -25,11 +31,13 @@ export function CreatorSourceStatus({ brandId }: { brandId?: string }) {
         const status = source.last_status || source.status || "pending";
         const tone = status === "ok" ? "var(--accent)" : status === "error" ? "var(--danger)" : "var(--warning)";
         const lastRun = source.last_collect_at ? fmtDateTime(source.last_collect_at) : "尚未采集";
+        const itemCount = Number(source.item_count || 0);
+        const resultLabel = status === "ok" && itemCount === 0 ? "0 条" : `${itemCount} 条`;
         return (
-          <span key={source.id} title={source.last_error || `${LABELS[source.id]}：${lastRun}`}>
-            <span className="font-medium" style={{ color: "var(--body)" }}>{LABELS[source.id]}</span>{" "}
+          <span key={source.id} title={source.last_error || `${LABELS[source.id]}：${lastRun}，${resultLabel}`}>
+            <span className="font-medium" style={{ color: "var(--body)" }}>{PLATFORM_LABELS[source.id] || LABELS[source.id]}</span>{" "}
             <span style={{ color: tone }}>{STATUS_LABELS[status] || "待采集"}</span>
-            {` · ${lastRun}`}
+            {` · ${resultLabel} · ${lastRun}`}
           </span>
         );
       })}

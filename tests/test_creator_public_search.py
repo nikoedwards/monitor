@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from server.connectors.base import ConnectorSpec, run_collector
 from server.connectors.creators.base import CreatorPost, occurred_in_collection_window
-from server.connectors.creators.public_search import discover_profile_urls
+from server.connectors.creators.public_search import PublicSearchCreatorProvider, discover_profile_urls
 from server.connectors.creators.youtube import YouTubePublicProvider
 from server.connectors.creators.runner import _has_trusted_creator_search_hit
 from server.connectors.registry import BY_ID
@@ -287,6 +287,15 @@ class CreatorPublicSearchTests(unittest.TestCase):
         self.assertEqual(profiles, [("https://www.instagram.com/creator_one/", "creator_one")])
         request_url = fetch_page.call_args.args[0]
         self.assertIn("freshness=Day", request_url)
+        self.assertNotIn("after%3A", request_url)
+
+    @patch("server.connectors.creators.public_search.collect_instagram_public", return_value=[])
+    @patch("server.connectors.creators.public_search.discover_profile_urls", return_value=[])
+    def test_public_search_prefers_configured_social_account(self, _discover, collect):
+        provider = PublicSearchCreatorProvider("instagram")
+        brand = {"social_links": {"instagram": "https://www.instagram.com/creator_one/"}}
+        provider.collect(sqlite3.connect(":memory:"), brand, ["PLAUD"])
+        collect.assert_called_once_with("https://www.instagram.com/creator_one/", "creator_one", limit=12)
 
 
 if __name__ == "__main__":

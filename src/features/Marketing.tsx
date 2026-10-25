@@ -175,6 +175,7 @@ export default function Marketing() {
 
   const channelName = CHANNEL_LABEL[channel] || channel;
   const isCommunity = view === "channel" && channel === "community";
+  const isCreators = view === "channel" && channel === "creators";
   const hasCommunityViews = summary.community_view_records > 0;
   const canShowReach = isCommunity ? hasCommunityViews : summary.total_reach > 0;
   const visibleTrendMetric = canShowReach ? trendMetric : "volume";
@@ -214,6 +215,13 @@ export default function Marketing() {
           <StatCard label="子渠道数" value={subchannelCount} hint="如多个 subreddit / 自建站" />
           <StatCard label="数据源" value={summary.by_source?.length || 0} />
           <StatCard label="帖子公开浏览量" value={hasCommunityViews ? fmtNum(summary.total_community_views) : "未公开"} hint={hasCommunityViews ? `覆盖 ${summary.community_view_records} / ${summary.posts} 篇帖子，非去重人数` : "当前帖子未提供公开浏览量"} />
+        </div>
+      ) : isCreators ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatCard label="红人内容" value={fmtNum(summary.total)} />
+          <StatCard label="总曝光 / 播放" value={fmtNum(summary.total_views)} tone="accent" />
+          <StatCard label="总点赞" value={fmtNum(summary.total_likes)} />
+          <StatCard label="总互动" value={fmtNum(summary.total_engagement)} />
         </div>
       ) : isSocial ? (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -296,13 +304,13 @@ export default function Marketing() {
         </Card>
         <Card>
           <SectionTitle
-            title={isSocial ? "社媒平台明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
-            subtitle={isSocial ? "按 YouTube、Instagram、TikTok 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
+            title={isSocial || isCreators ? "平台采集明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
+            subtitle={isSocial || isCreators ? "按 YouTube、Instagram、TikTok 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
           />
           {view === "channel" ? (
             <SourceBreakdown
-              sources={isSocial ? summary.by_platform || [] : summary.by_source || []}
-              kind={isSocial ? "platform" : "source"}
+              sources={isSocial || isCreators ? summary.by_platform || [] : summary.by_source || []}
+              kind={isSocial || isCreators ? "platform" : "source"}
             />
           ) : summary.by_platform?.length ? (
             <Bars data={summary.by_platform.slice(0, 8)} dataKey="total" nameKey="platform" name="声量" color="var(--violet)" />
