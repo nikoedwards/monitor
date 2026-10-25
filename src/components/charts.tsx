@@ -7,11 +7,13 @@ import {
   Cell,
   Line,
   LineChart,
+  Legend,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { useState } from "react";
 
 const AXIS = { fontSize: 11, fill: "var(--mute)" };
 const GRID = "var(--hairline)";
@@ -31,7 +33,34 @@ function TooltipBox({ active, payload, label, valueFormatter }: any) {
   );
 }
 
-export function TrendChart({ data, keys, valueFormatter, showPoints = false }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string; showPoints?: boolean }) {
+function TrendLegend({ payload, hiddenKeys, onToggle }: { payload?: ReadonlyArray<any>; hiddenKeys: string[]; onToggle: (key: string) => void }) {
+  if (!payload?.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 pb-1 text-[12px]">
+      {payload.map((entry) => {
+        const key = String(entry.dataKey || entry.value);
+        const hidden = hiddenKeys.includes(key);
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onToggle(key)}
+            className="inline-flex items-center gap-1.5 cursor-pointer"
+            style={{ color: "var(--body)", opacity: hidden ? 0.42 : 1 }}
+            aria-pressed={!hidden}
+          >
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: entry.color }} />
+            <span>{entry.value}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export function TrendChart({ data, keys, valueFormatter, showPoints = false, interactive = false }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string; showPoints?: boolean; interactive?: boolean }) {
+  const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
+  const visibleKeys = interactive ? keys.filter((key) => !hiddenKeys.includes(key.key)) : keys;
   return (
     <ResponsiveContainer width="100%" height={220}>
       <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -47,7 +76,8 @@ export function TrendChart({ data, keys, valueFormatter, showPoints = false }: {
         <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
         <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 52 : 36} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
-        {keys.map((k) => (
+        {interactive && <Legend content={(props) => <TrendLegend {...props} hiddenKeys={hiddenKeys} onToggle={(key) => setHiddenKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])} />} />}
+        {visibleKeys.map((k) => (
           <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} dot={showPoints ? { r: 3 } : false} />
         ))}
       </AreaChart>
