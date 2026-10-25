@@ -75,6 +75,33 @@ def snapshot_to_dict(row: sqlite3.Row) -> dict:
     return item
 
 
+def _window_posting_to_dict(posting: dict) -> dict:
+    """Return the job fields needed by the hiring window detail list."""
+    try:
+        business_tags = json.loads(posting.get("business_tags_json") or "[]")
+    except (TypeError, ValueError):
+        business_tags = []
+    return {
+        "id": posting.get("id"),
+        "platform": posting.get("platform"),
+        "external_id": posting.get("external_id"),
+        "url": posting.get("url"),
+        "title": posting.get("title"),
+        "department": posting.get("department"),
+        "city": posting.get("city"),
+        "jd_text": (posting.get("jd_text") or "")[:16000],
+        "status": posting.get("status"),
+        "posted_at": posting.get("posted_at"),
+        "refreshed_at": posting.get("refreshed_at"),
+        "first_seen": posting.get("first_seen"),
+        "last_seen": posting.get("last_seen"),
+        "closed_at": posting.get("closed_at"),
+        "last_status": posting.get("last_status"),
+        "last_error": posting.get("last_error"),
+        "business_tags": business_tags if isinstance(business_tags, list) else [],
+    }
+
+
 def profile_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     item = dict(row)
     item.pop("raw_json", None)
@@ -527,8 +554,27 @@ def hiring_summary(
     )[:12]
 
     avg_open_days = round(sum(open_durations) / len(open_durations), 1) if open_durations else None
+    released_postings = sorted(
+        [
+            _window_posting_to_dict(p)
+            for p in postings
+            if start <= (p.get("first_seen") or "")[:10] <= end
+        ],
+        key=lambda p: (p.get("first_seen") or "", p.get("title") or ""),
+        reverse=True,
+    )
+    closed_postings = sorted(
+        [
+            _window_posting_to_dict(p)
+            for p in postings
+            if start <= (p.get("closed_at") or "")[:10] <= end
+        ],
+        key=lambda p: (p.get("closed_at") or "", p.get("title") or ""),
+        reverse=True,
+    )
 
     return {
+        "window": {"start": start, "end": end},
         "trend": trend,
         "by_department": by_department,
         "by_platform": list(platform_counts.values()),
@@ -538,6 +584,8 @@ def hiring_summary(
         "avg_open_days": avg_open_days,
         "released_in_window": sum(t["released"] for t in trend),
         "closed_in_window": sum(t["closed"] for t in trend),
+        "released_postings": released_postings,
+        "closed_postings": closed_postings,
     }
 
 
