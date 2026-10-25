@@ -82,6 +82,11 @@ export interface Link {
   config: Record<string, unknown>;
 }
 
+export interface CommunityPostSummary {
+  status: "ready" | "unavailable" | "unconfigured" | "error";
+  summary: string | null;
+}
+
 export interface RecordItem {
   id: string;
   brand_id?: string;
