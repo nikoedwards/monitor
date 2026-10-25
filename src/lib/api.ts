@@ -271,6 +271,41 @@ export interface JobPosting {
   latest?: JobSnapshotItem | null;
 }
 
+export interface HiringWindowPosting {
+  id: string;
+  platform: string;
+  external_id?: string;
+  url?: string;
+  title?: string;
+  department?: string;
+  city?: string;
+  jd_text?: string;
+  status: string;
+  posted_at?: string;
+  refreshed_at?: string;
+  first_seen?: string;
+  last_seen?: string;
+  closed_at?: string;
+  last_status?: string;
+  last_error?: string;
+  business_tags: string[];
+}
+
+export interface HiringSummary {
+  window?: { start: string; end: string };
+  trend: { date: string; released: number; closed: number; active: number }[];
+  by_department: { department: string; count: number }[];
+  by_platform: { platform: string; open: number; closed: number }[];
+  total_postings: number;
+  total_open: number;
+  total_closed: number;
+  avg_open_days?: number | null;
+  released_in_window: number;
+  closed_in_window: number;
+  released_postings: HiringWindowPosting[];
+  closed_postings: HiringWindowPosting[];
+}
+
 export interface LinkedInEmployee {
   id: string;
   brand_id: string;

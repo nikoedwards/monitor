@@ -575,7 +575,7 @@ export function useHiringSummary(brandId?: string, platform?: string, range?: Ti
   const rp = rangeParams(range);
   return useQuery({
     queryKey: ["hiring-summary", brandId, platform, rp],
-    queryFn: () => api.get<any>(`/api/hiring/summary${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
+    queryFn: () => api.get<import("./api").HiringSummary>(`/api/hiring/summary${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
     enabled: !!brandId,
   });
 }
