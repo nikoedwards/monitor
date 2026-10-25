@@ -70,6 +70,24 @@ function thumbnailSrc(url?: string): string | undefined {
   return `/api/media/thumbnail?url=${encodeURIComponent(normalized)}`;
 }
 
+function youtubeThumbnailFromUrl(url?: string): string | undefined {
+  const value = textValue(url);
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    let videoId = "";
+    if (parsed.hostname === "youtu.be") {
+      videoId = parsed.pathname.replace(/^\//, "").split("/")[0] || "";
+    } else if (parsed.hostname === "youtube.com" || parsed.hostname.endsWith(".youtube.com")) {
+      videoId = parsed.searchParams.get("v") || parsed.pathname.match(/^\/(?:shorts|embed|live)\/([^/?#]+)/)?.[1] || "";
+    }
+    if (!videoId || !/^[A-Za-z0-9_-]{6,32}$/.test(videoId)) return undefined;
+    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  } catch {
+    return undefined;
+  }
+}
+
 function recordThumbnail(record: RecordItem): string | undefined {
   if (record.channel !== "social" && record.channel !== "creators" && record.data_type !== "creator_post" && record.data_type !== "social_post") return undefined;
   const metrics = record.metrics || {};
@@ -80,6 +98,9 @@ function recordThumbnail(record: RecordItem): string | undefined {
     const value = metrics[key] ?? raw[key];
     const normalized = textValue(value);
     if (normalized) return normalized;
+  }
+  if (record.platform === "youtube" || record.source_id === "youtube_search") {
+    return youtubeThumbnailFromUrl(record.url);
   }
   if ((record.platform === "instagram" || record.platform === "tiktok" || record.platform === "x") && textValue(record.url)) {
     return textValue(record.url);

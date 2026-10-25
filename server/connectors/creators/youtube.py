@@ -28,6 +28,13 @@ def _to_int(value) -> int | None:
         return None
 
 
+def _youtube_thumbnail_url(video_id: str) -> str:
+    value = str(video_id or "").strip()
+    if not value:
+        return ""
+    return f"https://i.ytimg.com/vi/{value}/hqdefault.jpg"
+
+
 class YouTubeProvider(CreatorProvider):
     name = "youtube_api"
     platform = "youtube"
@@ -202,6 +209,7 @@ class YouTubePublicProvider(CreatorProvider):
                 flat_downloader = yt_dlp.YoutubeDL(flat_options)
                 after = collection_since(brand).date().isoformat()
                 for query in [str(q).strip() for q in queries if str(q).strip()][:8]:
+                    used_flat_search = False
                     try:
                         result = downloader.extract_info(
                             f"ytsearch{self.max_results}:{query} after:{after}", download=False
@@ -217,6 +225,7 @@ class YouTubePublicProvider(CreatorProvider):
                             result = flat_downloader.extract_info(
                                 f"ytsearch{self.max_results}:{query} after:{after}", download=False
                             )
+                            used_flat_search = True
                             if not isinstance(result, dict) or not (result.get("entries") or []):
                                 continue
                             successful_queries += 1
@@ -232,12 +241,15 @@ class YouTubePublicProvider(CreatorProvider):
                                 f"ytsearch{self.max_results}:{query} after:{after}", download=False
                             )
                             entries = (flat_result or {}).get("entries") or [] if isinstance(flat_result, dict) else []
+                            used_flat_search = True
                             if entries:
                                 successful_queries += 1
                         except Exception:
                             entries = []
                     for item in entries:
                         if isinstance(item, dict):
+                            if used_flat_search:
+                                item["_search_query_evidence"] = True
                             item = self._recover_watch_metadata(item)
                             if not item.get("timestamp") and not item.get("upload_date"):
                                 # The search URL already carries the rolling
@@ -416,7 +428,7 @@ class YouTubePublicProvider(CreatorProvider):
             author=clean_text(item.get("channel") or item.get("uploader")),
             author_handle=channel_id or handle,
             author_url=author_url,
-            thumbnail_url=str(item.get("thumbnail") or ""),
+            thumbnail_url=str(item.get("thumbnail") or "").strip() or _youtube_thumbnail_url(external_id),
             occurred_at=occurred_at,
             views=_to_int(item.get("view_count")),
             likes=_to_int(item.get("like_count")),
@@ -425,5 +437,6 @@ class YouTubePublicProvider(CreatorProvider):
                  "tags": [clean_text(tag) for tag in (item.get("tags") or []) if clean_text(tag)],
                  "categories": [clean_text(category) for category in (item.get("categories") or []) if clean_text(category)],
                  "duration_seconds": _to_int(item.get("duration")),
+                 "search_query_evidence": bool(item.get("_search_query_evidence")),
                  "publication_time_precision": "approximate_window" if item.get("_publication_time_fallback") else "exact"},
         )

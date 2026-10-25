@@ -92,6 +92,23 @@ class CreatorThumbnailTests(unittest.TestCase):
         item = record_to_dict(conn.execute("SELECT * FROM records").fetchone())
         self.assertEqual(item["metrics"]["thumbnail_url"], "https://cdn.example/legacy.jpg")
 
+    def test_read_derives_youtube_thumbnail_for_legacy_record(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """CREATE TABLE records (
+                id TEXT, source_id TEXT, platform TEXT, url TEXT,
+                topics_json TEXT, metrics_json TEXT, raw_json TEXT,
+                title TEXT, body TEXT, sentiment TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("r2", "youtube_search", "youtube", "https://www.youtube.com/watch?v=video-2", "[]", "{}", "{}", "", "", "neutral"),
+        )
+        item = record_to_dict(conn.execute("SELECT * FROM records").fetchone())
+        self.assertEqual(item["metrics"]["thumbnail_url"], "https://i.ytimg.com/vi/video-2/hqdefault.jpg")
+
     def test_deduped_record_gets_thumbnail_on_later_sync(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

@@ -11,6 +11,7 @@ from server.connectors.base import ConnectorSpec, run_collector
 from server.connectors.creators.base import CreatorPost, occurred_in_collection_window
 from server.connectors.creators.public_search import discover_profile_urls
 from server.connectors.creators.youtube import YouTubePublicProvider
+from server.connectors.creators.runner import _has_trusted_creator_search_hit
 from server.connectors.registry import BY_ID
 
 
@@ -125,6 +126,29 @@ class CreatorPublicSearchTests(unittest.TestCase):
         self.assertEqual([post.external_id for post in posts], ["video-2"])
         self.assertEqual(posts[0].occurred_at, "2026-10-24T12:00:00+00:00")
 
+    @patch("server.connectors.creators.youtube.fetch_page", return_value={"json_ld": [{"@type": "VideoObject", "uploadDate": "2026-10-24T12:00:00Z"}]})
+    def test_flat_search_uses_official_thumbnail_fallback(self, _fetch_page):
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.flat = options.get("extract_flat") is True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                if not self.flat:
+                    raise RuntimeError("Sign in to confirm you're not a bot")
+                return {"entries": [{"id": "video-2", "title": "PLAUD review", "channel": "Creator", "channel_id": "channel-2"}]}
+
+        fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        brand = {"name": "PLAUD", "_collection_since": "2026-10-24T00:00:00+00:00"}
+        with unittest.mock.patch.dict(sys.modules, {"yt_dlp": fake_module}):
+            posts = YouTubePublicProvider(max_results=1).collect(sqlite3.connect(":memory:"), brand, ["PLAUD"])
+        self.assertEqual(posts[0].thumbnail_url, "https://i.ytimg.com/vi/video-2/hqdefault.jpg")
+
     @patch("server.connectors.creators.youtube.fetch_page", return_value={"json_ld": []})
     def test_flat_search_keeps_result_when_watch_page_has_no_public_date(self, _fetch_page):
         class FakeYoutubeDL:
@@ -182,6 +206,22 @@ class CreatorPublicSearchTests(unittest.TestCase):
         )
         self.assertTrue(occurred_in_collection_window(recent, brand, now=now))
         self.assertFalse(occurred_in_collection_window(old, brand, now=now))
+
+    def test_exact_configured_keyword_is_search_evidence_when_metadata_is_blocked(self):
+        brand = {"name": "Comu", "monitoring_keywords": ["Comulytic"]}
+        self.assertTrue(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["Comulytic"], "search_query_evidence": True}, brand, []
+            )
+        )
+
+    def test_short_brand_name_is_not_broad_search_evidence(self):
+        brand = {"name": "Comu", "monitoring_keywords": ["Comulytic"]}
+        self.assertFalse(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["Comu"], "search_query_evidence": True}, brand, []
+            )
+        )
 
     def test_runner_passes_daily_window_to_collector(self):
         conn = sqlite3.connect(":memory:")
