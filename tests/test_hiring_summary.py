@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 
 from server.db import SCHEMA
-from server.domains.hiring import hiring_summary
+from server.domains.hiring import hiring_summary, infer_department
 
 
 class HiringSummaryTests(unittest.TestCase):
@@ -17,6 +17,26 @@ class HiringSummaryTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    def test_infers_department_when_sources_leave_it_empty(self):
+        self.assertEqual(infer_department("", "AI 产品经理", "负责产品规划"), "产品")
+        self.assertEqual(infer_department(None, "后端工程师", "负责服务研发"), "技术研发")
+        self.assertEqual(infer_department(None, "海外销售", "拓展客户"), "销售")
+        self.assertEqual(infer_department("增长团队", "普通岗位", ""), "增长团队")
+
+        self.conn.execute(
+            """
+            INSERT INTO job_postings (
+                id, brand_id, platform, title, department, city, jd_text, status,
+                first_seen, last_seen, business_tags_json, created_at, updated_at
+            ) VALUES ('inferred-job', 'brand-1', 'linkedin', '后端工程师', '', '深圳', '负责服务研发', 'open',
+                      '2026-10-24T08:00:00+00:00', '2026-10-24T08:00:00+00:00', '[]',
+                      '2026-10-24T08:00:00+00:00', '2026-10-24T08:00:00+00:00')
+            """
+        )
+        result = hiring_summary("brand-1", start_date="2026-10-24", end_date="2026-10-24", conn=self.conn)
+        self.assertEqual(result["by_department"], [{"department": "技术研发", "count": 1}])
+        self.assertEqual(result["released_postings"][0]["department"], "技术研发")
 
     def test_summary_returns_window_job_details_for_released_and_closed_cards(self):
         self.conn.executemany(
