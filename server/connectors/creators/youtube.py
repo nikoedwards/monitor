@@ -28,6 +28,13 @@ def _to_int(value) -> int | None:
         return None
 
 
+def _youtube_thumbnail_url(video_id: str) -> str:
+    value = str(video_id or "").strip()
+    if not value:
+        return ""
+    return f"https://i.ytimg.com/vi/{value}/hqdefault.jpg"
+
+
 class YouTubeProvider(CreatorProvider):
     name = "youtube_api"
     platform = "youtube"
@@ -421,7 +428,7 @@ class YouTubePublicProvider(CreatorProvider):
             author=clean_text(item.get("channel") or item.get("uploader")),
             author_handle=channel_id or handle,
             author_url=author_url,
-            thumbnail_url=str(item.get("thumbnail") or ""),
+            thumbnail_url=str(item.get("thumbnail") or "").strip() or _youtube_thumbnail_url(external_id),
             occurred_at=occurred_at,
             views=_to_int(item.get("view_count")),
             likes=_to_int(item.get("like_count")),

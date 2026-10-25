@@ -5,9 +5,32 @@ import json
 import hashlib
 import re
 import sqlite3
+from urllib.parse import parse_qs, urlparse
 
 from .nlp import analyze_text
 from .util import clean_text, new_id, utc_now
+
+
+def _youtube_thumbnail_from_url(url: str) -> str:
+    value = clean_text(url)
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    video_id = ""
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+    elif host == "youtube.com" or host.endswith(".youtube.com"):
+        video_id = (parse_qs(parsed.query).get("v") or [""])[0]
+        if not video_id:
+            match = re.match(r"^/(?:shorts|embed|live)/([^/?#]+)", parsed.path)
+            video_id = match.group(1) if match else ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id or ""):
+        return ""
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 def _google_name_matches_brand(name: str, brand: dict) -> bool:
@@ -356,6 +379,13 @@ def record_to_dict(row: sqlite3.Row) -> dict:
             if isinstance(value, str) and value.strip():
                 item["metrics"]["thumbnail_url"] = value.strip()
                 break
+    if (
+        not item["metrics"].get("thumbnail_url")
+        and (item.get("platform") == "youtube" or item.get("source_id") == "youtube_search")
+    ):
+        thumbnail = _youtube_thumbnail_from_url(item.get("url") or "")
+        if thumbnail:
+            item["metrics"]["thumbnail_url"] = thumbnail
     analysis = analyze_text(f"{item.get('title') or ''} {item.get('body') or ''}")
     if item.get("sentiment") == analysis["sentiment"]:
         item["sentiment_explanation"] = analysis["sentiment_explanation"]
