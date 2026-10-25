@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from server.domains.content import _highlight_terms, _p0_summary, _problem_summary, _voice_source_key
+from server.domains.insights import _summary_records
 
 
 class VocSourceTests(unittest.TestCase):
@@ -56,6 +58,22 @@ class VocSourceTests(unittest.TestCase):
             _problem_summary(record),
         )
         self.assertIn("too big", _highlight_terms(record))
+
+    def test_insights_summary_records_include_marketing_voice_sources(self):
+        records_by_filter = {
+            ("voc", None): [{"id": "manual", "dimension": "voc", "source_id": "manual_csv", "body": "manual feedback"}],
+            ("marketing", "social"): [{"id": "video", "dimension": "marketing", "channel": "social", "platform": "youtube", "body": "video feedback"}],
+            ("marketing", "community"): [{"id": "community", "dimension": "marketing", "channel": "community", "platform": "reddit", "body": "community feedback"}],
+            ("marketing", "creators"): [{"id": "creator", "dimension": "marketing", "channel": "creators", "platform": "tiktok", "body": "creator feedback"}],
+        }
+
+        def fake_query_records(_conn, filters, limit=200):
+            return records_by_filter.get((filters.get("dimension"), filters.get("channel")), [])
+
+        with patch("server.domains.content.query_records", side_effect=fake_query_records):
+            records = _summary_records(None, "brand-1", "voc", None, "2026-01-01", "2026-01-31")
+
+        self.assertEqual({"manual", "video", "community", "creator"}, {record["id"] for record in records})
 
 
 if __name__ == "__main__":

@@ -54,6 +54,38 @@ def _status(has_data: bool, configured: bool = False) -> str:
     return "empty"
 
 
+def _summary_records(
+    conn: sqlite3.Connection,
+    brand_id: str | None,
+    dimension: str | None,
+    channel: str | None,
+    start: str,
+    end: str,
+) -> list[dict]:
+    """Load the same record universe that each summary surface represents."""
+    if dimension == "voc":
+        # VoC is a composed view: manually collected feedback plus the
+        # marketing channels that carry customer conversation. Keep this in
+        # sync with /api/voc/summary and /api/voc/records.
+        from .content import _load_voice_records
+
+        records = _load_voice_records(conn, brand_id, start, end)
+        if channel:
+            records = [record for record in records if record.get("channel") == channel]
+        return records[:150]
+    return query_records(
+        conn,
+        {
+            "brand_id": brand_id,
+            "dimension": dimension,
+            "channel": channel,
+            "start_date": start,
+            "end_date": end,
+        },
+        limit=150,
+    )
+
+
 def _brand_snapshot(conn: sqlite3.Connection, brand_id: str | None, start: str, end: str) -> dict:
     records = query_records(conn, {"brand_id": brand_id, "start_date": start, "end_date": end}, limit=2000)
     voc = [r for r in records if r.get("dimension") == "voc"]
@@ -306,7 +338,7 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
     if not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     start, end = resolve_window(None, start_date, end_date)
-    records = query_records(conn, {"brand_id": brand_id, "dimension": dimension, "channel": channel, "start_date": start, "end_date": end}, limit=150)
+    records = _summary_records(conn, brand_id, dimension, channel, start, end)
     if not records:
         return {"summary": "所选时间范围与渠道下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}}
     try:
