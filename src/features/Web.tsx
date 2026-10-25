@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { TrendChart } from "../components/charts";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
+import { AsyncProgress, Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
 import { useDeleteWebSnapshot, useWebAnalysis, useWebMonitors, useWebMutations, useWebSnapshotHistory, useWebSnapshots, useWebSummary } from "../lib/hooks";
 import { fmtDate, fmtDateTime } from "../lib/format";
 import { rangeLabel, useTimeRange } from "../lib/timeRange";
@@ -701,13 +701,16 @@ function SnapshotAnalysisPanel({
         title="快照智能分析"
         subtitle="视觉差异负责发现真实前端变化，HTML 与文本用于补充证据，大模型负责解释变化意义"
         action={(
-          <Button
-            variant="primary"
-            disabled={pending || !summary?.total_snapshots || (!summary?.ai_configured && !!summary?.changed)}
-            onClick={() => onAnalyze(!!analysis)}
-          >
-            {pending ? "分析中…" : analysis ? "重新分析" : "生成 AI 分析"}
-          </Button>
+          <div className="flex flex-col items-end">
+            <Button
+              variant="primary"
+              disabled={pending || !summary?.total_snapshots || (!summary?.ai_configured && !!summary?.changed)}
+              onClick={() => onAnalyze(!!analysis)}
+            >
+              {pending ? "分析中…" : analysis ? "重新分析" : "生成 AI 分析"}
+            </Button>
+            <AsyncProgress active={pending} label="正在分析网页变化" />
+          </div>
         )}
       />
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Badge, Button, Card, EmptyState, Field, InfoHint, Input, Modal, SectionTitle, SegmentGroup, Spinner } from "../components/ui";
+import { AsyncProgress, Badge, Button, Card, EmptyState, Field, InfoHint, Input, Modal, SectionTitle, SegmentGroup, Spinner } from "../components/ui";
 import { CollectionStatusChip } from "../components/CollectionStatusChip";
 import {
   useAiDraft,
@@ -457,7 +457,10 @@ function AiCreate({ onClose }: { onClose: () => void }) {
       <Field label="关键词（品牌名）">
         <div className="flex gap-2">
           <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="如 Anker" onKeyDown={(e) => e.key === "Enter" && generate()} />
-          <Button variant="primary" onClick={generate} disabled={!keyword || aiDraft.isPending}>{aiDraft.isPending ? "生成中…" : "生成"}</Button>
+          <div className="flex flex-col items-start">
+            <Button variant="primary" onClick={generate} disabled={!keyword || aiDraft.isPending}>{aiDraft.isPending ? "生成中…" : "生成"}</Button>
+            <AsyncProgress active={aiDraft.isPending} label="正在生成品牌草稿" />
+          </div>
         </div>
       </Field>
       {error && <div className="text-[13px] p-2 rounded-md" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>{error}</div>}
@@ -550,7 +553,10 @@ function ManualCreate({ onClose }: { onClose: () => void }) {
       <Field label="官网 URL（可自动抓取信息）">
         <div className="flex gap-2">
           <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://brand.com" />
+        <div className="flex flex-col items-start">
           <Button onClick={runAnalyze} disabled={analyze.isPending}>{analyze.isPending ? "抓取中…" : "抓取"}</Button>
+          <AsyncProgress active={analyze.isPending} label="正在读取官网信息" />
+        </div>
         </div>
       </Field>
       <Field label="品牌名称"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>

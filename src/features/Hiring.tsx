@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars, SimpleLine } from "../components/charts";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard, Textarea } from "../components/ui";
+import { AsyncProgress, Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import {
   useActivities,
@@ -176,9 +176,12 @@ function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any 
         title="业务动向分析"
         subtitle="用大模型从近期 JD 反推对方内部在推进的业务与团队重点"
         action={
-          <Button onClick={run} disabled={analyze.isPending || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
-            {analyze.isPending ? "分析中…" : "生成分析"}
-          </Button>
+          <div className="flex flex-col items-end">
+            <Button onClick={run} disabled={analyze.isPending || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
+              {analyze.isPending ? "分析中…" : "生成分析"}
+            </Button>
+            <AsyncProgress active={analyze.isPending} label="正在分析岗位数据" />
+          </div>
         }
       />
       {!settings?.configured && <p className="text-[13px]" style={{ color: "var(--mute)" }}>未配置大模型 Token，请在右上角设置中填写后再生成。</p>}
