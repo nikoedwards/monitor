@@ -45,6 +45,40 @@ _AUTHWALL_ACTIVITY_MARKERS = (
 )
 _AUTHWALL_PROFILE_MARKERS = ("750 million+ members", "manage your professional identity")
 
+# Providers frequently expose the title and JD but leave the department field
+# empty. Keep the labels broad enough for a useful dashboard and deterministic
+# enough to work without an LLM or an extra network request.
+_DEPARTMENT_RULES = (
+    ("数据与算法", ("算法", "数据科学", "数据分析", "机器学习", "machine learning", "data scientist", "data analyst")),
+    ("产品", ("产品经理", "产品负责人", "产品总监", "product manager", "product lead", "product owner")),
+    ("技术研发", ("工程师", "开发", "研发", "后端", "前端", "全栈", "架构师", "测试", "软件", "engineer", "developer", "engineering", "devops", "sre", "qa")),
+    ("设计", ("设计师", "交互设计", "视觉设计", "ui", "ux", "user experience", "visual designer")),
+    ("销售", ("销售", "商务拓展", "业务拓展", "客户经理", "大客户", "sales", "business development", "account executive", "account manager")),
+    ("市场与增长", ("市场", "营销", "增长", "品牌", "公关", "marketing", "growth", "brand", "public relations")),
+    ("运营", ("运营", "operations", "用户运营", "内容运营", "商业运营")),
+    ("客户成功与支持", ("客服", "客户成功", "客户支持", "技术支持", "customer success", "customer support", "technical support")),
+    ("人力与行政", ("人力", "招聘", "行政", "hr", "human resources", "recruiter", "recruitment")),
+    ("财务与法务", ("财务", "会计", "审计", "法务", "finance", "accounting", "legal", "compliance")),
+    ("供应链与采购", ("采购", "供应链", "物流", "仓储", "supply chain", "procurement", "logistics")),
+    ("内容与编辑", ("内容", "编辑", "文案", "编导", "content", "editor", "copywriter")),
+)
+
+
+def infer_department(department: str | None, title: str | None = None, jd_text: str | None = None) -> str:
+    """Return an explicit department or infer a broad category from job text."""
+    explicit = clean_text(department)
+    if explicit and explicit.casefold() not in {"未分类", "unknown", "n/a", "-"}:
+        return explicit
+    title_text = clean_text(title).casefold()
+    jd_text_normalized = clean_text(jd_text)[:1200].casefold()
+    for haystack in (title_text, jd_text_normalized):
+        if not haystack:
+            continue
+        for label, keywords in _DEPARTMENT_RULES:
+            if any(keyword.casefold() in haystack for keyword in keywords):
+                return label
+    return "未分类"
+
 
 def _is_authwall_text(value: str | None) -> bool:
     lowered = (value or "").casefold()
@@ -55,6 +89,7 @@ def posting_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     item = dict(row)
     item.pop("config_json", None)
     item["business_tags"] = json.loads(item.pop("business_tags_json", None) or "[]")
+    item["department"] = infer_department(item.get("department"), item.get("title"), item.get("jd_text"))
     latest = conn.execute(
         "SELECT * FROM job_snapshots WHERE posting_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
         (item["id"],),
@@ -87,7 +122,7 @@ def _window_posting_to_dict(posting: dict) -> dict:
         "external_id": posting.get("external_id"),
         "url": posting.get("url"),
         "title": posting.get("title"),
-        "department": posting.get("department"),
+        "department": infer_department(posting.get("department"), posting.get("title"), posting.get("jd_text")),
         "city": posting.get("city"),
         "jd_text": (posting.get("jd_text") or "")[:16000],
         "status": posting.get("status"),
@@ -522,7 +557,7 @@ def hiring_summary(
         else:
             total_open += 1
             pf["open"] += 1
-            dept = (p.get("department") or "").strip() or "未分类"
+            dept = infer_department(p.get("department"), p.get("title"), p.get("jd_text"))
             dept_counts[dept] += 1
         # Open duration for closed postings (JD lifetime).
         if p.get("closed_at") and p.get("first_seen"):
