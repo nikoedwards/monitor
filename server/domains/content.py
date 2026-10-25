@@ -392,27 +392,45 @@ def _issue_priority(records: list[dict]) -> str:
 
 
 def _topic_breakdown(records: list[dict]) -> list[dict]:
-    topic_records: dict[str, list[dict]] = {}
+    issue_groups: dict[str, dict] = {}
     for record in records:
-        for topic in record.get("topics") or []:
-            topic_records.setdefault(topic, []).append(record)
+        topics = [str(topic) for topic in (record.get("topics") or []) if str(topic).strip()]
+        if not topics:
+            continue
+        problem_summary = record.get("problem_summary") or _problem_summary(record)
+        group_key = " ".join(str(problem_summary).split()).casefold()
+        group = issue_groups.setdefault(
+            group_key,
+            {"records": {}, "topics": set(), "teams": set(), "problem_summary": problem_summary},
+        )
+        record_key = str(record.get("id") or f"record_{id(record)}")
+        group["records"][record_key] = record
+        group["topics"].update(topics)
+        for topic in topics:
+            group["teams"].add(team_for_records([record], topic))
+
     out = []
-    for topic, items in topic_records.items():
+    team_order = {"marketing_team": 0, "support_team": 1, "product_team": 2, "experience_team": 3}
+    for group in issue_groups.values():
+        items = list(group["records"].values())
         negative = sum(1 for r in items if r.get("sentiment") == "negative")
         if not negative:
             continue
+        topics = sorted(group["topics"])
+        suggested_teams = sorted(group["teams"], key=lambda team: (team_order.get(team, 99), team))
         source_counts = Counter(item.get("voice_source") for item in items if item.get("voice_source"))
         representative_record = next((item for item in items if item.get("sentiment") == "negative"), items[0])
-        problem_summary = representative_record.get("problem_summary") or _problem_summary(representative_record)
         out.append({
-            "topic": topic,
+            "topic": topics[0],
+            "topics": topics,
             "total": len(items),
             "negative": negative,
             "negative_rate": round(negative / len(items), 4) if items else 0.0,
-            "suggested_team": team_for_records(items, topic),
+            "suggested_team": suggested_teams[0] if suggested_teams else team_for_records(items, topics[0]),
+            "suggested_teams": suggested_teams,
             "priority": _issue_priority(items),
             "representative": _representative_feedback(items),
-            "problem_summary": problem_summary,
+            "problem_summary": group["problem_summary"],
             "source_keys": [key for key, _ in source_counts.most_common(3)],
             "latest_at": max((item.get("occurred_at") or "" for item in items), default=""),
         })

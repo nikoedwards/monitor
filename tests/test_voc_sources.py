@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from server.domains.content import _highlight_terms, _p0_summary, _problem_summary, _voice_source_key
+from server.domains.content import _highlight_terms, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
 from server.domains.insights import _summary_records
 
 
@@ -74,6 +74,31 @@ class VocSourceTests(unittest.TestCase):
             records = _summary_records(None, "brand-1", "voc", None, "2026-01-01", "2026-01-31")
 
         self.assertEqual({"manual", "video", "community", "creator"}, {record["id"] for record in records})
+
+    def test_topic_breakdown_merges_same_problem_and_keeps_all_teams(self):
+        records = [
+            {
+                "id": "ads-post",
+                "title": "Plaud doesn't fit on the iPhone Duo",
+                "body": "The magnetic case doesn't work on it. It's a little too big for the back panel and hangs past the bottom edge, so it...",
+                "sentiment": "negative",
+                "topics": ["ads"],
+            },
+            {
+                "id": "support-post",
+                "title": "Plaud doesn't fit on the iPhone Duo",
+                "body": "The magnetic case doesn't work on it. It's a little too big for the back panel and hangs past the bottom edge, so it...",
+                "sentiment": "negative",
+                "topics": ["support"],
+            },
+        ]
+
+        result = _topic_breakdown(records)
+
+        self.assertEqual(1, len(result))
+        self.assertEqual(2, result[0]["total"])
+        self.assertEqual(["ads", "support"], result[0]["topics"])
+        self.assertEqual(["marketing_team", "support_team"], result[0]["suggested_teams"])
 
 
 if __name__ == "__main__":
