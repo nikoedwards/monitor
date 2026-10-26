@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -10,6 +11,8 @@ from typing import Iterator
 
 from .config import DB_PATH
 from .util import new_id, utc_now
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -803,7 +806,13 @@ def init_db() -> None:
         # load time.
         from .connectors.sales.estimates import backfill_sales_metrics
 
-        backfill_sales_metrics(conn)
+        try:
+            backfill_sales_metrics(conn)
+        except Exception:
+            # Historical estimate backfill is opportunistic. A malformed or
+            # very large legacy row must not prevent the API from starting;
+            # the next maintenance run can retry it after the service is up.
+            logger.exception("Sales metric backfill failed during startup")
         conn.executescript(INDEXES)
         _backfill_brand_ids(conn)
         _repair_legacy_sentiment_false_positives(conn)
