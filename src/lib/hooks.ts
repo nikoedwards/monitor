@@ -349,8 +349,8 @@ export function useAds(brandId?: string, range?: TimeRange, filters?: Record<str
 // ---------------------------------------------------------------- insights summary (LLM)
 export function useInsightsSummary() {
   return useMutation({
-    mutationFn: ({ brandId, dimension, channel, range }: { brandId: string; dimension?: string; channel?: string; range?: TimeRange }) =>
-      api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, ...rangeParams(range) })}`),
+    mutationFn: ({ brandId, dimension, channel, range, refresh = false }: { brandId: string; dimension?: string; channel?: string; range?: TimeRange; refresh?: boolean }) =>
+      api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...rangeParams(range) })}`),
   });
 }
 
@@ -461,8 +461,8 @@ export function useCreatorsSync() {
 
 export function useCreatorsReport() {
   return useMutation({
-    mutationFn: ({ brandId, productId }: { brandId: string; productId?: string }) =>
-      api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId })}`).then((d) => d.report),
+    mutationFn: ({ brandId, productId, refresh = false }: { brandId: string; productId?: string; refresh?: boolean }) =>
+      api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, refresh })}`).then((d) => d.report),
   });
 }
 
@@ -713,8 +713,8 @@ export function useActivities(brandId?: string, profileId?: string) {
 
 export function useAnalyzeJd() {
   return useMutation({
-    mutationFn: ({ brandId, range }: { brandId: string; range?: TimeRange }) =>
-      api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, ...rangeParams(range) })}`),
+    mutationFn: ({ brandId, range, refresh = false }: { brandId: string; range?: TimeRange; refresh?: boolean }) =>
+      api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...rangeParams(range) })}`),
   });
 }
 

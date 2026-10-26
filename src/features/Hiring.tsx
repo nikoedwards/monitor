@@ -233,7 +233,7 @@ function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any 
     setError("");
     setResult(null);
     try {
-      const res = await analyze.mutateAsync({ brandId, range });
+      const res = await analyze.mutateAsync({ brandId, range, refresh: !!result });
       setResult(res);
     } catch (e: any) {
       setError(e?.message || "分析失败");

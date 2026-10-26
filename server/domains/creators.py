@@ -28,6 +28,9 @@ from .common import build_trend, fetch_brand, get_conn, query_records, resolve_w
 
 router = APIRouter(prefix="/api/creators", tags=["creators"])
 
+_CREATOR_REPORT_CACHE: dict[tuple, tuple[float, str]] = {}
+_CREATOR_REPORT_TTL_SECONDS = 24 * 60 * 60
+
 
 def _creator_to_dict(row: sqlite3.Row) -> dict:
     item = dict(row)
@@ -507,6 +510,7 @@ def _roster_brief(
 def creators_report(
     brand_id: str,
     product_id: str | None = None,
+    refresh: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     brand = fetch_brand(conn, brand_id)
@@ -531,6 +535,12 @@ def creators_report(
     if not context["roster"] and not any(c["roster"] for c in context["competitors"]):
         raise HTTPException(status_code=400, detail="暂无红人数据，请先在数据源/红人页发起采集。")
 
+    cache_key = (brand_id, product_id or "")
+    now = __import__("time").monotonic()
+    cached = _CREATOR_REPORT_CACHE.get(cache_key)
+    if not refresh and cached and now - cached[0] < _CREATOR_REPORT_TTL_SECONDS:
+        return {"report": cached[1], "cached": True}
+
     cfg = ai.get_config(conn)
     if not cfg.get("llm_api_key"):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
@@ -539,4 +549,5 @@ def creators_report(
         report = ai.call_llm(cfg, _REPORT_SYSTEM, prompt)
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return {"report": report}
+    _CREATOR_REPORT_CACHE[cache_key] = (now, report)
+    return {"report": report, "cached": False}

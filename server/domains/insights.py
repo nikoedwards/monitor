@@ -14,7 +14,7 @@ from .common import build_trend, get_conn, query_records, resolve_window
 router = APIRouter(prefix="/api", tags=["insights"])
 
 _OVERVIEW_SUMMARY_CACHE: dict[tuple, tuple[float, dict]] = {}
-_SUMMARY_TTL_SECONDS = 600
+_SUMMARY_TTL_SECONDS = 24 * 60 * 60
 
 
 def _safe_date(value: str) -> date:
@@ -303,6 +303,12 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
     payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
     cache_key = (brand_id, start, end, market_brand_ids or "")
     now = time.monotonic()
+    persistent_key = "overview:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent is not None:
+            _OVERVIEW_SUMMARY_CACHE[cache_key] = (now, persistent)
+            return {**persistent, "cached": True}
     cached = _OVERVIEW_SUMMARY_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
@@ -330,14 +336,20 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
     result.update({"range": payload["range"], "cached": False})
     _OVERVIEW_SUMMARY_CACHE[cache_key] = (now, result)
+    ai.put_cached_summary(conn, persistent_key, result)
     return result
 
 
 @router.get("/insights/summary")
-def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
+def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     if not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     start, end = resolve_window(None, start_date, end_date)
+    cache_key = "insights:" + "|".join((brand_id or "", dimension or "", channel or "", start, end))
+    if not refresh:
+        cached = ai.get_cached_summary(conn, cache_key)
+        if cached is not None:
+            return {**cached, "cached": True}
     records = _summary_records(conn, brand_id, dimension, channel, start, end)
     if not records:
         return {"summary": "所选时间范围与渠道下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}}
@@ -347,6 +359,8 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         raise HTTPException(status_code=502, detail=str(exc))
     result["record_count"] = len(records)
     result["range"] = {"start": start, "end": end}
+    result["cached"] = False
+    ai.put_cached_summary(conn, cache_key, result)
     return result
 
 

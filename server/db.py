@@ -590,6 +590,13 @@ CREATE TABLE IF NOT EXISTS community_post_summaries (
   created_at TEXT NOT NULL
 );
 
+-- Cached results for LLM-generated summaries and analyses.
+CREATE TABLE IF NOT EXISTS llm_summary_cache (
+  cache_key TEXT PRIMARY KEY,
+  result_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 -- LinkedIn employee activity feed (posts / comments / job changes).
 CREATE TABLE IF NOT EXISTS linkedin_activities (
   id TEXT PRIMARY KEY,

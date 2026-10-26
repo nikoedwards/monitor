@@ -180,7 +180,7 @@ export default function Creators() {
     if (!brandId) return;
     setReportError("");
     try {
-      setReport(await reportMut.mutateAsync({ brandId, productId: selectedProductId }));
+      setReport(await reportMut.mutateAsync({ brandId, productId: selectedProductId, refresh: !!report }));
     } catch (e: any) {
       setReportError(e?.message || "生成失败");
     }

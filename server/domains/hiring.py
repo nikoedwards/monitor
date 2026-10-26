@@ -35,6 +35,9 @@ from .common import fetch_brand, get_conn, resolve_window
 
 router = APIRouter(prefix="/api/hiring", tags=["hiring"])
 
+_HIRING_ANALYSIS_CACHE: dict[tuple, tuple[float, dict]] = {}
+_HIRING_ANALYSIS_TTL_SECONDS = 24 * 60 * 60
+
 PLATFORM_LABEL = {"boss": "Boss 直聘", "linkedin": "LinkedIn", "linkedin_people": "LinkedIn 企业员工"}
 _AUTHWALL_ACTIVITY_MARKERS = (
     "by clicking continue to join or sign in",
@@ -647,6 +650,7 @@ def analyze_hiring(
     days: int = 90,
     start_date: str | None = None,
     end_date: str | None = None,
+    refresh: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     if not ai.is_configured(conn):
@@ -665,8 +669,15 @@ def analyze_hiring(
     postings = [dict(r) for r in rows]
     if not postings:
         raise HTTPException(status_code=400, detail="该时间窗内暂无职位数据，请先采集。")
+    cache_key = (brand_id, start, end)
+    cached = _HIRING_ANALYSIS_CACHE.get(cache_key)
+    now = __import__("time").monotonic()
+    if not refresh and cached and now - cached[0] < _HIRING_ANALYSIS_TTL_SECONDS:
+        return {**cached[1], "cached": True}
     try:
         result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    result = {**result, "cached": False, "range": {"start": start, "end": end}}
+    _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
     return result

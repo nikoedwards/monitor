@@ -160,7 +160,7 @@ export function SmartSummary({ brandId, dimension, channel, range, label = "æ™ºè
   const data = summarize.data;
 
   const run = () => {
-    if (brandId) summarize.mutate({ brandId, dimension, channel, range });
+    if (brandId) summarize.mutate({ brandId, dimension, channel, range, refresh: !!summarize.data });
   };
 
   return (

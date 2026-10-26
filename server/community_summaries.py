@@ -79,7 +79,7 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str])
             if not record or not ((record.get("title") or "").strip() or (record.get("body") or "").strip()):
                 continue
             saved = cached.get(rid)
-            if saved and saved["source_hash"] == source_hash(record):
+            if saved and saved["source_hash"] == source_hash(record) and _is_recent(saved.get("created_at")):
                 result[rid] = {"status": "ready", "summary": saved["summary"]}
             else:
                 pending.append(record)
@@ -105,3 +105,14 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str])
                         )
                         result[record["id"]] = {"status": "ready", "summary": summary}
     return {"summaries": result}
+
+
+def _is_recent(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        created = __import__("datetime").datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        return now - created < __import__("datetime").timedelta(hours=24)
+    except (TypeError, ValueError):
+        return False

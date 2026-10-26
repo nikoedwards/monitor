@@ -859,7 +859,7 @@ def analyze_snapshots(
             """,
             (brand_id, monitor_id, start, end),
         ).fetchone()
-        if cached and json.loads(cached["snapshot_ids_json"] or "[]") == snapshot_ids:
+        if cached and json.loads(cached["snapshot_ids_json"] or "[]") == snapshot_ids and _is_recent(cached["created_at"]):
             result = json.loads(cached["result_json"] or "{}")
             result.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
             return result
@@ -953,3 +953,13 @@ def analyze_snapshots(
     )
     result.update({"cached": False, "created_at": created_at, "analysis_id": analysis_id, "range": {"start": start, "end": end}})
     return result
+
+
+def _is_recent(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        created = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - created < timedelta(hours=24)
+    except (TypeError, ValueError):
+        return False
