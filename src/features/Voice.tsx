@@ -44,6 +44,10 @@ const VOICE_SOURCES: { key: SourceKey; label: string; description: string; icon:
 const ALL_SOURCE_KEYS = VOICE_SOURCES.map((source) => source.key);
 const SOURCE_LABEL = Object.fromEntries(VOICE_SOURCES.map((source) => [source.key, source.label])) as Record<string, string>;
 
+function toggleSourceSelection(selectedSources: SourceKey[], key: SourceKey): SourceKey[] {
+  return selectedSources.length === 1 && selectedSources[0] === key ? ALL_SOURCE_KEYS : [key];
+}
+
 const TOPIC_LABEL: Record<string, string> = {
   ads: "广告体验",
   creator: "达人内容",
@@ -119,7 +123,7 @@ export default function Voice() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setSelectedSources((current) => current.length === 1 && current[0] === key ? ALL_SOURCE_KEYS : [key])}
+                onClick={() => setSelectedSources((current) => toggleSourceSelection(current, key))}
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px]"
                 title={`只查看${SOURCE_LABEL[key]}`}
                 style={{ background: selectedSources.length === 1 && selectedSources.includes(key) ? "rgba(0,112,243,0.12)" : "var(--bg-soft-2)", color: selectedSources.includes(key) ? "var(--accent)" : "var(--mute)", cursor: "pointer", opacity: selectedSources.includes(key) ? 1 : 0.72 }}
@@ -187,7 +191,11 @@ export default function Voice() {
 
       <Card>
         <SectionTitle title="原始反馈明细" subtitle="每个数据源先给出摘要，再查看具体反馈、情绪判断、标签和采集依据" />
-        <SourceSummaryGrid sources={sourceCatalog} selectedSources={selectedSources} onSelect={(key) => setSelectedSources((current) => current.length === 1 && current[0] === key ? ALL_SOURCE_KEYS : [key as SourceKey])} />
+        <SourceSummaryGrid
+          sources={sourceCatalog}
+          selectedSources={selectedSources}
+          onSelect={(key) => setSelectedSources((current) => toggleSourceSelection(current, key as SourceKey))}
+        />
         <div className="flex flex-wrap items-center gap-2 mt-4 mb-3">
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>情绪筛选</span>
           {([
