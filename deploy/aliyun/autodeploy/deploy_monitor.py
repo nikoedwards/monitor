@@ -100,7 +100,16 @@ class Deployer:
         while time.monotonic() < deadline:
             state = self.run(['docker', 'inspect', container, '--format', '{{.State.Status}}'])
             if state not in ('running', 'created', 'restarting'):
-                raise RuntimeError('Release container exited before becoming healthy')
+                logs = subprocess.run(
+                    ['docker', 'logs', '--tail', '80', container],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                ).stdout.strip()
+                detail = f': {logs[-4000:]}' if logs else ''
+                raise RuntimeError(
+                    'Release container exited before becoming healthy' + detail)
             try:
                 with urllib.request.urlopen(base_url + '/api/health', timeout=5) as response:
                     if json.load(response).get('ok') is not True:
