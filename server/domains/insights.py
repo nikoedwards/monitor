@@ -341,15 +341,17 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
 
 
 @router.get("/insights/summary")
-def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
-    if not ai.is_configured(conn):
-        raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
+def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, cached_only: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(None, start_date, end_date)
     cache_key = "insights:" + "|".join((brand_id or "", dimension or "", channel or "", start, end))
     if not refresh:
         cached = ai.get_cached_summary(conn, cache_key)
         if cached is not None:
             return {**cached, "cached": True}
+    if cached_only:
+        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+    if not ai.is_configured(conn):
+        raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     records = _summary_records(conn, brand_id, dimension, channel, start, end)
     if not records:
         return {"summary": "所选时间范围与渠道下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}}

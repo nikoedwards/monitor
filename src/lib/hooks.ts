@@ -347,11 +347,23 @@ export function useAds(brandId?: string, range?: TimeRange, filters?: Record<str
 }
 
 // ---------------------------------------------------------------- insights summary (LLM)
-export function useInsightsSummary() {
-  return useMutation({
-    mutationFn: ({ brandId, dimension, channel, range, refresh = false }: { brandId: string; dimension?: string; channel?: string; range?: TimeRange; refresh?: boolean }) =>
-      api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...rangeParams(range) })}`),
+export function useInsightsSummary(brandId?: string, dimension?: string, channel?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  const queryClient = useQueryClient();
+  const queryKey = ["insights-summary", brandId, dimension, channel, rp];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, cached_only: true, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
   });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) =>
+      api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...rp })}`),
+    onSuccess: (data) => queryClient.setQueryData(queryKey, data),
+  });
+  return { ...query, data: query.data?.cache_miss ? undefined : query.data, generate };
 }
 
 // ---------------------------------------------------------------- creators

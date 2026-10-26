@@ -5,6 +5,27 @@ import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
 import { AsyncProgress, Badge, Button } from "./ui";
 
+function highlightSource(highlight: string, representative: any[] = []) {
+  const text = String(highlight || "").toLocaleLowerCase();
+  const grams = new Set<string>();
+  for (let i = 0; i < text.length - 1; i++) {
+    const gram = text.slice(i, i + 2).trim();
+    if (gram.length === 2 && !/[\s，。！？、,.!?]/.test(gram)) grams.add(gram);
+  }
+  let best: any = null;
+  let bestScore = 0;
+  for (const item of representative) {
+    if (!item?.url) continue;
+    const candidate = `${item.title || ""} ${item.why || ""}`.toLocaleLowerCase();
+    const score = [...grams].filter((gram) => candidate.includes(gram)).length;
+    if (score > bestScore) {
+      best = item;
+      bestScore = score;
+    }
+  }
+  return bestScore >= 2 ? best : null;
+}
+
 export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { brandId?: string; range: TimeRange; marketBrandIds?: string[] }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const summary = useOverviewSummary(brandId, range, marketBrandIds, refreshKey);
@@ -156,28 +177,28 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
 }
 
 export function SmartSummary({ brandId, dimension, channel, range, label = "智能总结" }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; label?: string }) {
-  const summarize = useInsightsSummary();
+  const summarize = useInsightsSummary(brandId, dimension, channel, range);
   const data = summarize.data;
 
   const run = () => {
-    if (brandId) summarize.mutate({ brandId, dimension, channel, range, refresh: !!summarize.data });
+    if (brandId) summarize.generate.mutate({ refresh: !!summarize.data });
   };
 
   return (
     <div>
       <div className="flex items-start gap-2">
         <div className="flex flex-col items-start">
-          <Button size="sm" variant="primary" disabled={!brandId || summarize.isPending} onClick={run}>
-            <Sparkles size={14} /> {summarize.isPending ? "生成中…" : label}
+          <Button size="sm" variant="primary" disabled={!brandId || summarize.generate.isPending || summarize.isLoading} onClick={run}>
+            <Sparkles size={14} /> {summarize.generate.isPending ? "生成中…" : label}
           </Button>
-          <AsyncProgress active={summarize.isPending} label="正在生成智能总结" />
+          <AsyncProgress active={summarize.generate.isPending} label="正在生成智能总结" />
         </div>
         <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)}{channel ? ` · ${channel}` : ""}</span>
       </div>
 
-      {summarize.isError && (
+      {(summarize.isError || summarize.generate.isError) && (
         <p className="text-[13px] mt-3" style={{ color: "var(--danger)" }}>
-          {(summarize.error as any)?.message || "生成失败，请稍后重试。"}
+          {((summarize.generate.error || summarize.error) as any)?.message || "生成失败，请稍后重试。"}
         </p>
       )}
 
@@ -197,12 +218,29 @@ export function SmartSummary({ brandId, dimension, channel, range, label = "智�
             <div>
               <div className="text-[13px] font-medium mb-1.5" style={{ color: "var(--ink)" }}>关键发现</div>
               <ul className="space-y-1.5">
-                {data.highlights.map((h: string, i: number) => (
+                {data.highlights.map((h: string, i: number) => {
+                  const source = highlightSource(h, data.representative);
+                  return (
                   <li key={i} className="text-[13px] flex gap-2" style={{ color: "var(--body)" }}>
                     <span style={{ color: "var(--accent)" }}>•</span>
-                    <span>{h}</span>
+                    <span>
+                      {source && (
+                        <a
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="ml-2 hover:text-[var(--accent)]"
+                          style={{ color: "var(--accent)", borderBottom: "1px dotted currentColor" }}
+                          title="打开信息源"
+                        >
+                          {h}
+                        </a>
+                      )}
+                      {!source && h}
+                    </span>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             </div>
           )}
