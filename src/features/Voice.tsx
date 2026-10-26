@@ -119,7 +119,7 @@ export default function Voice() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setSelectedSources([key])}
+                onClick={() => setSelectedSources((current) => current.length === 1 && current[0] === key ? ALL_SOURCE_KEYS : [key])}
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px]"
                 title={`只查看${SOURCE_LABEL[key]}`}
                 style={{ background: selectedSources.length === 1 && selectedSources.includes(key) ? "rgba(0,112,243,0.12)" : "var(--bg-soft-2)", color: selectedSources.includes(key) ? "var(--accent)" : "var(--mute)", cursor: "pointer", opacity: selectedSources.includes(key) ? 1 : 0.72 }}
@@ -187,7 +187,7 @@ export default function Voice() {
 
       <Card>
         <SectionTitle title="原始反馈明细" subtitle="每个数据源先给出摘要，再查看具体反馈、情绪判断、标签和采集依据" />
-        <SourceSummaryGrid sources={sourceCatalog} selectedSources={selectedSources} onSelect={(key) => setSelectedSources([key as SourceKey])} />
+        <SourceSummaryGrid sources={sourceCatalog} selectedSources={selectedSources} onSelect={(key) => setSelectedSources((current) => current.length === 1 && current[0] === key ? ALL_SOURCE_KEYS : [key as SourceKey])} />
         <div className="flex flex-wrap items-center gap-2 mt-4 mb-3">
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>情绪筛选</span>
           {([
@@ -196,7 +196,7 @@ export default function Voice() {
             ["neutral", "中性"],
             ["negative", "负向"],
           ] as const).map(([key, label]) => (
-            <button key={key} type="button" onClick={() => setSentimentFilter(key)} className="rounded-full px-2.5 py-1 text-[12px] cursor-pointer" style={{ background: sentimentFilter === key ? "var(--accent)" : "var(--bg-soft-2)", color: sentimentFilter === key ? "white" : "var(--body)" }}>{label}{key !== "all" && <span className="ml-1 opacity-70">{fmtNum(Number(totals[key] || 0))}</span>}</button>
+            <button key={key} type="button" onClick={() => setSentimentFilter((current) => current === key && key !== "all" ? "all" : key)} className="rounded-full px-2.5 py-1 text-[12px] cursor-pointer" style={{ background: sentimentFilter === key ? "var(--accent)" : "var(--bg-soft-2)", color: sentimentFilter === key ? "white" : "var(--body)" }}>{label}{key !== "all" && <span className="ml-1 opacity-70">{fmtNum(Number(totals[key] || 0))}</span>}</button>
           ))}
           {sentimentFilter !== "all" && <span className="text-[12px]" style={{ color: "var(--mute)" }}>当前显示 {filteredRecords.length} 条</span>}
         </div>
