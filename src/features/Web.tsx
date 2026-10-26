@@ -98,7 +98,7 @@ export default function Web() {
   const { data: monitors = [], isLoading } = useWebMonitors(brandId);
   const { data: summary, isFetching: summaryLoading, error: summaryError } = useWebSummary(brandId, selected, range);
   const { data: snapshots = [], isFetching: snapshotsLoading, error: snapshotsError } = useWebSnapshots(brandId, selected, range);
-  const webAnalysis = useWebAnalysis();
+  const webAnalysis = useWebAnalysis(brandId, selected, range);
   const { capture, update, remove } = useWebMutations();
 
   useEffect(() => {
@@ -108,7 +108,7 @@ export default function Web() {
 
   useEffect(() => {
     setAnalysis(null);
-    webAnalysis.reset();
+    webAnalysis.generate.reset();
   }, [selected, range.start_date, range.end_date]);
 
   if (isLoading) return <Spinner />;
@@ -214,12 +214,12 @@ export default function Web() {
 
       <SnapshotAnalysisPanel
         summary={summary}
-        analysis={analysis}
-        pending={webAnalysis.isPending}
-        error={webAnalysis.error instanceof Error ? webAnalysis.error.message : ""}
+        analysis={webAnalysis.data || analysis}
+        pending={webAnalysis.generate.isPending}
+        error={webAnalysis.generate.error instanceof Error ? webAnalysis.generate.error.message : ""}
         onAnalyze={async (refresh) => {
           if (!brandId) return;
-          const result = await webAnalysis.mutateAsync({ brandId, monitorId: selected, range, refresh });
+          const result = await webAnalysis.generate.mutateAsync({ refresh });
           setAnalysis(result);
         }}
       />

@@ -651,10 +651,9 @@ def analyze_hiring(
     start_date: str | None = None,
     end_date: str | None = None,
     refresh: bool = False,
+    cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    if not ai.is_configured(conn):
-        raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     brand = fetch_brand(conn, brand_id)
     start, end = resolve_window(days, start_date, end_date)
     rows = conn.execute(
@@ -672,12 +671,23 @@ def analyze_hiring(
     cache_key = (brand_id, start, end)
     cached = _HIRING_ANALYSIS_CACHE.get(cache_key)
     now = __import__("time").monotonic()
+    persistent_key = "hiring-analysis:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent is not None:
+            _HIRING_ANALYSIS_CACHE[cache_key] = (now, persistent)
+            return {**persistent, "cached": True}
     if not refresh and cached and now - cached[0] < _HIRING_ANALYSIS_TTL_SECONDS:
         return {**cached[1], "cached": True}
+    if cached_only:
+        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+    if not ai.is_configured(conn):
+        raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     try:
         result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     result = {**result, "cached": False, "range": {"start": start, "end": end}}
     _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
+    ai.put_cached_summary(conn, persistent_key, result)
     return result

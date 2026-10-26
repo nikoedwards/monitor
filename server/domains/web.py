@@ -843,6 +843,7 @@ def analyze_snapshots(
     start_date: str | None = None,
     end_date: str | None = None,
     refresh: bool = False,
+    cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     start, end = _resolve_window(days, start_date, end_date)
@@ -863,6 +864,9 @@ def analyze_snapshots(
             result = json.loads(cached["result_json"] or "{}")
             result.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
             return result
+
+    if cached_only:
+        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
 
     summary = _summary_payload(conn, brand_id, monitor_id, start, end)
     candidates = sorted(

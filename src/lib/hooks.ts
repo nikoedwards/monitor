@@ -471,11 +471,21 @@ export function useCreatorsSync() {
   });
 }
 
-export function useCreatorsReport() {
-  return useMutation({
-    mutationFn: ({ brandId, productId, refresh = false }: { brandId: string; productId?: string; refresh?: boolean }) =>
-      api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, refresh })}`).then((d) => d.report),
+export function useCreatorsReport(brandId?: string, productId?: string) {
+  const qc = useQueryClient();
+  const queryKey = ["creators-report", brandId, productId];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.get<{ report?: string; cache_miss?: boolean }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, cached_only: true })}`),
+    enabled: !!brandId,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
   });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, refresh })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, data: query.data?.cache_miss ? undefined : query.data, generate };
 }
 
 // ---------------------------------------------------------------- sales
@@ -723,11 +733,22 @@ export function useActivities(brandId?: string, profileId?: string) {
   });
 }
 
-export function useAnalyzeJd() {
-  return useMutation({
-    mutationFn: ({ brandId, range, refresh = false }: { brandId: string; range?: TimeRange; refresh?: boolean }) =>
-      api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...rangeParams(range) })}`),
+export function useAnalyzeJd(brandId?: string, range?: TimeRange) {
+  const qc = useQueryClient();
+  const rp = rangeParams(range);
+  const queryKey = ["hiring-analysis", brandId, rp];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
   });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...rp })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, data: query.data?.cache_miss ? undefined : query.data, generate };
 }
 
 // ---------------------------------------------------------------- web
@@ -766,11 +787,22 @@ export function useWebSummary(brandId?: string, monitorId?: string, range?: Time
   });
 }
 
-export function useWebAnalysis() {
-  return useMutation({
-    mutationFn: ({ brandId, monitorId, range, refresh = false }: { brandId: string; monitorId?: string; range: TimeRange; refresh?: boolean }) =>
-      api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rangeParams(range) })}`),
+export function useWebAnalysis(brandId?: string, monitorId?: string, range?: TimeRange) {
+  const qc = useQueryClient();
+  const rp = rangeParams(range);
+  const queryKey = ["web-analysis", brandId, monitorId, rp];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, cached_only: true, ...rp })}`),
+    enabled: !!brandId && !!range,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
   });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rp })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, data: (query.data as any)?.cache_miss ? undefined : query.data, generate };
 }
 
 export function useDeleteWebSnapshot() {

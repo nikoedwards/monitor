@@ -511,6 +511,7 @@ def creators_report(
     brand_id: str,
     product_id: str | None = None,
     refresh: bool = False,
+    cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     brand = fetch_brand(conn, brand_id)
@@ -537,9 +538,17 @@ def creators_report(
 
     cache_key = (brand_id, product_id or "")
     now = __import__("time").monotonic()
+    persistent_key = "creators-report:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent and isinstance(persistent.get("report"), str):
+            _CREATOR_REPORT_CACHE[cache_key] = (now, persistent["report"])
+            return {"report": persistent["report"], "cached": True}
     cached = _CREATOR_REPORT_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _CREATOR_REPORT_TTL_SECONDS:
         return {"report": cached[1], "cached": True}
+    if cached_only:
+        return {"cache_miss": True, "cached": False}
 
     cfg = ai.get_config(conn)
     if not cfg.get("llm_api_key"):
@@ -550,4 +559,5 @@ def creators_report(
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     _CREATOR_REPORT_CACHE[cache_key] = (now, report)
+    ai.put_cached_summary(conn, persistent_key, {"report": report})
     return {"report": report, "cached": False}
