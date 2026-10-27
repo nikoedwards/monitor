@@ -1109,7 +1109,41 @@ def _collect_google_play_markets(brand: dict, app_ids: list[str], rows_by_id: di
         return [item for batch in results for item in batch]
 
 
+def _cleanup_google_play_duplicate_reviews(conn: sqlite3.Connection, brand_id: str | None) -> None:
+    if not brand_id:
+        return
+    try:
+        rows = conn.execute(
+            "SELECT id, author, body, occurred_at, region, raw_json FROM records "
+            "WHERE brand_id = ? AND source_id = 'google_play_reviews' AND data_type = 'user_voice' "
+            "ORDER BY CASE WHEN region = 'US' THEN 0 ELSE 1 END, created_at, id",
+            (brand_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    seen: set[tuple[str, str, str, str]] = set()
+    duplicate_ids: list[str] = []
+    for row in rows:
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+        except (TypeError, ValueError):
+            raw = {}
+        key = (
+            clean_text(raw.get("package_name")),
+            clean_text(row["author"]),
+            clean_text(row["body"]),
+            clean_text(row["occurred_at"]),
+        )
+        if key in seen and all(key):
+            duplicate_ids.append(row["id"])
+        elif all(key):
+            seen.add(key)
+    for record_id in duplicate_ids:
+        conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
+
+
 def collect_google_play(conn: sqlite3.Connection, brand: dict) -> list[dict]:
+    _cleanup_google_play_duplicate_reviews(conn, brand.get("id"))
     rows = conn.execute(
         "SELECT * FROM links WHERE brand_id = ? AND platform = 'google_play' AND status = 'active'",
         (brand.get("id"),),
