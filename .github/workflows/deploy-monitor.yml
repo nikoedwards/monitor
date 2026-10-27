@@ -34,17 +34,62 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
           printf '%s\n' "$SSH_KEY" > "$tmp/key"
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$tmp/known_hosts"
           chmod 600 "$tmp/key" "$tmp/known_hosts"
+
+          ssh_args=(
+            -T
+            -i "$tmp/key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$tmp/known_hosts"
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=20
+            -o ServerAliveCountMax=15
+          )
+
           docker save "monitor-intelligence-hub:${GITHUB_SHA}" | gzip -1 | \
-            ssh -T -i "$tmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
-              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/known_hosts" \
-              -o ConnectTimeout=20 "root@$SSH_HOST" \
-              "gzip -d | docker load && docker tag monitor-intelligence-hub:${GITHUB_SHA} monitor-intelligence-hub:isolated-20261027 && cd /opt/monitor && docker compose -f docker-compose.yml -f deploy/aliyun/docker-compose.monitor-ljei.yml up -d --no-build monitor && curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8790/api/health"
+            ssh "${ssh_args[@]}" "root@$SSH_HOST" 'gzip -d | docker load'
+
+          ssh "${ssh_args[@]}" "root@$SSH_HOST" bash -s -- "$GITHUB_SHA" <<'REMOTE'
+          set -euo pipefail
+          image="monitor-intelligence-hub:$1"
+          release_image="monitor-intelligence-hub:isolated-20261027"
+          compose=(docker compose -f docker-compose.yml -f deploy/aliyun/docker-compose.monitor-ljei.yml)
+
+          docker tag "$image" "$release_image"
+          cd /opt/monitor
+          "${compose[@]}" up -d --no-build monitor
+
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8790/api/health; then
+              exit 0
+            fi
+            echo "Waiting for Monitor health check ($attempt/40)..." >&2
+            sleep 3
+          done
+
+          echo "Monitor did not become healthy; current container state:" >&2
+          "${compose[@]}" ps monitor >&2
+          "${compose[@]}" logs --tail=100 monitor >&2
+          exit 1
+          REMOTE
       - name: Check public endpoint
         env:
           SSH_HOST: ${{ secrets.ALIYUN_MONITOR_HOST }}
-        run: curl --fail --retry 5 --retry-delay 5 --max-time 30 "http://$SSH_HOST/api/health"
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "http://$SSH_HOST/api/health"; then
+              exit 0
+            fi
+            echo "Waiting for public Monitor endpoint ($attempt/12)..." >&2
+            sleep 5
+          done
+          exit 1
