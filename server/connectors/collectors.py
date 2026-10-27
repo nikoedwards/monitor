@@ -1361,6 +1361,26 @@ def _meta_public_ad_count_from_html(html: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _meta_page_ids_from_links(conn: sqlite3.Connection | None, brand_id: str | None) -> list[str]:
+    """Return configured Meta page ids so collection follows the page scope."""
+    if conn is None or not brand_id:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT url FROM links WHERE brand_id = ? AND channel = 'ads' AND platform = 'meta_ads'",
+            (brand_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    result: list[str] = []
+    for row in rows:
+        url = row["url"] or ""
+        match = re.search(r"(?:view_all_page_id|view_all_page%5Bid%5D)=(\d+)", url, flags=re.I)
+        if match and match.group(1) not in result:
+            result.append(match.group(1))
+    return result
+
+
 def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
     snapshot = ad.get("snapshot") or {}
     cards = snapshot.get("cards") or []
@@ -1556,51 +1576,32 @@ def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
                     if not ad_id or ad_id in seen:
                         continue
                     seen.add(ad_id)
-                bodies = ad.get("ad_creative_bodies") or []
-                body = clean_text(" ".join(bodies)) or "(no creative text)"
+                    bodies = ad.get("ad_creative_bodies") or []
+                    body = clean_text(" ".join(bodies)) or "(no creative text)"
                     payloads.append({
-                    "source_id": "meta_ads",
-                    "brand_id": brand.get("id"),
-                    "external_id": f"{brand.get('id')}:{ad.get('id')}",
-                    "data_type": "ad",
-                    "dimension": "marketing",
-                    "channel": "ads",
-                    "platform": "meta",
-                    "title": ad.get("page_name") or query,
-                    "author": ad.get("page_name"),
-                    "body": body,
-                    "url": ad.get("ad_snapshot_url"),
-                    "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
-                    "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
+                        "source_id": "meta_ads",
+                        "brand_id": brand.get("id"),
+                        "external_id": f"{brand.get('id')}:{ad.get('id')}",
+                        "data_type": "ad",
+                        "dimension": "marketing",
+                        "channel": "ads",
+                        "platform": "meta",
+                        "title": ad.get("page_name") or query,
+                        "author": ad.get("page_name"),
+                        "body": body,
+                        "url": ad.get("ad_snapshot_url"),
+                        "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
+                        "stopped_at": parse_rss_datetime(ad.get("ad_delivery_stop_time")),
+                        "active_status": "inactive" if ad.get("ad_delivery_stop_time") else "active",
+                        "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
                         "raw": ad,
                     })
                 next_url = (data.get("paging") or {}).get("next")
                 if not next_url or next_url == url:
                     break
                 url = next_url
-        if conn is not None:
-            try:
-                rows = conn.execute("SELECT url FROM links WHERE brand_id = ? AND channel = 'ads' AND platform = 'meta_ads'", (brand.get("id"),)).fetchall()
-                page_ids = []
-                for row in rows:
-                    match = re.search(r"view_all_page_id[=%5B]?([0-9]+)", row["url"] or "")
-                    if match:
-                        page_ids.append(match.group(1))
-                brand = {**brand, "_meta_page_ids": page_ids}
-            except sqlite3.Error:
-                pass
         return payloads
-    try:
-        rows = conn.execute("SELECT url FROM links WHERE brand_id = ? AND channel = 'ads' AND platform = 'meta_ads'", (brand.get("id"),)).fetchall()
-        page_ids = []
-        for row in rows:
-            match = re.search(r"view_all_page_id[=%5B]?([0-9]+)", row["url"] or "")
-            if match:
-                page_ids.append(match.group(1))
-        brand = {**brand, "_meta_page_ids": page_ids}
-    except sqlite3.Error:
-        pass
-    return _collect_meta_public_ads(brand)
+    return _collect_meta_public_ads({**brand, "_meta_page_ids": _meta_page_ids_from_links(conn, brand.get("id"))})
 
 
 # YouTube creator collection now lives in connectors/creators/youtube.py

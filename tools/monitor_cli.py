@@ -50,14 +50,17 @@ def _params(args: argparse.Namespace) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="monitorhub", description="Read-only MonitorHub query client")
     parser.add_argument("--base-url", default=None, help="MonitorHub URL (default: MONITOR_BASE_URL or localhost)")
-    parser.add_argument("--json", action="store_true", dest="as_json", help="print JSON")
+    parser.add_argument("--json", action="store_true", dest="global_json", help="print JSON")
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("overview", "brands"):
-        sub.add_parser(command)
+        sub_parser = sub.add_parser(command)
+        sub_parser.add_argument("--json", action="store_true", dest="as_json", help="print JSON")
     records = sub.add_parser("records", help="query unified content records")
+    records.add_argument("--json", action="store_true", dest="as_json", help="print JSON")
     records.add_argument("--brand-id"); records.add_argument("--q"); records.add_argument("--days", type=int)
     records.add_argument("--start-date"); records.add_argument("--end-date"); records.add_argument("--limit", type=int, default=50)
     query = sub.add_parser("query", help="query one integration dataset")
+    query.add_argument("--json", action="store_true", dest="as_json", help="print JSON")
     query.add_argument("dataset", choices=("records", "brands", "products", "links", "sources", "sales_metrics", "job_postings", "web_monitors", "web_snapshots"))
     query.add_argument("--brand-id"); query.add_argument("--q"); query.add_argument("--start-date"); query.add_argument("--end-date"); query.add_argument("--limit", type=int, default=50)
     args = parser.parse_args(argv)
@@ -74,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if args.as_json:
+    if args.as_json or args.global_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif "rows" in result:
         for row in result["rows"]:

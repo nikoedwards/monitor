@@ -1,9 +1,36 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw, Sparkles } from "lucide-react";
 import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary } from "../lib/hooks";
 import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
+import { dailyPersistentTaskKey, persistTaskValue, PERSISTENT_TASK_EVENT, readPersistentTask } from "../lib/persistentTask";
 import { AsyncProgress, Badge, Button } from "./ui";
+
+function usePersistentSummary<T>(key: string, fetched: T | undefined): T | null {
+  const [cached, setCached] = useState<T | null>(() => {
+    const task = readPersistentTask<T>(key);
+    return task?.status === "success" ? task.data || null : null;
+  });
+
+  useEffect(() => {
+    const sync = () => {
+      const task = readPersistentTask<T>(key);
+      setCached(task?.status === "success" ? task.data || null : null);
+    };
+    sync();
+    window.addEventListener(PERSISTENT_TASK_EVENT, sync);
+    return () => window.removeEventListener(PERSISTENT_TASK_EVENT, sync);
+  }, [key]);
+
+  useEffect(() => {
+    if (fetched !== undefined) {
+      persistTaskValue(key, fetched);
+      setCached(fetched);
+    }
+  }, [fetched, key]);
+
+  return cached;
+}
 
 function highlightSource(highlight: string, representative: any[] = []) {
   const text = String(highlight || "").toLocaleLowerCase();
@@ -29,7 +56,10 @@ function highlightSource(highlight: string, representative: any[] = []) {
 export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { brandId?: string; range: TimeRange; marketBrandIds?: string[] }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const summary = useOverviewSummary(brandId, range, marketBrandIds, refreshKey);
-  const data = summary.data;
+  const cacheKey = dailyPersistentTaskKey("executive-summary", [brandId, range.start_date, range.end_date, marketBrandIds?.join(",")]);
+  const cached = usePersistentSummary<any>(cacheKey, summary.data);
+  const data = cached || summary.data;
+  const pending = summary.isFetching || readPersistentTask<any>(cacheKey)?.status === "pending";
 
   return (
     <div className="space-y-4">
@@ -39,11 +69,11 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { bran
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
         </div>
         <div className="flex flex-col items-end">
-          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={summary.isFetching}>
-            <RefreshCw size={13} className={summary.isFetching ? "animate-spin" : ""} />
-            {summary.isFetching ? "更新中…" : "刷新总结"}
+          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={pending}>
+            <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
+            {pending ? "更新中…" : "刷新总结"}
           </Button>
-          <AsyncProgress active={summary.isFetching} label="正在整理经营数据" />
+          <AsyncProgress active={pending} label="正在整理经营数据" />
         </div>
       </div>
 
@@ -106,7 +136,10 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { bran
 export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string; range: TimeRange }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const summary = useMarketingOverviewSummary(brandId, range, refreshKey);
-  const data = summary.data;
+  const cacheKey = dailyPersistentTaskKey("marketing-summary", [brandId, range.start_date, range.end_date]);
+  const cached = usePersistentSummary<any>(cacheKey, summary.data);
+  const data = cached || summary.data;
+  const pending = summary.isFetching || readPersistentTask<any>(cacheKey)?.status === "pending";
 
   return (
     <div className="space-y-4">
@@ -116,11 +149,11 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
         </div>
         <div className="flex flex-col items-end">
-          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={summary.isFetching}>
-            <RefreshCw size={13} className={summary.isFetching ? "animate-spin" : ""} />
-            {summary.isFetching ? "更新中…" : "刷新总结"}
+          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={pending}>
+            <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
+            {pending ? "更新中…" : "刷新总结"}
           </Button>
-          <AsyncProgress active={summary.isFetching} label="正在整理营销数据" />
+          <AsyncProgress active={pending} label="正在整理营销数据" />
         </div>
       </div>
 

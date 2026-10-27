@@ -6,6 +6,7 @@ import {
   FileUp,
   MessageSquareText,
   MessagesSquare,
+  RefreshCw,
   ShoppingBag,
   ShieldCheck,
   Smartphone,
@@ -17,7 +18,7 @@ import { TrendChart } from "../components/charts";
 import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
+import { useSourceMutations, useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
 import { fmtNum, TEAM_LABEL } from "../lib/format";
 import { SmartSummary } from "../components/SmartSummary";
@@ -77,6 +78,8 @@ export default function Voice() {
   const [selectedSources, setSelectedSources] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
   const [sourceDraft, setSourceDraft] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
+  const [collectMessage, setCollectMessage] = useState("");
+  const { collect } = useSourceMutations();
   const { data: summary, isLoading } = useVocSummary(brandId, range, selectedSources);
   const { data: records = [], isLoading: recordsLoading } = useVocRecords(brandId, range, selectedSources, 40, sentimentFilter === "all" ? undefined : sentimentFilter);
 
@@ -92,6 +95,17 @@ export default function Voice() {
     setSourceOpen(true);
   };
 
+  const collectAppReviews = async () => {
+    if (!brandId || collect.isPending) return;
+    setCollectMessage("正在抓取 App Store 最新评论…");
+    try {
+      const result = await collect.mutateAsync({ sourceId: "app_store_reviews", brandId });
+      setCollectMessage(result.status === "ok" ? `已完成，新增 ${result.created || 0} 条` : (result.error || result.status || "采集未完成"));
+    } catch (error: any) {
+      setCollectMessage(error?.message || "App Store 采集失败");
+    }
+  };
+
   return (
     <div className="space-y-6">
       <SectionTitle
@@ -100,6 +114,10 @@ export default function Voice() {
         action={
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
+            <Button size="sm" onClick={collectAppReviews} disabled={collect.isPending} title="从 App Store 公开接口抓取最新评论">
+              <RefreshCw size={14} className={collect.isPending ? "animate-spin" : undefined} />
+              {collect.isPending ? "采集中…" : "抓取应用商店评论"}
+            </Button>
             <Button variant="primary" onClick={openSourcePicker}>
               <Database size={15} />
               数据来源
@@ -108,6 +126,11 @@ export default function Voice() {
           </div>
         }
       />
+      {collectMessage && (
+        <div className="text-[12px]" style={{ color: collect.isError ? "var(--danger)" : "var(--mute)" }}>
+          {collectMessage}
+        </div>
+      )}
 
       <Card className="p-4">
         <div className="flex flex-col lg:flex-row lg:items-center gap-3 lg:justify-between">

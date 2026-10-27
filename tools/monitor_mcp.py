@@ -9,7 +9,10 @@ import json
 import sys
 from typing import Any
 
-from .monitor_cli import fetch
+try:  # support both ``python -m tools.monitor_mcp`` and direct execution
+    from .monitor_cli import fetch
+except ImportError:  # pragma: no cover - direct script convenience
+    from monitor_cli import fetch
 
 TOOLS = [
     {"name": "monitor_overview", "description": "Get MonitorHub dataset counts and freshness.", "inputSchema": {"type": "object", "properties": {}}},
