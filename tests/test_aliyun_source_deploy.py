@@ -131,6 +131,18 @@ class SourceDeploymentTests(unittest.TestCase):
         self.assertEqual((self.project / "docker-compose.yml").read_bytes(), self.old_base)
         self.assertFalse(list(self.state.glob("release-*")))
 
+    def test_image_build_streams_progress_with_an_extended_timeout(self):
+        with patch.object(self.deployer, "run", side_effect=("", "")) as run:
+            module.SourceDeployer.build_image(self.deployer)
+
+        build_call = run.call_args_list[1]
+        self.assertEqual(build_call.kwargs["timeout"], module.IMAGE_BUILD_TIMEOUT)
+        self.assertEqual(
+            build_call.kwargs["env"],
+            {"DOCKER_BUILDKIT": "1"},
+        )
+        self.assertTrue(build_call.kwargs["stream_output"])
+
     def test_pre_stop_validation_failure_discards_candidate(self):
         self.validate_live_data_mount.side_effect = RuntimeError("mount mismatch")
 

@@ -31,6 +31,7 @@ class ReleaseFailed(RuntimeError):
 
 
 MIN_RESTART_HEADROOM = 3 * 1024**3
+IMAGE_BUILD_TIMEOUT = 35 * 60
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_HEADER_BYTES = 100
 
@@ -100,21 +101,21 @@ class SourceDeployer:
         self.rolling_back = False
         self.committed = False
 
-    def run(self, args, *, timeout=900, env=None):
+    def run(self, args, *, timeout=900, env=None, stream_output=False):
         command_env = os.environ.copy()
         if env:
             command_env.update(env)
         result = subprocess.run(
             args,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=None if stream_output else subprocess.PIPE,
+            stderr=None if stream_output else subprocess.PIPE,
             check=False,
             timeout=timeout,
             env=command_env,
         )
         if result.returncode != 0:
-            detail = (result.stdout + result.stderr).strip()
+            detail = ((result.stdout or "") + (result.stderr or "")).strip()
             if len(detail) > 8000:
                 detail = detail[-8000:]
             raise RuntimeError(
@@ -179,7 +180,12 @@ class SourceDeployer:
         else:
             command += ["--cache-from", self.stable_image]
         command.append(str(self.source_dir))
-        self.run(command, env={"DOCKER_BUILDKIT": "1"})
+        self.run(
+            command,
+            timeout=IMAGE_BUILD_TIMEOUT,
+            env={"DOCKER_BUILDKIT": "1"},
+            stream_output=True,
+        )
 
     def image_id(self, reference):
         return self.run(
