@@ -97,12 +97,17 @@ export default function Voice() {
 
   const collectAppReviews = async () => {
     if (!brandId || collect.isPending) return;
-    setCollectMessage("正在抓取 App Store 最新评论…");
+    setCollectMessage("正在抓取 App Store 和 Google Play 最新评论…");
     try {
-      const result = await collect.mutateAsync({ sourceId: "app_store_reviews", brandId });
-      setCollectMessage(result.status === "ok" ? `已完成，新增 ${result.created || 0} 条` : (result.error || result.status || "采集未完成"));
+      const results = [];
+      for (const sourceId of ["app_store_reviews", "google_play_reviews"]) {
+        results.push(await collect.mutateAsync({ sourceId, brandId }));
+      }
+      const created = results.reduce((total, result) => total + Number(result.created || 0), 0);
+      const failed = results.filter((result) => result.status !== "ok");
+      setCollectMessage(failed.length ? failed.map((result) => result.error || result.status).join("；") : `已完成，新增 ${created} 条`);
     } catch (error: any) {
-      setCollectMessage(error?.message || "App Store 采集失败");
+      setCollectMessage(error?.message || "应用商店采集失败");
     }
   };
 
@@ -114,7 +119,7 @@ export default function Voice() {
         action={
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
-            <Button size="sm" onClick={collectAppReviews} disabled={collect.isPending} title="从 App Store 公开接口抓取最新评论">
+            <Button size="sm" onClick={collectAppReviews} disabled={collect.isPending} title="从 App Store 和 Google Play 公开接口抓取最新评论">
               <RefreshCw size={14} className={collect.isPending ? "animate-spin" : undefined} />
               {collect.isPending ? "采集中…" : "抓取应用商店评论"}
             </Button>

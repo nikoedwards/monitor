@@ -41,8 +41,10 @@ def handle(message: dict[str, Any], base_url: str | None = None) -> dict[str, An
         try:
             if name == "monitor_overview": value = fetch("/api/integrations/overview", base_url=base_url)
             elif name == "monitor_brands": value = fetch("/api/integrations/query", {"dataset": "brands", "limit": args.get("limit", 200)}, base_url=base_url)
-            elif name == "monitor_records": value = fetch("/api/records", args, base_url=base_url)
-            elif name == "monitor_query": value = fetch("/api/integrations/query", args, base_url=base_url)
+            elif name == "monitor_records":
+                value = fetch("/api/records", {"limit": 50, **args}, base_url=base_url)
+            elif name == "monitor_query":
+                value = fetch("/api/integrations/query", {"limit": 50, **args}, base_url=base_url)
             else: raise ValueError(f"Unknown tool: {name}")
             return {"jsonrpc": "2.0", "id": request_id, "result": _result(value)}
         except Exception as exc:
@@ -53,13 +55,32 @@ def handle(message: dict[str, Any], base_url: str | None = None) -> dict[str, An
 def main() -> int:
     import os
     base_url = os.environ.get("MONITOR_BASE_URL")
-    for line in sys.stdin:
+    # MCP messages are UTF-8 JSON.  Windows may expose stdio as the active
+    # console code page (often GBK), which crashes when a record contains an
+    # emoji or a zero-width joiner and makes the client report a misleading
+    # 502.  Read and write bytes so the transport is independent of the shell
+    # locale.
+    input_stream = getattr(sys.stdin, "buffer", sys.stdin)
+    output_stream = getattr(sys.stdout, "buffer", sys.stdout)
+
+    def write(message: dict[str, Any]) -> None:
+        payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+        if hasattr(output_stream, "write"):
+            try:
+                output_stream.write(payload)
+            except TypeError:  # StringIO-style streams used by tests.
+                output_stream.write(payload.decode("utf-8"))
+            output_stream.flush()
+
+    for line in input_stream:
         try:
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
             response = handle(json.loads(line), base_url)
             if response is not None:
-                print(json.dumps(response, ensure_ascii=False), flush=True)
+                write(response)
         except Exception as exc:
-            print(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}, ensure_ascii=False), flush=True)
+            write({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}})
     return 0
 
 

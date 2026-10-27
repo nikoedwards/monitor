@@ -22,6 +22,7 @@ const COLLECTION_SOURCE_LABEL: Record<string, string> = {
   youtube_search: "YouTube 搜索采集",
   social_accounts: "官方社媒账号采集",
   app_store_reviews: "App Store 评论采集",
+  google_play_reviews: "Google Play 评论采集",
   instagram_listening: "Instagram 红人采集",
   tiktok_listening: "TikTok 红人采集",
   x_search: "X 红人采集",
@@ -390,6 +391,24 @@ function SentimentBadge({ record }: { record: RecordItem }) {
   );
 }
 
+function AppRating({ record }: { record: RecordItem }) {
+  if (record.channel !== "app" || record.data_type !== "user_voice") return null;
+  const rating = Number(record.metrics?.rating);
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) return null;
+  const rounded = Math.round(rating);
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[12px] font-medium"
+      style={{ color: "var(--warning)" }}
+      aria-label={`评分 ${rating} / 5`}
+      title={`评分 ${rating} / 5`}
+    >
+      <span aria-hidden="true" className="tracking-tight">{"★".repeat(rounded)}{"☆".repeat(5 - rounded)}</span>
+      <span>{rating}/5</span>
+    </span>
+  );
+}
+
 function HighlightedText({ record }: { record: RecordItem }) {
   const text = (record.body || record.title || "").trim();
   const terms = Array.from(new Set((record.highlight_terms || []).filter((term) => term && term.length >= 3)))
@@ -541,6 +560,7 @@ export function RecordList({
               <div className="flex items-center gap-2 flex-wrap mb-1">
                 {isReply && <Badge tone="accent">回复</Badge>}
                 <SentimentBadge record={r} />
+                <AppRating record={r} />
                 {r.voice_source && <Badge tone="accent">来源：{VOICE_SOURCE_LABEL[r.voice_source] || r.voice_source}</Badge>}
                 {r.platform && <Badge tone="neutral">{r.platform}</Badge>}
                 {r.channel && <Badge tone="neutral">{CHANNEL_LABEL[r.channel] || r.channel}</Badge>}

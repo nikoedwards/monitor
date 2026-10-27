@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from server.connectors.collectors import _DEFAULT_APP_STORE_COUNTRIES, collect_app_store
+from server.connectors.collectors import _APP_STORE_REVIEW_COUNTRIES, _DEFAULT_APP_STORE_COUNTRIES, collect_app_store
 
 
 SCHEMA = """
@@ -71,6 +71,15 @@ class AppStoreCollectorTests(unittest.TestCase):
         def response(url, **_kwargs):
             if "/search?" in url:
                 return {"results": search_results}
+            if "/rss/customerreviews/" in url:
+                return {"feed": {"entry": [{
+                    "id": {"label": f"review-{url.rsplit('/', 3)[-3]}"},
+                    "title": {"label": "Recent"},
+                    "content": {"label": "Works well"},
+                    "author": {"name": {"label": "A User"}},
+                    "updated": {"label": "2026-10-20T12:34:56-07:00"},
+                    "im:rating": {"label": "5"},
+                }]}}
             return {"results": [
                 {**search_results[0], "trackName": "Anker localized", "userRatingCount": 100},
                 {**search_results[1], "trackName": "soundcore localized", "userRatingCount": 200},
@@ -83,12 +92,19 @@ class AppStoreCollectorTests(unittest.TestCase):
         self.assertEqual(set(_DEFAULT_APP_STORE_COUNTRIES), {item["region"] for item in payloads})
         self.assertEqual(
             {"Anker localized", "soundcore localized"},
-            {item["raw"]["track_name"] for item in payloads},
+            {item["raw"]["track_name"] for item in payloads if item["data_type"] == "app_metric"},
         )
-        self.assertTrue(all(item["data_type"] == "app_metric" for item in payloads))
-        self.assertTrue(all(item["raw"]["discovery"] == "portfolio_market_lookup" for item in payloads))
-        self.assertTrue(all(item["metrics"]["rating_count_observed"] for item in payloads))
-        self.assertEqual(1 + len(_DEFAULT_APP_STORE_COUNTRIES) + 2, fetch_json.call_count)
+        metrics = [item for item in payloads if item["data_type"] == "app_metric"]
+        self.assertTrue(metrics)
+        self.assertTrue(all(item["raw"]["discovery"] == "portfolio_market_lookup" for item in metrics))
+        self.assertTrue(all(item["metrics"]["rating_count_observed"] for item in metrics))
+        self.assertEqual(
+            1 + len(_DEFAULT_APP_STORE_COUNTRIES) + len(_APP_STORE_REVIEW_COUNTRIES) * 2,
+            fetch_json.call_count,
+        )
+        reviews = [item for item in payloads if item["data_type"] == "user_voice"]
+        self.assertEqual(set(_APP_STORE_REVIEW_COUNTRIES), {item["region"] for item in reviews})
+        self.assertTrue(any("/jp/" in item["url"] for item in reviews))
 
     @patch("server.connectors.collectors.fetch_json")
     def test_configured_link_collects_total_rating_count_and_latest_reviews(self, fetch_json):
@@ -136,6 +152,9 @@ class AppStoreCollectorTests(unittest.TestCase):
         })
         self.assertEqual("review-1", review["external_id"])
         self.assertEqual("2026-10-20T12:34:56-07:00", review["occurred_at"])
+        self.assertEqual(set(_APP_STORE_REVIEW_COUNTRIES), {
+            item["region"] for item in payloads if item["data_type"] == "user_voice"
+        })
         status = self.conn.execute("SELECT last_status FROM links WHERE id = 'plaud-us'").fetchone()
         self.assertEqual("ok", status["last_status"])
 

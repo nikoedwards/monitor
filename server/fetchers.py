@@ -78,6 +78,31 @@ def fetch_bytes(
         raise FetchError(str(exc)) from exc
 
 
+def fetch_bytes_post(
+    url: str,
+    data: bytes,
+    *,
+    accept: str = "*/*",
+    timeout: int = 16,
+    max_bytes: int = 3_000_000,
+    headers: dict | None = None,
+) -> bytes:
+    """POST an already-encoded body and return raw bytes.
+
+    A few public RPC endpoints (including Google Play's review stream) require
+    a precise form body that must not be encoded a second time.  Keep the same
+    SSRF guard and error normalization as :func:`fetch_bytes`.
+    """
+    request_headers = {"User-Agent": USER_AGENT, "Accept": accept}
+    request_headers.update(headers or {})
+    request = Request(normalize_url(url), data=data, headers=request_headers, method="POST")
+    try:
+        with _open(request, timeout) as response:
+            return response.read(max_bytes)
+    except (URLError, OSError, ValueError) as exc:
+        raise FetchError(str(exc)) from exc
+
+
 def fetch_text(
     url: str,
     *,

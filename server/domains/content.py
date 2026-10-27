@@ -169,7 +169,10 @@ def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: s
     records: list[dict] = []
     seen: set[str] = set()
     for record in candidates:
-        if record.get("source_id") == "app_store_reviews" and record.get("data_type") == "app_metric":
+        if record.get("data_type") == "app_metric" and (
+            record.get("source_id") in {"app_store_reviews", "google_play_reviews"}
+            or str(record.get("platform") or "").lower() in {"app_store", "google_play"}
+        ):
             continue
         source_key = _voice_source_key(record)
         record_id = str(record.get("id") or "")
