@@ -42,3 +42,20 @@ on failure. Source upload uses a staging directory and only replaces a commit's
 release directory after the archive extracts successfully. Successful releases
 remove temporary source trees and SHA tags while retaining the stable and
 rollback image tags.
+
+
+The host also runs `monitor-watchdog.timer`, installed from
+`deploy/aliyun/monitor-watchdog.{service,timer}`. It checks the container state
+and Docker health once per minute, skips the deployment lock, and restarts the
+Monitor service after two consecutive failed checks. The deployer explicitly
+sets and verifies the container restart policy as `unless-stopped`, because a
+Compose file change does not repair the policy of an already-created container.
+
+Install or refresh the watchdog on the production host with:
+
+```bash
+install -m 0755 deploy/aliyun/monitor-watchdog.sh /opt/monitor/deploy/aliyun/monitor-watchdog.sh
+install -m 0644 deploy/aliyun/monitor-watchdog.service deploy/aliyun/monitor-watchdog.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now monitor-watchdog.timer
+```
