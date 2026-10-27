@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -28,16 +29,26 @@ def fetch(path: str, params: dict[str, object] | None = None, *, base_url: str |
     if query:
         url += "?" + urlencode(query)
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "monitorhub-cli/1"})
-    try:
-        with urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        detail = getattr(exc, "read", lambda: b"")()
+    for attempt in range(3):
         try:
-            detail = json.loads(detail.decode("utf-8")).get("detail", "")
-        except Exception:
-            detail = str(exc)
-        raise RuntimeError(f"MonitorHub request failed: {detail}") from exc
+            with urlopen(request, timeout=45) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as exc:
+            if exc.code in {502, 503, 504} and attempt < 2:
+                time.sleep(0.75 * (attempt + 1))
+                continue
+            detail = exc.read()
+            try:
+                detail = json.loads(detail.decode("utf-8")).get("detail", "")
+            except Exception:
+                detail = str(exc)
+            raise RuntimeError(f"MonitorHub request failed: {detail}") from exc
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            if attempt < 2 and isinstance(exc, (URLError, TimeoutError)):
+                time.sleep(0.75 * (attempt + 1))
+                continue
+            raise RuntimeError(f"MonitorHub request failed: {exc}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("MonitorHub returned a non-object response")
     return payload
