@@ -98,7 +98,10 @@ def _render_playwright(url: str, cookie_header: str, wait_ms: int, scroll: bool 
                 # the viewport reaches the list. Scroll a bounded number of
                 # times so imports see the initial roster without hanging on
                 # an endlessly loading page.
-                for _ in range(6):
+                # Load a larger employee roster for bulk import.  Keep the
+                # bound finite so a virtualized or endlessly loading page
+                # cannot hold the scheduled collector indefinitely.
+                for _ in range(12):
                     page.mouse.wheel(0, 1200)
                     page.wait_for_timeout(350)
             result.html = page.content()

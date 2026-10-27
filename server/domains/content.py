@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api", tags=["content"])
 
 _LEGACY_FIXED_PUBLICATION_TRAFFIC = {25_000, 80_000, 220_000, 500_000, 1_500_000, 5_000_000}
 _MARKETING_OVERVIEW_CACHE: dict[tuple, tuple[float, dict]] = {}
-_MARKETING_SUMMARY_TTL_SECONDS = 600
+_MARKETING_SUMMARY_TTL_SECONDS = 24 * 60 * 60
 
 VOC_SOURCE_CATALOG = (
     {"key": "sales_reviews", "label": "销售渠道评论", "description": "Amazon、独立站等销售平台的商品评论"},
@@ -490,7 +490,7 @@ def _issue_priority_reason(records: list[dict], comparison_records: list[dict] |
         return f"负向内容在当前范围内的传播表现靠前：{'、'.join(details)}。"
     if impact["moderate"]:
         return "负向内容在当前范围内的传播表现高于多数帖子，已纳入相对影响评估。"
-    return "当前主要依据负向反馈量、投诉量和负向率判断。"
+    return ""
 
 
 def _topic_breakdown(records: list[dict], comparison_records: list[dict] | None = None) -> list[dict]:
@@ -798,7 +798,7 @@ def marketing_ads(brand_id: str | None = None, days: int = 30, start_date: str |
     elif status in {"active", "inactive", "stopped"}: where.append("active_status = ?"); params.append("inactive" if status == "stopped" else status)
     if source: where.append("source_id = ?"); params.append(source)
     if q: where.append("(page_name LIKE ? OR creative_body LIKE ?)"); params += [f"%{q}%", f"%{q}%"]
-    rows = conn.execute(f"SELECT * FROM ad_entities WHERE {' AND '.join(where)} ORDER BY last_seen_at DESC LIMIT ?", (*params, max(1, min(limit, 500)))).fetchall()
+    rows = conn.execute(f"SELECT * FROM ad_entities WHERE {' AND '.join(where)} ORDER BY last_seen_at DESC LIMIT ?", (*params, max(1, min(limit, 1000)))).fetchall()
     return {"ads": [_ad_entity_dict(row) for row in rows], "start_date": start, "end_date": end}
 
 
@@ -1239,6 +1239,12 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
     payload = _marketing_overview_payload(conn, brand_id, start, end)
     cache_key = (brand_id, start, end)
     now = time.monotonic()
+    persistent_key = "marketing-overview:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent is not None:
+            _MARKETING_OVERVIEW_CACHE[cache_key] = (now, persistent)
+            return {**persistent, "cached": True}
     cached = _MARKETING_OVERVIEW_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _MARKETING_SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
@@ -1254,4 +1260,5 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
     result.update({"range": payload["range"], "cached": False})
     _MARKETING_OVERVIEW_CACHE[cache_key] = (now, result)
+    ai.put_cached_summary(conn, persistent_key, result)
     return result

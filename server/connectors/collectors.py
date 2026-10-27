@@ -1333,25 +1333,52 @@ def _meta_public_ads_from_html(html: str) -> list[dict]:
     )
     ads: list[dict] = []
     seen: set[str] = set()
-
-    def walk(value) -> None:
-        if isinstance(value, dict):
-            ad_id = value.get("ad_archive_id")
-            if ad_id and isinstance(value.get("snapshot"), dict) and str(ad_id) not in seen:
-                seen.add(str(ad_id))
-                ads.append(value)
-            for child in value.values():
-                walk(child)
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-
     for raw in scripts:
         try:
-            walk(json.loads(raw))
+            _meta_collect_ads_from_value(json.loads(raw), ads, seen)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
     return ads
+
+
+def _meta_collect_ads_from_value(value, ads: list[dict], seen: set[str]) -> None:
+    """Collect ad nodes from either SSR data or a pagination response."""
+    if isinstance(value, dict):
+        ad_id = value.get("ad_archive_id")
+        if ad_id and isinstance(value.get("snapshot"), dict) and str(ad_id) not in seen:
+            seen.add(str(ad_id))
+            ads.append(value)
+        for child in value.values():
+            _meta_collect_ads_from_value(child, ads, seen)
+    elif isinstance(value, list):
+        for child in value:
+            _meta_collect_ads_from_value(child, ads, seen)
+
+
+def _meta_public_ad_count_from_html(html: str) -> int | None:
+    """Read the authoritative result count exposed in Ad Library SSR data."""
+    match = re.search(r'"search_results_connection"\s*:\s*\{\s*"count"\s*:\s*(\d+)', html or "")
+    return int(match.group(1)) if match else None
+
+
+def _meta_page_ids_from_links(conn: sqlite3.Connection | None, brand_id: str | None) -> list[str]:
+    """Return configured Meta page ids so collection follows the page scope."""
+    if conn is None or not brand_id:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT url FROM links WHERE brand_id = ? AND channel = 'ads' AND platform = 'meta_ads'",
+            (brand_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    result: list[str] = []
+    for row in rows:
+        url = row["url"] or ""
+        match = re.search(r"(?:view_all_page_id|view_all_page%5Bid%5D)=(\d+)", url, flags=re.I)
+        if match and match.group(1) not in result:
+            result.append(match.group(1))
+    return result
 
 
 def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
@@ -1446,6 +1473,9 @@ def _collect_meta_public_ads(brand: dict) -> list[dict]:
 
     payloads: list[dict] = []
     seen: set[str] = set()
+    max_ads = 1000
+    page_ids = [str(value) for value in (brand.get("_meta_page_ids") or []) if str(value).isdigit()]
+    searches = [("", page_id) for page_id in page_ids] or [(query, None) for query in brand_queries(brand)[:4]]
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
@@ -1454,28 +1484,66 @@ def _collect_meta_public_ads(brand: dict) -> list[dict]:
         context = browser.new_context(locale="en-US", user_agent=_META_PUBLIC_USER_AGENT, viewport={"width": 1366, "height": 900})
         page = context.new_page()
         try:
-            for query in brand_queries(brand)[:4]:
+            for query, page_id in searches:
                 params = urlencode({
                     "active_status": "all",
                     "ad_type": "all",
-                    "country": "US",
-                    "q": query,
-                    "search_type": "keyword_unordered",
+                    "country": "ALL",
+                    "media_type": "all",
+                    "search_type": "page" if page_id else "keyword_unordered",
+                    **({"view_all_page_id": page_id} if page_id else {"q": query}),
                 })
+                response_ads: list[dict] = []
+
+                def on_response(response) -> None:
+                    if "/api/graphql/" not in response.url:
+                        return
+                    try:
+                        if response.status == 200:
+                            _meta_collect_ads_from_value(response.json(), response_ads, {str(item.get("ad_archive_id")) for item in response_ads})
+                    except Exception:
+                        return
+
+                page.on("response", on_response)
                 try:
                     page.goto(f"{_META_PUBLIC_URL}?{params}", wait_until="domcontentloaded", timeout=90_000)
                     page.wait_for_timeout(4_500)
                     html = page.content()
                 except Exception:
+                    page.remove_listener("response", on_response)
                     continue
-                for ad in _meta_public_ads_from_html(html):
-                    ad_id = str(ad.get("ad_archive_id"))
-                    if ad_id in seen:
-                        continue
-                    payload = _meta_public_payload(ad, brand, query)
-                    if payload:
-                        seen.add(ad_id)
-                        payloads.append(payload)
+                expected = min(_meta_public_ad_count_from_html(html) or max_ads, max_ads)
+                page_ads = _meta_public_ads_from_html(html)
+                stable_rounds = 0
+                previous_count = 0
+                for _ in range(80):
+                    candidates = page_ads + response_ads
+                    for ad in candidates:
+                        ad_id = str(ad.get("ad_archive_id"))
+                        if ad_id in seen:
+                            continue
+                        payload = _meta_public_payload(ad, brand, query or page_id or "Meta")
+                        if payload:
+                            seen.add(ad_id)
+                            payloads.append(payload)
+                    current_count = len(seen)
+                    if current_count >= expected:
+                        break
+                    if current_count == previous_count:
+                        stable_rounds += 1
+                    else:
+                        stable_rounds = 0
+                    if stable_rounds >= 5:
+                        break
+                    previous_count = current_count
+                    try:
+                        page.mouse.wheel(0, 1400)
+                        page.wait_for_timeout(900)
+                        html = page.content()
+                        page_ads = _meta_public_ads_from_html(html)
+                    except Exception:
+                        break
+                page.remove_listener("response", on_response)
         finally:
             try:
                 context.close()
@@ -1488,38 +1556,52 @@ def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     token = CREDENTIALS.get("facebook_access_token")
     if token:
         payloads: list[dict] = []
-        fields = "id,ad_creative_bodies,ad_snapshot_url,page_name,ad_delivery_start_time,publisher_platforms"
+        fields = "id,ad_creative_bodies,ad_snapshot_url,page_name,ad_delivery_start_time,ad_delivery_stop_time,publisher_platforms,impressions,spend,reach"
+        seen: set[str] = set()
         for query in brand_queries(brand):
             url = (
                 "https://graph.facebook.com/v19.0/ads_archive?"
-                f"search_terms={quote_plus(query)}&ad_reached_countries=%5B%22US%22%5D"
-                f"&ad_active_status=ALL&fields={fields}&limit=25&access_token={quote_plus(token)}"
+                f"search_terms={quote_plus(query)}&ad_reached_countries=%5B%22ALL%22%5D"
+                f"&ad_active_status=ALL&fields={quote_plus(fields)}&limit=100&access_token={quote_plus(token)}"
             )
-            try:
-                data = fetch_json(url, timeout=20)
-            except FetchError:
-                continue
-            for ad in (data.get("data", []) if isinstance(data, dict) else []):
-                bodies = ad.get("ad_creative_bodies") or []
-                body = clean_text(" ".join(bodies)) or "(no creative text)"
-                payloads.append({
-                    "source_id": "meta_ads",
-                    "brand_id": brand.get("id"),
-                    "external_id": f"{brand.get('id')}:{ad.get('id')}",
-                    "data_type": "ad",
-                    "dimension": "marketing",
-                    "channel": "ads",
-                    "platform": "meta",
-                    "title": ad.get("page_name") or query,
-                    "author": ad.get("page_name"),
-                    "body": body,
-                    "url": ad.get("ad_snapshot_url"),
-                    "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
-                    "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
-                    "raw": ad,
-                })
+            for _ in range(100):
+                try:
+                    data = fetch_json(url, timeout=20)
+                except FetchError:
+                    break
+                if not isinstance(data, dict):
+                    break
+                for ad in (data.get("data", []) if isinstance(data.get("data"), list) else []):
+                    ad_id = str(ad.get("id") or "")
+                    if not ad_id or ad_id in seen:
+                        continue
+                    seen.add(ad_id)
+                    bodies = ad.get("ad_creative_bodies") or []
+                    body = clean_text(" ".join(bodies)) or "(no creative text)"
+                    payloads.append({
+                        "source_id": "meta_ads",
+                        "brand_id": brand.get("id"),
+                        "external_id": f"{brand.get('id')}:{ad.get('id')}",
+                        "data_type": "ad",
+                        "dimension": "marketing",
+                        "channel": "ads",
+                        "platform": "meta",
+                        "title": ad.get("page_name") or query,
+                        "author": ad.get("page_name"),
+                        "body": body,
+                        "url": ad.get("ad_snapshot_url"),
+                        "occurred_at": parse_rss_datetime(ad.get("ad_delivery_start_time")),
+                        "stopped_at": parse_rss_datetime(ad.get("ad_delivery_stop_time")),
+                        "active_status": "inactive" if ad.get("ad_delivery_stop_time") else "active",
+                        "metrics": {"publisher_platforms": ad.get("publisher_platforms")},
+                        "raw": ad,
+                    })
+                next_url = (data.get("paging") or {}).get("next")
+                if not next_url or next_url == url:
+                    break
+                url = next_url
         return payloads
-    return _collect_meta_public_ads(brand)
+    return _collect_meta_public_ads({**brand, "_meta_page_ids": _meta_page_ids_from_links(conn, brand.get("id"))})
 
 
 # YouTube creator collection now lives in connectors/creators/youtube.py

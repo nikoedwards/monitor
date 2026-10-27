@@ -14,10 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import DIST, HOST, PORT, SNAPSHOT_DIR, apply_credential_overrides
+from .config import DIST, HOST, PORT, SCHEDULER_ENABLED, SNAPSHOT_DIR, apply_credential_overrides
 from .connectors.registry import sync_to_db
 from .db import db, init_db
-from .domains import brands, content, creators, hiring, insights, market_share, sales, settings, sources, web
+from .domains import brands, content, creators, hiring, insights, integrations, market_share, sales, settings, sources, web
 from . import media
 from .scheduler import start_scheduler
 from .snapshot import upgrade_snapshot_archives, upgrade_snapshot_fallback_images
@@ -31,8 +31,12 @@ async def lifespan(app: FastAPI):
         stored = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
         apply_credential_overrides(stored)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    upgraded_archives = upgrade_snapshot_archives()
-    migrated_fallbacks = upgrade_snapshot_fallback_images()
+    # Deployment preflight disables the scheduler and mounts production
+    # snapshots read-only. Snapshot migrations are maintenance work and would
+    # otherwise scan every archive before the candidate can answer health
+    # checks. Run them during normal writable production startup only.
+    upgraded_archives = upgrade_snapshot_archives() if SCHEDULER_ENABLED else 0
+    migrated_fallbacks = upgrade_snapshot_fallback_images() if SCHEDULER_ENABLED else {}
     if upgraded_archives or migrated_fallbacks:
         root = SNAPSHOT_DIR.resolve()
         with db() as conn:
@@ -81,7 +85,7 @@ async def secure_snapshot_archives(request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
-for module in (brands, content, creators, sales, web, sources, insights, market_share, hiring, settings, media):
+for module in (brands, content, creators, sales, web, sources, insights, integrations, market_share, hiring, settings, media):
     app.include_router(module.router)
 
 

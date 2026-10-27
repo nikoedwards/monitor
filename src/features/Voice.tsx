@@ -6,6 +6,7 @@ import {
   FileUp,
   MessageSquareText,
   MessagesSquare,
+  RefreshCw,
   ShoppingBag,
   ShieldCheck,
   Smartphone,
@@ -17,7 +18,7 @@ import { TrendChart } from "../components/charts";
 import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
+import { useSourceMutations, useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
 import { fmtNum, TEAM_LABEL } from "../lib/format";
 import { SmartSummary } from "../components/SmartSummary";
@@ -43,6 +44,10 @@ const VOICE_SOURCES: { key: SourceKey; label: string; description: string; icon:
 
 const ALL_SOURCE_KEYS = VOICE_SOURCES.map((source) => source.key);
 const SOURCE_LABEL = Object.fromEntries(VOICE_SOURCES.map((source) => [source.key, source.label])) as Record<string, string>;
+
+function toggleSourceSelection(selectedSources: SourceKey[], key: SourceKey): SourceKey[] {
+  return selectedSources.length === 1 && selectedSources[0] === key ? ALL_SOURCE_KEYS : [key];
+}
 
 const TOPIC_LABEL: Record<string, string> = {
   ads: "广告体验",
@@ -73,6 +78,8 @@ export default function Voice() {
   const [selectedSources, setSelectedSources] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
   const [sourceDraft, setSourceDraft] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
+  const [collectMessage, setCollectMessage] = useState("");
+  const { collect } = useSourceMutations();
   const { data: summary, isLoading } = useVocSummary(brandId, range, selectedSources);
   const { data: records = [], isLoading: recordsLoading } = useVocRecords(brandId, range, selectedSources, 40, sentimentFilter === "all" ? undefined : sentimentFilter);
 
@@ -88,6 +95,17 @@ export default function Voice() {
     setSourceOpen(true);
   };
 
+  const collectAppReviews = async () => {
+    if (!brandId || collect.isPending) return;
+    setCollectMessage("正在抓取 App Store 最新评论…");
+    try {
+      const result = await collect.mutateAsync({ sourceId: "app_store_reviews", brandId });
+      setCollectMessage(result.status === "ok" ? `已完成，新增 ${result.created || 0} 条` : (result.error || result.status || "采集未完成"));
+    } catch (error: any) {
+      setCollectMessage(error?.message || "App Store 采集失败");
+    }
+  };
+
   return (
     <div className="space-y-6">
       <SectionTitle
@@ -96,6 +114,10 @@ export default function Voice() {
         action={
           <div className="flex flex-wrap items-center gap-2">
             <TimeRangePicker />
+            <Button size="sm" onClick={collectAppReviews} disabled={collect.isPending} title="从 App Store 公开接口抓取最新评论">
+              <RefreshCw size={14} className={collect.isPending ? "animate-spin" : undefined} />
+              {collect.isPending ? "采集中…" : "抓取应用商店评论"}
+            </Button>
             <Button variant="primary" onClick={openSourcePicker}>
               <Database size={15} />
               数据来源
@@ -104,6 +126,11 @@ export default function Voice() {
           </div>
         }
       />
+      {collectMessage && (
+        <div className="text-[12px]" style={{ color: collect.isError ? "var(--danger)" : "var(--mute)" }}>
+          {collectMessage}
+        </div>
+      )}
 
       <Card className="p-4">
         <div className="flex flex-col lg:flex-row lg:items-center gap-3 lg:justify-between">
@@ -119,7 +146,7 @@ export default function Voice() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setSelectedSources([key])}
+                onClick={() => setSelectedSources((current) => toggleSourceSelection(current, key))}
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px]"
                 title={`只查看${SOURCE_LABEL[key]}`}
                 style={{ background: selectedSources.length === 1 && selectedSources.includes(key) ? "rgba(0,112,243,0.12)" : "var(--bg-soft-2)", color: selectedSources.includes(key) ? "var(--accent)" : "var(--mute)", cursor: "pointer", opacity: selectedSources.includes(key) ? 1 : 0.72 }}
@@ -187,7 +214,11 @@ export default function Voice() {
 
       <Card>
         <SectionTitle title="原始反馈明细" subtitle="每个数据源先给出摘要，再查看具体反馈、情绪判断、标签和采集依据" />
-        <SourceSummaryGrid sources={sourceCatalog} selectedSources={selectedSources} onSelect={(key) => setSelectedSources([key as SourceKey])} />
+        <SourceSummaryGrid
+          sources={sourceCatalog}
+          selectedSources={selectedSources}
+          onSelect={(key) => setSelectedSources((current) => toggleSourceSelection(current, key as SourceKey))}
+        />
         <div className="flex flex-wrap items-center gap-2 mt-4 mb-3">
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>情绪筛选</span>
           {([
@@ -196,7 +227,7 @@ export default function Voice() {
             ["neutral", "中性"],
             ["negative", "负向"],
           ] as const).map(([key, label]) => (
-            <button key={key} type="button" onClick={() => setSentimentFilter(key)} className="rounded-full px-2.5 py-1 text-[12px] cursor-pointer" style={{ background: sentimentFilter === key ? "var(--accent)" : "var(--bg-soft-2)", color: sentimentFilter === key ? "white" : "var(--body)" }}>{label}{key !== "all" && <span className="ml-1 opacity-70">{fmtNum(Number(totals[key] || 0))}</span>}</button>
+            <button key={key} type="button" onClick={() => setSentimentFilter((current) => current === key && key !== "all" ? "all" : key)} className="rounded-full px-2.5 py-1 text-[12px] cursor-pointer" style={{ background: sentimentFilter === key ? "var(--accent)" : "var(--bg-soft-2)", color: sentimentFilter === key ? "white" : "var(--body)" }}>{label}{key !== "all" && <span className="ml-1 opacity-70">{fmtNum(Number(totals[key] || 0))}</span>}</button>
           ))}
           {sentimentFilter !== "all" && <span className="text-[12px]" style={{ color: "var(--mute)" }}>当前显示 {filteredRecords.length} 条</span>}
         </div>

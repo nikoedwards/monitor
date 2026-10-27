@@ -98,7 +98,7 @@ export default function Web() {
   const { data: monitors = [], isLoading } = useWebMonitors(brandId);
   const { data: summary, isFetching: summaryLoading, error: summaryError } = useWebSummary(brandId, selected, range);
   const { data: snapshots = [], isFetching: snapshotsLoading, error: snapshotsError } = useWebSnapshots(brandId, selected, range);
-  const webAnalysis = useWebAnalysis();
+  const webAnalysis = useWebAnalysis(brandId, selected, range);
   const { capture, update, remove } = useWebMutations();
 
   useEffect(() => {
@@ -108,7 +108,7 @@ export default function Web() {
 
   useEffect(() => {
     setAnalysis(null);
-    webAnalysis.reset();
+    webAnalysis.generate.reset();
   }, [selected, range.start_date, range.end_date]);
 
   if (isLoading) return <Spinner />;
@@ -207,19 +207,19 @@ export default function Web() {
           )}
         </Card>
 
-        <Card className="lg:col-span-2">
+        <Card className="lg:col-span-2 min-w-0">
           <SnapshotTimeline snapshots={snapshots} loading={snapshotsLoading} brandId={brandId || ""} monitorId={selected} rangeText={rangeLabel(range)} />
         </Card>
       </div>
 
       <SnapshotAnalysisPanel
         summary={summary}
-        analysis={analysis}
-        pending={webAnalysis.isPending}
-        error={webAnalysis.error instanceof Error ? webAnalysis.error.message : ""}
+        analysis={webAnalysis.data || analysis}
+        pending={webAnalysis.generate.isPending}
+        error={webAnalysis.generate.error instanceof Error ? webAnalysis.generate.error.message : ""}
         onAnalyze={async (refresh) => {
           if (!brandId) return;
-          const result = await webAnalysis.mutateAsync({ brandId, monitorId: selected, range, refresh });
+          const result = await webAnalysis.generate.mutateAsync({ refresh });
           setAnalysis(result);
         }}
       />
@@ -598,9 +598,12 @@ function SnapshotTimeline({ snapshots, loading, brandId, monitorId, rangeText }:
           <div className="text-[13px]" style={{ color: "var(--mute)" }}>正在加载所选日期范围的快照…</div>
         </div>
       ) : snapshots.length ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[720px] overflow-y-auto pr-1">
+        <div
+          className="grid min-w-0 gap-3 max-h-[720px] overflow-y-auto overflow-x-hidden pr-1"
+          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))" }}
+        >
           {snapshots.map((snapshot) => (
-            <div key={snapshot.id} className="relative panel overflow-hidden" style={{ padding: 0 }}>
+            <div key={snapshot.id} className="relative min-w-0 panel overflow-hidden" style={{ padding: 0 }}>
               <button
                 onClick={() => { setActive(snapshot); setMode("screenshot"); }}
                 className="w-full text-left cursor-pointer"

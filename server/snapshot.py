@@ -477,7 +477,13 @@ def upgrade_snapshot_archives(root: Path = SNAPSHOT_DIR) -> int:
             os.replace(temporary, path)
             upgraded += 1
         except Exception:
-            temporary.unlink(missing_ok=True)
+            # Preflight mounts production snapshots read-only. If the
+            # migration cannot write its temporary file, cleanup must not
+            # turn that expected limitation into a startup failure.
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
             logger.exception("Failed to upgrade archived snapshot %s", path)
     return upgraded
 

@@ -35,6 +35,9 @@ from .common import fetch_brand, get_conn, resolve_window
 
 router = APIRouter(prefix="/api/hiring", tags=["hiring"])
 
+_HIRING_ANALYSIS_CACHE: dict[tuple, tuple[float, dict]] = {}
+_HIRING_ANALYSIS_TTL_SECONDS = 24 * 60 * 60
+
 PLATFORM_LABEL = {"boss": "Boss 直聘", "linkedin": "LinkedIn", "linkedin_people": "LinkedIn 企业员工"}
 _AUTHWALL_ACTIVITY_MARKERS = (
     "by clicking continue to join or sign in",
@@ -44,6 +47,40 @@ _AUTHWALL_ACTIVITY_MARKERS = (
     "your california privacy choices",
 )
 _AUTHWALL_PROFILE_MARKERS = ("750 million+ members", "manage your professional identity")
+
+# Providers frequently expose the title and JD but leave the department field
+# empty. Keep the labels broad enough for a useful dashboard and deterministic
+# enough to work without an LLM or an extra network request.
+_DEPARTMENT_RULES = (
+    ("数据与算法", ("算法", "数据科学", "数据分析", "机器学习", "machine learning", "data scientist", "data analyst")),
+    ("产品", ("产品经理", "产品负责人", "产品总监", "product manager", "product lead", "product owner")),
+    ("技术研发", ("工程师", "开发", "研发", "后端", "前端", "全栈", "架构师", "测试", "软件", "engineer", "developer", "engineering", "devops", "sre", "qa")),
+    ("设计", ("设计师", "交互设计", "视觉设计", "ui", "ux", "user experience", "visual designer")),
+    ("销售", ("销售", "商务拓展", "业务拓展", "客户经理", "大客户", "sales", "business development", "account executive", "account manager")),
+    ("市场与增长", ("市场", "营销", "增长", "品牌", "公关", "marketing", "growth", "brand", "public relations")),
+    ("运营", ("运营", "operations", "用户运营", "内容运营", "商业运营")),
+    ("客户成功与支持", ("客服", "客户成功", "客户支持", "技术支持", "customer success", "customer support", "technical support")),
+    ("人力与行政", ("人力", "招聘", "行政", "hr", "human resources", "recruiter", "recruitment")),
+    ("财务与法务", ("财务", "会计", "审计", "法务", "finance", "accounting", "legal", "compliance")),
+    ("供应链与采购", ("采购", "供应链", "物流", "仓储", "supply chain", "procurement", "logistics")),
+    ("内容与编辑", ("内容", "编辑", "文案", "编导", "content", "editor", "copywriter")),
+)
+
+
+def infer_department(department: str | None, title: str | None = None, jd_text: str | None = None) -> str:
+    """Return an explicit department or infer a broad category from job text."""
+    explicit = clean_text(department)
+    if explicit and explicit.casefold() not in {"未分类", "unknown", "n/a", "-"}:
+        return explicit
+    title_text = clean_text(title).casefold()
+    jd_text_normalized = clean_text(jd_text)[:1200].casefold()
+    for haystack in (title_text, jd_text_normalized):
+        if not haystack:
+            continue
+        for label, keywords in _DEPARTMENT_RULES:
+            if any(keyword.casefold() in haystack for keyword in keywords):
+                return label
+    return "未分类"
 
 
 def _is_authwall_text(value: str | None) -> bool:
@@ -55,6 +92,7 @@ def posting_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     item = dict(row)
     item.pop("config_json", None)
     item["business_tags"] = json.loads(item.pop("business_tags_json", None) or "[]")
+    item["department"] = infer_department(item.get("department"), item.get("title"), item.get("jd_text"))
     latest = conn.execute(
         "SELECT * FROM job_snapshots WHERE posting_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
         (item["id"],),
@@ -73,6 +111,33 @@ def snapshot_to_dict(row: sqlite3.Row) -> dict:
     item["is_open"] = bool(item["is_open"]) if item.get("is_open") is not None else None
     item["changes"] = json.loads(item.pop("changes_json", None) or "[]")
     return item
+
+
+def _window_posting_to_dict(posting: dict) -> dict:
+    """Return the job fields needed by the hiring window detail list."""
+    try:
+        business_tags = json.loads(posting.get("business_tags_json") or "[]")
+    except (TypeError, ValueError):
+        business_tags = []
+    return {
+        "id": posting.get("id"),
+        "platform": posting.get("platform"),
+        "external_id": posting.get("external_id"),
+        "url": posting.get("url"),
+        "title": posting.get("title"),
+        "department": infer_department(posting.get("department"), posting.get("title"), posting.get("jd_text")),
+        "city": posting.get("city"),
+        "jd_text": (posting.get("jd_text") or "")[:16000],
+        "status": posting.get("status"),
+        "posted_at": posting.get("posted_at"),
+        "refreshed_at": posting.get("refreshed_at"),
+        "first_seen": posting.get("first_seen"),
+        "last_seen": posting.get("last_seen"),
+        "closed_at": posting.get("closed_at"),
+        "last_status": posting.get("last_status"),
+        "last_error": posting.get("last_error"),
+        "business_tags": business_tags if isinstance(business_tags, list) else [],
+    }
 
 
 def profile_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -422,6 +487,11 @@ def delete_employee(profile_id: str, conn: sqlite3.Connection = Depends(get_conn
 def list_activities(
     brand_id: str,
     profile_id: str | None = None,
+    profile_ids: str | None = None,
+    activity_type: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    keyword: str | None = None,
     limit: int = 100,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
@@ -429,6 +499,24 @@ def list_activities(
     if profile_id:
         clauses.append("a.profile_id = ?")
         params.append(profile_id)
+    if profile_ids:
+        ids = [value.strip() for value in profile_ids.split(",") if value.strip()]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"a.profile_id IN ({placeholders})")
+            params.extend(ids)
+    if activity_type and activity_type != "all":
+        clauses.append("a.activity_type = ?")
+        params.append(activity_type)
+    if start_date:
+        clauses.append("substr(COALESCE(a.posted_at, a.created_at), 1, 10) >= ?")
+        params.append(start_date)
+    if end_date:
+        clauses.append("substr(COALESCE(a.posted_at, a.created_at), 1, 10) <= ?")
+        params.append(end_date)
+    if keyword and keyword.strip():
+        clauses.append("lower(COALESCE(a.text, '')) LIKE ?")
+        params.append(f"%{keyword.strip().lower()}%")
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"""
@@ -495,7 +583,7 @@ def hiring_summary(
         else:
             total_open += 1
             pf["open"] += 1
-            dept = (p.get("department") or "").strip() or "未分类"
+            dept = infer_department(p.get("department"), p.get("title"), p.get("jd_text"))
             dept_counts[dept] += 1
         # Open duration for closed postings (JD lifetime).
         if p.get("closed_at") and p.get("first_seen"):
@@ -527,8 +615,27 @@ def hiring_summary(
     )[:12]
 
     avg_open_days = round(sum(open_durations) / len(open_durations), 1) if open_durations else None
+    released_postings = sorted(
+        [
+            _window_posting_to_dict(p)
+            for p in postings
+            if start <= (p.get("first_seen") or "")[:10] <= end
+        ],
+        key=lambda p: (p.get("first_seen") or "", p.get("title") or ""),
+        reverse=True,
+    )
+    closed_postings = sorted(
+        [
+            _window_posting_to_dict(p)
+            for p in postings
+            if start <= (p.get("closed_at") or "")[:10] <= end
+        ],
+        key=lambda p: (p.get("closed_at") or "", p.get("title") or ""),
+        reverse=True,
+    )
 
     return {
+        "window": {"start": start, "end": end},
         "trend": trend,
         "by_department": by_department,
         "by_platform": list(platform_counts.values()),
@@ -538,6 +645,8 @@ def hiring_summary(
         "avg_open_days": avg_open_days,
         "released_in_window": sum(t["released"] for t in trend),
         "closed_in_window": sum(t["closed"] for t in trend),
+        "released_postings": released_postings,
+        "closed_postings": closed_postings,
     }
 
 
@@ -564,10 +673,10 @@ def analyze_hiring(
     days: int = 90,
     start_date: str | None = None,
     end_date: str | None = None,
+    refresh: bool = False,
+    cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    if not ai.is_configured(conn):
-        raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     brand = fetch_brand(conn, brand_id)
     start, end = resolve_window(days, start_date, end_date)
     rows = conn.execute(
@@ -582,8 +691,26 @@ def analyze_hiring(
     postings = [dict(r) for r in rows]
     if not postings:
         raise HTTPException(status_code=400, detail="该时间窗内暂无职位数据，请先采集。")
+    cache_key = (brand_id, start, end)
+    cached = _HIRING_ANALYSIS_CACHE.get(cache_key)
+    now = __import__("time").monotonic()
+    persistent_key = "hiring-analysis:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent is not None:
+            _HIRING_ANALYSIS_CACHE[cache_key] = (now, persistent)
+            return {**persistent, "cached": True}
+    if not refresh and cached and now - cached[0] < _HIRING_ANALYSIS_TTL_SECONDS:
+        return {**cached[1], "cached": True}
+    if cached_only:
+        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+    if not ai.is_configured(conn):
+        raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     try:
         result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    result = {**result, "cached": False, "range": {"start": start, "end": end}}
+    _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
+    ai.put_cached_summary(conn, persistent_key, result)
     return result

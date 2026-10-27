@@ -4,6 +4,8 @@
 backups
 data
 dist
+!dist
+!dist/**
 node_modules
 __pycache__
 *.pyc

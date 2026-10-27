@@ -714,7 +714,7 @@ function AdsChannel({ brandId, range, selectedSection, onSectionChange }: AdsCha
     sort,
     // Pull the complete candidate pool so the conclusion card is not biased
     // toward the most recently seen 60 ads. Rendering remains capped below.
-    limit: 500,
+    limit: 1000,
   });
 
   const ads = [...fetchedAds].sort((a, b) => {

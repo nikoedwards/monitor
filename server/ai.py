@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -31,6 +32,35 @@ ENV_FALLBACK = {
 
 class LlmError(RuntimeError):
     pass
+
+
+SUMMARY_CACHE_TTL = timedelta(hours=24)
+
+
+def get_cached_summary(conn: sqlite3.Connection, cache_key: str) -> dict | None:
+    """Return a cached LLM result while it is less than 24 hours old."""
+    row = conn.execute(
+        "SELECT result_json, created_at FROM llm_summary_cache WHERE cache_key = ?",
+        (cache_key,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) - created >= SUMMARY_CACHE_TTL:
+            return None
+        value = json.loads(row["result_json"] or "{}")
+        return value if isinstance(value, dict) else None
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def put_cached_summary(conn: sqlite3.Connection, cache_key: str, result: dict) -> None:
+    conn.execute(
+        "INSERT INTO llm_summary_cache (cache_key, result_json, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(cache_key) DO UPDATE SET result_json = excluded.result_json, created_at = excluded.created_at",
+        (cache_key, json.dumps(result, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+    )
 
 
 def get_config(conn: sqlite3.Connection) -> dict:

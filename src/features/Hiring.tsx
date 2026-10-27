@@ -22,7 +22,7 @@ import {
   useSettings,
 } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import type { JobPosting, Link, LinkedInEmployee, LinkedInEmployeeImportResult } from "../lib/api";
+import type { HiringWindowPosting, JobPosting, Link, LinkedInEmployee, LinkedInEmployeeImportResult } from "../lib/api";
 import { fmtDate, fmtDateTime, fmtNum } from "../lib/format";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -48,6 +48,7 @@ export default function Hiring() {
   const [tab, setTab] = useState<"jobs" | "people">("jobs");
   const [platform, setPlatform] = useState("all");
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [windowDetail, setWindowDetail] = useState<"released" | "closed">();
 
   const [range] = useTimeRange();
   const { data: summary, isLoading } = useHiringSummary(brandId, platform, range);
@@ -70,8 +71,8 @@ export default function Hiring() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard label="在招职位" value={fmtNum(summary?.total_open)} tone="accent" />
-        <StatCard label="窗口内新增 JD" value={fmtNum(summary?.released_in_window)} />
-        <StatCard label="窗口内下线" value={fmtNum(summary?.closed_in_window)} />
+        <StatCard label="窗口内新增 JD" value={fmtNum(summary?.released_in_window)} onClick={() => setWindowDetail("released")} />
+        <StatCard label="窗口内下线" value={fmtNum(summary?.closed_in_window)} onClick={() => setWindowDetail("closed")} />
         <StatCard label="平均在招天数" value={summary?.avg_open_days != null ? `${summary.avg_open_days}天` : "—"} />
       </div>
 
@@ -88,7 +89,76 @@ export default function Hiring() {
       )}
 
       <SourceModal open={sourceOpen} onClose={() => setSourceOpen(false)} brandId={brandId!} />
+      <HiringWindowModal
+        open={!!windowDetail}
+        kind={windowDetail || "released"}
+        window={summary?.window}
+        postings={windowDetail === "closed" ? (summary?.closed_postings || []) : (summary?.released_postings || [])}
+        onClose={() => setWindowDetail(undefined)}
+      />
     </div>
+  );
+}
+
+function HiringWindowModal({
+  open,
+  kind,
+  window,
+  postings,
+  onClose,
+}: {
+  open: boolean;
+  kind: "released" | "closed";
+  window?: { start: string; end: string };
+  postings: HiringWindowPosting[];
+  onClose: () => void;
+}) {
+  const isReleased = kind === "released";
+  const label = isReleased ? "窗口内新增 JD" : "窗口内下线";
+
+  return (
+    <Modal open={open} onClose={onClose} title={`${label}（${postings.length}）`} width={900}>
+      <div className="space-y-3">
+        <div className="text-[12px]" style={{ color: "var(--mute)" }}>
+          统计窗口：{window?.start || "—"} 至 {window?.end || "—"} · 按{isReleased ? "上线" : "下线"}时间倒序
+        </div>
+        {postings.length ? (
+          <div className="space-y-2 max-h-[66vh] overflow-y-auto pr-1">
+            {postings.map((posting) => (
+              <div key={posting.id} className="p-3 rounded-md" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[14px] font-medium" style={{ color: "var(--ink)" }}>{posting.title || "未识别职位"}</span>
+                      <Badge tone={posting.status === "closed" ? "warning" : "positive"}>{posting.status === "closed" ? "已下线" : "在招"}</Badge>
+                      {posting.platform && <Badge tone="neutral">{PLATFORM_LABEL[posting.platform] || posting.platform}</Badge>}
+                    </div>
+                    <div className="text-[12px] mt-1" style={{ color: "var(--body)" }}>
+                      {[posting.department, posting.city].filter(Boolean).join(" · ") || "部门/城市未记录"}
+                    </div>
+                  </div>
+                  {posting.url && <a href={posting.url} target="_blank" rel="noreferrer" className="text-[12px] shrink-0" style={{ color: "var(--accent)" }}>打开职位</a>}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3 text-[12px]" style={{ color: "var(--body)" }}>
+                  <div><span style={{ color: "var(--mute)" }}>上线时间：</span>{fmtDateTime(posting.first_seen || posting.posted_at)}</div>
+                  <div><span style={{ color: "var(--mute)" }}>下线时间：</span>{fmtDateTime(posting.closed_at)}</div>
+                  {posting.last_seen && <div><span style={{ color: "var(--mute)" }}>最近看到：</span>{fmtDateTime(posting.last_seen)}</div>}
+                  {posting.refreshed_at && <div><span style={{ color: "var(--mute)" }}>最近刷新：</span>{fmtDateTime(posting.refreshed_at)}</div>}
+                </div>
+                <div className="mt-3">
+                  <div className="text-[12px] font-medium mb-1" style={{ color: "var(--ink)" }}>岗位信息</div>
+                  <div className="text-[12px] whitespace-pre-wrap max-h-32 overflow-y-auto" style={{ color: "var(--body)" }}>
+                    {posting.jd_text || "未抓取到 JD 正文；可点击“打开职位”查看原页面。"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title={`窗口内暂无${isReleased ? "新增" : "下线"} JD`} hint="调整时间范围或先同步招聘采集源后再查看。" />
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -155,16 +225,16 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
 
 function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any }) {
   const { data: settings } = useSettings();
-  const analyze = useAnalyzeJd();
-  const [result, setResult] = useState<any>(null);
+  const analyze = useAnalyzeJd(brandId, range);
+  const [manualResult, setManualResult] = useState<any>(null);
   const [error, setError] = useState("");
 
   const run = async () => {
     setError("");
-    setResult(null);
+    setManualResult(null);
     try {
-      const res = await analyze.mutateAsync({ brandId, range });
-      setResult(res);
+      const res = await analyze.generate.mutateAsync({ refresh: !!(manualResult || analyze.data) });
+      setManualResult(res);
     } catch (e: any) {
       setError(e?.message || "分析失败");
     }
@@ -177,23 +247,23 @@ function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any 
         subtitle="用大模型从近期 JD 反推对方内部在推进的业务与团队重点"
         action={
           <div className="flex flex-col items-end">
-            <Button onClick={run} disabled={analyze.isPending || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
-              {analyze.isPending ? "分析中…" : "生成分析"}
+            <Button onClick={run} disabled={analyze.generate.isPending || analyze.isLoading || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
+              {analyze.generate.isPending ? "分析中…" : "生成分析"}
             </Button>
-            <AsyncProgress active={analyze.isPending} label="正在分析岗位数据" />
+            <AsyncProgress active={analyze.generate.isPending} label="正在分析岗位数据" />
           </div>
         }
       />
       {!settings?.configured && <p className="text-[13px]" style={{ color: "var(--mute)" }}>未配置大模型 Token，请在右上角设置中填写后再生成。</p>}
       {error && <p className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
-      {result && (
+      {(manualResult || analyze.data) && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>
-          <p style={{ color: "var(--ink)" }}>{result.summary}</p>
-          {!!result.business_directions?.length && (
+          <p style={{ color: "var(--ink)" }}>{(manualResult || analyze.data).summary}</p>
+          {!!(manualResult || analyze.data).business_directions?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>推导业务方向</div>
               <div className="space-y-1.5">
-                {result.business_directions.map((d: any, i: number) => (
+                {(manualResult || analyze.data).business_directions.map((d: any, i: number) => (
                   <div key={i} className="p-2 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
                     <div className="flex items-center gap-2">
                       <Badge tone="accent">{d.direction}</Badge>
@@ -205,17 +275,17 @@ function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any 
               </div>
             </div>
           )}
-          {!!result.strategic_signals?.length && (
+          {!!(manualResult || analyze.data).strategic_signals?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>战略信号</div>
               <ul className="list-disc pl-5 space-y-0.5">
-                {result.strategic_signals.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                {(manualResult || analyze.data).strategic_signals.map((s: string, i: number) => <li key={i}>{s}</li>)}
               </ul>
             </div>
           )}
-          {!!result.risks?.length && (
+          {!!(manualResult || analyze.data).risks?.length && (
             <div className="text-[12px]" style={{ color: "var(--mute)" }}>
-              解读说明：{result.risks.join("；")}
+              解读说明：{(manualResult || analyze.data).risks.join("；")}
             </div>
           )}
         </div>

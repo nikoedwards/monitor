@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Megaphone,
   MessageSquare,
+  Network,
   Moon,
   Plug,
   Settings,
@@ -26,6 +27,7 @@ const NAV = [
   { to: "marketing", label: "营销监控", icon: Megaphone },
   { to: "voice", label: "用户之声", icon: MessageSquare },
   { to: "web", label: "网页快照", icon: Globe },
+  { to: "mcp-cli", label: "MCP / CLI 接入", icon: Network },
   { to: "sources", label: "数据源采集", icon: Plug },
 ];
 
