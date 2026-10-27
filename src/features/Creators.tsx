@@ -151,6 +151,8 @@ export default function Creators() {
   const [platform, setPlatform] = useState("all");
   const [productId, setProductId] = useState("all");
   const [query, setQuery] = useState("");
+  const [report, setReport] = useState("");
+  const [reportError, setReportError] = useState("");
   const plat = platform === "all" ? undefined : platform;
   const selectedProductId = productId === "all" ? undefined : productId;
 
@@ -164,8 +166,6 @@ export default function Creators() {
   const { data: records = [] } = useRecords({ brand_id: brandId, product_id: selectedProductId, dimension: "marketing", channel: "creators", platform: plat, q: query || undefined, ...rangeParams(range), limit: 60 });
   const sync = useCreatorsSync();
   const reportMut = useCreatorsReport(brandId, selectedProductId);
-  const report = reportMut.data || "";
-  const reportError = reportMut.error instanceof Error ? reportMut.error.message : "";
 
   if (isLoading || !summary) return <Spinner />;
   const t = summary.totals || {};
@@ -178,7 +178,13 @@ export default function Creators() {
 
   const runReport = async () => {
     if (!brandId) return;
-    try { await reportMut.mutateAsync({ brandId, productId: selectedProductId }); } catch { /* error is rendered below */ }
+    setReportError("");
+    try {
+      const result = await reportMut.generate.mutateAsync({ refresh: !!report });
+      setReport(result.report);
+    } catch (e: any) {
+      setReportError(e?.message || "生成失败");
+    }
   };
 
   return (
@@ -193,6 +199,8 @@ export default function Creators() {
               value={productId}
               onChange={(event) => {
                 setProductId(event.target.value);
+                setReport("");
+                setReportError("");
               }}
               className="max-w-[190px]"
               aria-label="红人数据范围"
@@ -272,17 +280,17 @@ export default function Creators() {
               subtitle={selectedProduct ? "仅聚合明确归因到该产品的内容；「重叠品牌」标记达人也合作过其他品牌" : "按合作内容聚合的达人；「重叠品牌」标记同时合作过其他品牌的达人"}
               action={
                 <div className="flex flex-col items-end">
-                  <Button size="sm" variant="primary" onClick={runReport} disabled={reportMut.isPending}>
-                    <Sparkles size={14} /> {reportMut.isPending ? "分析中…" : "生成分析报告"}
+                  <Button size="sm" variant="primary" onClick={runReport} disabled={reportMut.generate.isPending}>
+                    <Sparkles size={14} /> {reportMut.generate.isPending ? "分析中…" : "生成分析报告"}
                   </Button>
-                  <AsyncProgress active={reportMut.isPending} label="正在整理红人报告" />
+                  <AsyncProgress active={reportMut.generate.isPending} label="正在整理红人报告" />
                 </div>
               }
             />
             {reportError && <div className="text-[13px] p-2 mb-3 rounded-md" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>{reportError}</div>}
-            {report && (
+            {(report || reportMut.data?.report) && (
               <div className="text-[13px] p-3 mb-3 rounded-md whitespace-pre-wrap" style={{ background: "var(--bg-soft)", color: "var(--body)", border: "1px solid var(--hairline)" }}>
-                {report}
+                {report || reportMut.data?.report}
               </div>
             )}
             <RosterTable roster={roster} />

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { RecordItem } from "../lib/api";
+import { useCommunitySummaries } from "../lib/hooks";
 import { CHANNEL_LABEL, fmtDateTime, fmtNum, SENTIMENT_LABEL, sentimentTone } from "../lib/format";
-import { Badge, EmptyState } from "./ui";
+import { Badge, Button, EmptyState } from "./ui";
 
 const TIER_LABEL: Record<string, string> = {
   tier_1: "一线媒体",
@@ -501,11 +502,15 @@ export function RecordList({
   records,
   emptyHint,
   variant = "list",
+  summarizeCommunity = false,
 }: {
   records: RecordItem[];
   emptyHint?: string;
   variant?: "list" | "social-cards";
+  summarizeCommunity?: boolean;
 }) {
+  const summaries = useCommunitySummaries(summarizeCommunity ? records : []);
+  const summaryFailed = Object.values(summaries.data || {}).some((item) => item.status === "error");
   if (!records.length) {
     return <EmptyState title="暂无数据" hint={emptyHint || "在数据源页发起一次采集，或手动录入后再查看。"} />;
   }
@@ -518,8 +523,16 @@ export function RecordList({
   }
   return (
     <div className="space-y-2">
+      {summarizeCommunity && summaryFailed && (
+        <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--mute)" }}>
+          部分中文摘要暂未生成，原文仍可查看。
+          <Button size="sm" onClick={() => summaries.refetch()} disabled={summaries.isFetching}>重试摘要</Button>
+        </div>
+      )}
       {records.map((r) => {
         const isReply = r.data_type === "community_reply";
+        const showCommunitySummary = summarizeCommunity && r.channel === "community";
+        const summary = summaries.data?.[r.id];
         return (
         <div key={r.id} className="panel p-4" style={isReply ? { borderLeft: "2px solid var(--accent)" } : undefined}>
           <div className="flex items-start gap-3">
@@ -546,7 +559,18 @@ export function RecordList({
                   )}
                 </div>
               )}
-              {r.problem_summary && (
+              {showCommunitySummary && (
+                <div className="mt-2 rounded-md px-3 py-2" style={{ background: "var(--bg-soft-2)" }}>
+                  <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>一句话总结</div>
+                  <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: summary?.summary ? "var(--ink)" : "var(--mute)" }}>
+                    {summary?.summary || (summary?.status === "unconfigured"
+                      ? "配置 AI 后可自动生成中文摘要。"
+                      : summary?.status === "unavailable" ? "内容不足，暂无法总结。"
+                      : summary?.status === "error" ? "摘要暂未生成，可重试。" : "正在生成中文摘要…")}
+                  </p>
+                </div>
+              )}
+              {!showCommunitySummary && r.problem_summary && (
                 <div className="mt-2">
                   <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>问题概述</div>
                   <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{r.problem_summary}</p>

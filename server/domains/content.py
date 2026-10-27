@@ -11,18 +11,19 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
+from ..community_summaries import summarize_community_records
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
-from ..schemas import ImportIn, RecordIn, VocActionIn, VocActionUpdate
+from ..schemas import CommunitySummariesIn, ImportIn, RecordIn, VocActionIn, VocActionUpdate
 from ..util import compact_key, new_id, utc_now
-from .common import build_trend, get_conn, query_records, resolve_window
+from .common import build_trend, community_post_views, get_conn, query_records, resolve_window
 
 router = APIRouter(prefix="/api", tags=["content"])
 
 _LEGACY_FIXED_PUBLICATION_TRAFFIC = {25_000, 80_000, 220_000, 500_000, 1_500_000, 5_000_000}
 _MARKETING_OVERVIEW_CACHE: dict[tuple, tuple[float, dict]] = {}
-_MARKETING_SUMMARY_TTL_SECONDS = 600
+_MARKETING_SUMMARY_TTL_SECONDS = 24 * 60 * 60
 
 VOC_SOURCE_CATALOG = (
     {"key": "sales_reviews", "label": "销售渠道评论", "description": "Amazon、独立站等销售平台的商品评论"},
@@ -72,6 +73,11 @@ def list_records(
         filters["product_id"] = None
         filters["matched_product_id"] = product_id
     return {"records": query_records(conn, filters, limit=limit)}
+
+
+@router.post("/records/community-summaries")
+def community_summaries(payload: CommunitySummariesIn, conn: sqlite3.Connection = Depends(get_conn)):
+    return summarize_community_records(conn, payload.record_ids)
 
 
 @router.post("/records", status_code=201)
@@ -408,29 +414,60 @@ def _impact_metrics(record: dict) -> dict[str, float]:
         "comments": comments,
         "interactions": max(number("engagement"), comments + likes, number("interaction_count"), record_interactions),
         "reach": number("reach", "estimated_reach", "monthly_traffic"),
+        "velocity": float(record.get("interaction_velocity") or 0),
     }
 
 
-def _issue_impact(records: list[dict]) -> dict:
+def _relative_metric(value: float, comparison_values: list[float]) -> dict[str, float | int | None]:
+    values = sorted(item for item in comparison_values if item > 0)
+    if value <= 0 or not values:
+        return {"value": value, "percentile": None, "rank": None, "sample_size": len(values)}
+    rank = 1 + sum(item > value for item in values)
+    percentile = sum(item <= value for item in values) / len(values)
+    return {
+        "value": value,
+        "percentile": round(percentile, 4),
+        "rank": rank,
+        "sample_size": len(values),
+    }
+
+
+def _issue_impact(records: list[dict], comparison_records: list[dict] | None = None) -> dict:
     negative_records = [record for record in records if record.get("sentiment") == "negative"]
     metrics = [_impact_metrics(record) for record in negative_records]
+    comparison_metrics = [_impact_metrics(record) for record in (comparison_records or records)]
     maximum = {
         key: max((item[key] for item in metrics), default=0)
-        for key in ("views", "comments", "interactions", "reach")
+        for key in ("views", "comments", "interactions", "reach", "velocity")
     }
-    hot_risk = any(record.get("hot_risk") for record in negative_records)
-    high = hot_risk or maximum["views"] >= 10_000 or maximum["comments"] >= 100 or maximum["interactions"] >= 200 or maximum["reach"] >= 10_000
-    moderate = high or maximum["views"] >= 1_000 or maximum["comments"] >= 20 or maximum["interactions"] >= 50 or maximum["reach"] >= 5_000
-    return {**maximum, "hot_risk": hot_risk, "high": high, "moderate": moderate}
+    relative = {
+        key: _relative_metric(maximum[key], [item[key] for item in comparison_metrics])
+        for key in maximum
+    }
+    top_10 = [key for key, item in relative.items() if item["percentile"] is not None and item["percentile"] >= 0.9]
+    top_25 = [key for key, item in relative.items() if item["percentile"] is not None and item["percentile"] >= 0.75]
+    hot_risk = "velocity" in top_10 and any(
+        (record.get("age_hours") or 9999) <= 72 for record in negative_records
+    )
+    high = bool(top_10)
+    moderate = high or bool(top_25)
+    return {
+        **maximum,
+        "relative": relative,
+        "comparison_count": len(comparison_records or records),
+        "hot_risk": hot_risk,
+        "high": high,
+        "moderate": moderate,
+    }
 
 
-def _issue_priority(records: list[dict]) -> str:
+def _issue_priority(records: list[dict], comparison_records: list[dict] | None = None) -> str:
     if any(_p0_match(record) for record in records):
         return "urgent"
     negative = sum(1 for record in records if record.get("sentiment") == "negative")
     complaints = sum(1 for record in records if record.get("intent") == "complaint")
     rate = negative / len(records) if records else 0.0
-    impact = _issue_impact(records)
+    impact = _issue_impact(records, comparison_records)
     if impact["high"] or negative >= 5 or complaints >= 5 or (negative >= 3 and rate >= 0.5):
         return "high"
     if negative >= 2 or complaints >= 2:
@@ -438,25 +475,25 @@ def _issue_priority(records: list[dict]) -> str:
     return "low"
 
 
-def _issue_priority_reason(records: list[dict]) -> str:
-    impact = _issue_impact(records)
+def _issue_priority_reason(records: list[dict], comparison_records: list[dict] | None = None) -> str:
+    impact = _issue_impact(records, comparison_records)
     if impact["high"]:
         details = []
-        if impact["views"]:
-            details.append(f"浏览 {int(impact['views']):,}")
-        if impact["comments"]:
-            details.append(f"评论/回复 {int(impact['comments']):,}")
-        if impact["interactions"]:
-            details.append(f"互动 {int(impact['interactions']):,}")
+        labels = {"views": "浏览", "comments": "评论/回复", "interactions": "互动", "reach": "触达", "velocity": "互动速度"}
+        for key in ("views", "comments", "interactions", "reach", "velocity"):
+            item = impact["relative"][key]
+            if item["percentile"] is not None and item["percentile"] >= 0.9:
+                top_percent = max(1, round((item["rank"] or 1) / max(item["sample_size"] or 1, 1) * 100))
+                details.append(f"{labels[key]}排名前{top_percent}%（{int(impact[key]):,}）")
         if impact["hot_risk"]:
             details.append("短时间互动速度高")
-        return f"负向内容传播影响高：{'、'.join(details)}。"
+        return f"负向内容在当前范围内的传播表现靠前：{'、'.join(details)}。"
     if impact["moderate"]:
-        return "负向内容已有一定浏览或讨论量，已纳入传播影响评估。"
-    return "当前主要依据负向反馈量、投诉量和负向率判断。"
+        return "负向内容在当前范围内的传播表现高于多数帖子，已纳入相对影响评估。"
+    return ""
 
 
-def _topic_breakdown(records: list[dict]) -> list[dict]:
+def _topic_breakdown(records: list[dict], comparison_records: list[dict] | None = None) -> list[dict]:
     issue_groups: dict[str, dict] = {}
     for record in records:
         topics = [str(topic) for topic in (record.get("topics") or []) if str(topic).strip()]
@@ -493,9 +530,9 @@ def _topic_breakdown(records: list[dict]) -> list[dict]:
             "negative_rate": round(negative / len(items), 4) if items else 0.0,
             "suggested_team": suggested_teams[0] if suggested_teams else team_for_records(items, topics[0]),
             "suggested_teams": suggested_teams,
-            "priority": _issue_priority(items),
-            "priority_reason": _issue_priority_reason(items),
-            "impact": _issue_impact(items),
+            "priority": _issue_priority(items, comparison_records or records),
+            "priority_reason": _issue_priority_reason(items, comparison_records or records),
+            "impact": _issue_impact(items, comparison_records or records),
             "representative": _representative_feedback(items),
             "representative_url": representative_record.get("url"),
             "representative_record_id": representative_record.get("id"),
@@ -521,9 +558,9 @@ def _channel_breakdown(records: list[dict]) -> list[dict]:
     return sorted(out, key=lambda item: item["total"], reverse=True)
 
 
-def _build_alerts(records: list[dict]) -> list[dict]:
+def _build_alerts(records: list[dict], comparison_records: list[dict] | None = None) -> list[dict]:
     alerts = []
-    for topic in _topic_breakdown(records):
+    for topic in _topic_breakdown(records, comparison_records or records):
         if topic["negative"] >= 2:
             alerts.append({
                 "id": f"topic_{topic['topic']}",
@@ -580,8 +617,8 @@ def voc_summary(
         "channels": _channel_breakdown(records),
         "source_catalog": _source_catalog(all_records),
         "selected_sources": sorted(selected_sources),
-        "topics": _topic_breakdown(records),
-        "alerts": _build_alerts(records),
+        "topics": _topic_breakdown(records, records),
+        "alerts": _build_alerts(records, records),
         "p0": _p0_summary(records),
         "actions": {
             "total": len(actions),
@@ -836,10 +873,14 @@ def marketing_summary(
     )
     by_channel = Counter(r.get("channel") or "unknown" for r in records)
     by_platform = Counter(r.get("platform") or "unknown" for r in records)
+    if channel == "creators":
+        for platform in ("youtube", "instagram", "tiktok", "x"):
+            by_platform.setdefault(platform, 0)
     by_source = Counter(r.get("source_id") or "unknown" for r in records)
     coverage = Counter((r.get("metrics") or {}).get("coverage_type") for r in records if (r.get("metrics") or {}).get("coverage_type"))
     posts = sum(1 for r in records if r.get("data_type") != "community_reply")
     replies = sum(1 for r in records if r.get("data_type") == "community_reply")
+    community_views = [views for r in records if (views := community_post_views(r)) is not None]
     social_totals = {"views": 0, "likes": 0, "comments": 0, "engagement": 0}
     for record in records:
         metrics = record.get("metrics") or {}
@@ -965,6 +1006,8 @@ def marketing_summary(
         "total": len(records),
         "posts": posts,
         "replies": replies,
+        "total_community_views": sum(community_views) if community_views else None,
+        "community_view_records": len(community_views),
         "total_views": social_totals["views"],
         "total_likes": social_totals["likes"],
         "total_comments": social_totals["comments"],
@@ -1196,6 +1239,12 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
     payload = _marketing_overview_payload(conn, brand_id, start, end)
     cache_key = (brand_id, start, end)
     now = time.monotonic()
+    persistent_key = "marketing-overview:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent is not None:
+            _MARKETING_OVERVIEW_CACHE[cache_key] = (now, persistent)
+            return {**persistent, "cached": True}
     cached = _MARKETING_OVERVIEW_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _MARKETING_SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
@@ -1211,4 +1260,5 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
     result.update({"range": payload["range"], "cached": False})
     _MARKETING_OVERVIEW_CACHE[cache_key] = (now, result)
+    ai.put_cached_summary(conn, persistent_key, result)
     return result

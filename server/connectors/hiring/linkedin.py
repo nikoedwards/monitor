@@ -159,7 +159,7 @@ class LinkedInJobsProvider(HiringProvider):
 class LinkedInPeopleProvider(PeopleProvider):
     name = "linkedin_people"
 
-    def __init__(self, cookie: str = "", max_profiles: int = 40) -> None:
+    def __init__(self, cookie: str = "", max_profiles: int = 300) -> None:
         self.cookie = cookie or ""
         self.max_profiles = max(1, max_profiles)
         self.last_error = ""

@@ -44,6 +44,24 @@ class SourceStatusTests(unittest.TestCase):
         self.assertIsNone(other_youtube["last_collect_at"])
         self.assertEqual(other_youtube["item_count"], 0)
 
+    def test_status_reports_source_specific_next_due_time(self):
+        self.conn.execute(
+            """
+            INSERT INTO source_brand_runs
+                (source_id, brand_id, last_collect_at, last_status, last_error, item_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            # Keep the deadline in the future so this assertion stays
+            # deterministic as the calendar advances.
+            ("youtube_search", "brand-1", "2099-01-01T00:00:00+00:00", "ok", "", 0),
+        )
+
+        result = monitoring_status(brand_id="brand-1", dimension="marketing", conn=self.conn)
+        youtube = next(item for item in result["sources"] if item["id"] == "youtube_search")
+
+        self.assertEqual(youtube["next_collect_at"], "2099-01-02T00:00:00+00:00")
+        self.assertFalse(youtube["due"])
+
 
 if __name__ == "__main__":
     unittest.main()

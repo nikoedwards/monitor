@@ -66,6 +66,7 @@ const COMMUNITY_CRAWL_NOTE = (
     <div><span style={{ color: "var(--mute)" }}>Reddit：</span>品牌主名称用于全站搜索；指定 subreddit 作为官方大本营，全部帖子按时间顺序收录且不要求关键词命中。</div>
     <div><span style={{ color: "var(--mute)" }}>自建社群：</span>Discourse 取帖子与回复；Frill 等反馈站从页面内嵌数据取功能建议（帖子）；其余尝试 RSS，最后才退化为页面快照。</div>
     <div><span style={{ color: "var(--mute)" }}>Discord / FB 群 / Telegram：</span>多需登录或特权令牌，列为阶段二。</div>
+    <div><span style={{ color: "var(--mute)" }}>浏览量：</span>仅汇总平台公开的帖子累计浏览量（如 Discourse），不代表去重人数或每日新增曝光；Reddit、Frill 未公开时显示「未公开」，不以投票、回复或关注人数推算。</div>
     <div style={{ color: "var(--mute)" }}>「回复」以加粗左边框标记，可在内容流中区分帖子与回复。</div>
   </div>
 );
@@ -81,6 +82,9 @@ export default function Marketing() {
   const [socialPlatform, setSocialPlatform] = useState("all");
   const contentStreamRef = useRef<HTMLDivElement>(null);
   const activeChannel = view === "channel" ? channel : undefined;
+  useEffect(() => {
+    setTrendMetric("volume");
+  }, [activeChannel, brandId]);
   const { data: summary, isLoading } = useMarketingSummary(brandId, activeChannel, range);
   const selectedPublicationTotal = selectedPublication
     ? (summary?.by_publication || []).find((item: PublicationStat) =>
@@ -171,6 +175,11 @@ export default function Marketing() {
 
   const channelName = CHANNEL_LABEL[channel] || channel;
   const isCommunity = view === "channel" && channel === "community";
+  const isCreators = view === "channel" && channel === "creators";
+  const hasCommunityViews = summary.community_view_records > 0;
+  const canShowReach = isCommunity ? hasCommunityViews : summary.total_reach > 0;
+  const visibleTrendMetric = canShowReach ? trendMetric : "volume";
+  const reachLabel = isCommunity ? "帖子浏览量" : "预计曝光";
   const subchannelCount = (summary.by_subchannel || []).reduce((acc: number, g: any) => acc + (g.subchannels?.length || 0), 0);
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
 
@@ -200,11 +209,19 @@ export default function Marketing() {
       </div>
 
       {isCommunity ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <StatCard label="新增帖子" value={fmtNum(summary.posts)} tone="accent" />
           <StatCard label="新增回复" value={fmtNum(summary.replies)} />
           <StatCard label="子渠道数" value={subchannelCount} hint="如多个 subreddit / 自建站" />
           <StatCard label="数据源" value={summary.by_source?.length || 0} />
+          <StatCard label="帖子公开浏览量" value={hasCommunityViews ? fmtNum(summary.total_community_views) : "未公开"} hint={hasCommunityViews ? `覆盖 ${summary.community_view_records} / ${summary.posts} 篇帖子，非去重人数` : "当前帖子未提供公开浏览量"} />
+        </div>
+      ) : isCreators ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatCard label="红人内容" value={fmtNum(summary.total)} />
+          <StatCard label="总曝光 / 播放" value={fmtNum(summary.total_views)} tone="accent" />
+          <StatCard label="总点赞" value={fmtNum(summary.total_likes)} />
+          <StatCard label="总互动" value={fmtNum(summary.total_engagement)} />
         </div>
       ) : isSocial ? (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -222,7 +239,7 @@ export default function Marketing() {
         </div>
       )}
 
-      {summary.total_reach > 0 && (
+      {!isCommunity && summary.total_reach > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard label="预估总触达" value={fmtNum(summary.total_reach)} tone="accent" hint="按媒体月流量估算，同一媒体仅计一次" />
           <StatCard label="媒体价值 AVE" value={`$${fmtNum(summary.total_ave)}`} hint="等价广告价值(估算)" />
@@ -231,7 +248,7 @@ export default function Marketing() {
         </div>
       )}
 
-      {summary.total_reach > 0 && (
+      {!isCommunity && summary.total_reach > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <Card>
             <SectionTitle title="媒体层级分布" subtitle="按预估影响力分级的报道数" />
@@ -262,34 +279,38 @@ export default function Marketing() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
           <SectionTitle
-            title={trendMetric === "volume" ? "声量趋势" : "预计曝光趋势"}
-            action={summary.total_reach > 0 ? (
+            title={visibleTrendMetric === "volume" ? (isCommunity ? "社群声量趋势" : "声量趋势") : `${reachLabel}趋势`}
+            subtitle={isCommunity ? (hasCommunityViews
+              ? "浏览量为所选期间发布帖子的累计公开读数，非每日新增曝光；未公开的数据留空。"
+              : "Reddit、Frill 等公开来源通常不提供曝光量；此处展示已采集的帖子与回复数量。") : undefined}
+            action={canShowReach ? (
               <SegmentGroup
-                value={trendMetric}
-                options={[{ value: "volume", label: "篇数" }, { value: "reach", label: "预计曝光" }]}
+                value={visibleTrendMetric}
+                options={[{ value: "volume", label: "篇数" }, { value: "reach", label: reachLabel }]}
                 onChange={setTrendMetric}
               />
             ) : undefined}
           />
-          {trendMetric === "volume" ? (
+          {visibleTrendMetric === "volume" ? (
             <TrendChart data={summary.trend} keys={[{ key: "total", name: "声量", color: "var(--accent)" }, { key: "negative", name: "负向", color: "var(--danger)" }]} />
           ) : (
             <TrendChart
               data={summary.trend}
-              keys={[{ key: "estimated_reach", name: "预计曝光", color: "var(--violet)" }]}
+              keys={[{ key: isCommunity ? "community_views" : "estimated_reach", name: reachLabel, color: "var(--violet)" }]}
               valueFormatter={fmtNum}
+              showPoints={isCommunity}
             />
           )}
         </Card>
         <Card>
           <SectionTitle
-            title={isSocial ? "社媒平台明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
-            subtitle={isSocial ? "按 YouTube、Instagram、TikTok 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
+            title={isSocial || isCreators ? "平台采集明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
+            subtitle={isSocial || isCreators ? "按 YouTube、Instagram、TikTok 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
           />
           {view === "channel" ? (
             <SourceBreakdown
-              sources={isSocial ? summary.by_platform || [] : summary.by_source || []}
-              kind={isSocial ? "platform" : "source"}
+              sources={isSocial || isCreators ? summary.by_platform || [] : summary.by_source || []}
+              kind={isSocial || isCreators ? "platform" : "source"}
             />
           ) : summary.by_platform?.length ? (
             <Bars data={summary.by_platform.slice(0, 8)} dataKey="total" nameKey="platform" name="声量" color="var(--violet)" />
@@ -319,6 +340,7 @@ export default function Marketing() {
         <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
         <RecordList
           records={shownRecords}
+          summarizeCommunity={isCommunity}
           variant={channel === "social" || channel === "creators" ? "social-cards" : "list"}
           emptyHint={channel === "creators"
             ? "红人关键词采集每天搜索公开内容；品牌官方账号内容请看「社交媒体」，手动导入的红人只进入候选池。"

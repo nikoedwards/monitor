@@ -61,6 +61,7 @@ export function readPersistentTask<T>(storageKey: string): StoredTask<T> | null 
 export function usePersistentTaskMutation<TData, TVariables>(
   storageKey: string,
   mutationFn: (variables: TVariables) => Promise<TData>,
+  onSuccess?: (data: TData) => void,
 ): UseMutationResult<TData, Error, TVariables> & { data: TData | undefined; error: Error | null; isPending: boolean; isError: boolean } {
   const [stored, setStored] = useState<StoredTask<TData> | null>(() => read<TData>(storageKey));
   const mutationKeyRef = useRef(storageKey);
@@ -80,6 +81,7 @@ export function usePersistentTaskMutation<TData, TVariables>(
         throw error;
       }
     },
+    onSuccess,
   });
   const cachedMutations = useMutationState({
     filters: { mutationKey: [storageKey] },

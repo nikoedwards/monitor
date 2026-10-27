@@ -15,20 +15,22 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
-        uses: docker/build-push-action@v6
+      - uses: actions/setup-node@v4
         with:
-          context: .
-          load: true
-          tags: monitor-intelligence-hub:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Validate backend
-        run: docker run --rm --network none -e MONITOR_SCHEDULER=0 monitor-intelligence-hub:${{ github.sha }} python -m compileall -q server
-      - name: Transfer image and restart Monitor
+          node-version: 20
+          cache: npm
+      - name: Validate frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Validate backend and deployment rollback
+        run: |
+          python3 -m compileall -q server deploy/aliyun/autodeploy
+          python3 -m unittest tests/test_aliyun_deploy.py tests/test_aliyun_source_deploy.py
+      - name: Transfer source and deploy Monitor
         env:
           SSH_HOST: ${{ secrets.ALIYUN_MONITOR_HOST }}
           SSH_KEY: ${{ secrets.ALIYUN_MONITOR_SSH_KEY }}
@@ -41,12 +43,93 @@ jobs:
           printf '%s\n' "$SSH_KEY" > "$tmp/key"
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$tmp/known_hosts"
           chmod 600 "$tmp/key" "$tmp/known_hosts"
-          docker save "monitor-intelligence-hub:${GITHUB_SHA}" | gzip -1 | \
-            ssh -T -i "$tmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
-              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/known_hosts" \
-              -o ConnectTimeout=20 "root@$SSH_HOST" \
-              "gzip -d | docker load && docker tag monitor-intelligence-hub:${GITHUB_SHA} monitor-intelligence-hub:isolated-20261027 && cd /opt/monitor && docker compose -f docker-compose.yml -f deploy/aliyun/docker-compose.monitor-ljei.yml up -d --no-build monitor && curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8790/api/health"
-      - name: Check public endpoint
-        env:
-          SSH_HOST: ${{ secrets.ALIYUN_MONITOR_HOST }}
-        run: curl --fail --retry 5 --retry-delay 5 --max-time 30 "http://$SSH_HOST/api/health"
+
+          ssh_args=(
+            -T
+            -i "$tmp/key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$tmp/known_hosts"
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=20
+            -o ServerAliveCountMax=15
+          )
+
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid deployment revision: $GITHUB_SHA" >&2
+            exit 2
+          fi
+          if [[ ! "$SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo "ALIYUN_MONITOR_HOST must be a hostname or IPv4 address" >&2
+            exit 2
+          fi
+
+          unpack_script=$(cat <<'UNPACK'
+          set -euo pipefail
+          sha="$1"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid deployment revision: $sha" >&2
+            exit 2
+          fi
+          root=/opt/monitor/.deploy-src
+          incoming="$root/.incoming-$sha"
+          target="$root/$sha"
+          cleanup() {
+            if [[ -n "${incoming:-}" ]]; then
+              rm -rf -- "$incoming"
+            fi
+          }
+          interrupted() {
+            exit 130
+          }
+          trap cleanup EXIT
+          trap interrupted HUP INT TERM
+          mkdir -p -- "$root"
+          rm -rf -- "$incoming"
+          mkdir -- "$incoming"
+          gzip -d <&3 | tar -xf - -C "$incoming"
+          rm -rf -- "$target"
+          mv -- "$incoming" "$target"
+          incoming=""
+          UNPACK
+          )
+          unpack_script_b64=$(printf '%s' "$unpack_script" | base64 -w0)
+          release_tar="$tmp/release.tar"
+          git archive --format=tar --output="$release_tar" "$GITHUB_SHA"
+          tar --append --file="$release_tar" dist
+          gzip -1 < "$release_tar" | \
+            ssh "${ssh_args[@]}" "root@$SSH_HOST" \
+              "exec 3<&0; printf '%s' '$unpack_script_b64' | base64 -d | bash -s -- '$GITHUB_SHA'"
+
+          ssh "${ssh_args[@]}" "root@$SSH_HOST" bash -s -- "$GITHUB_SHA" "$SSH_HOST" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"
+          public_host="$2"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid deployment revision: $sha" >&2
+            exit 2
+          fi
+
+          source_dir="/opt/monitor/.deploy-src/$sha"
+          deploy_pid=""
+          cleanup() {
+            rm -rf -- "$source_dir"
+          }
+          interrupted() {
+            if [[ -n "$deploy_pid" ]]; then
+              kill -TERM "$deploy_pid" 2>/dev/null || true
+              wait "$deploy_pid" || true
+            fi
+            exit 130
+          }
+          trap cleanup EXIT
+          trap interrupted HUP INT TERM
+
+          python3 "$source_dir/deploy/aliyun/autodeploy/deploy_source.py" \
+            "$sha" "$source_dir" \
+            --public-url "http://$public_host" &
+          deploy_pid=$!
+          wait "$deploy_pid"
+          deploy_pid=""
+          REMOTE

@@ -24,6 +24,10 @@ class BrandAnalyzeIn(BaseModel):
     url: str
 
 
+class CommunitySummariesIn(BaseModel):
+    record_ids: list[str] = Field(min_length=1, max_length=12)
+
+
 class ProductIn(BaseModel):
     brand_id: str
     name: str

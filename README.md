@@ -110,7 +110,7 @@ npm run dev         # 终端 B → http://localhost:5173
 ## 阿里云部署与维护
 
 - Monitor 生产环境运行在阿里云服务器 `47.79.224.196`，Kicksonar 运行在独立服务器 `47.82.154.207`。两个项目使用独立 Docker Compose、数据目录和公网入口。
-- 推送或合并到 GitHub 的 `main` 分支后，`.github/workflows/deploy-monitor.yml` 会构建 Monitor 镜像，通过 GitHub Actions SSH 密钥部署到 `/opt/monitor`，并检查 `/api/health`。
+- 推送或合并到 GitHub 的 `main` 分支后，`.github/workflows/deploy-monitor.yml` 会先验证前后端和发布回滚测试，再通过 SSH 传输当前提交的源码归档。阿里云服务器在 `/opt/monitor/.deploy-src` 中利用本机 Docker 层缓存构建镜像；切换前会停止旧容器并备份 SQLite，随后检查内网 API、前端资源和公网入口。启动失败、健康检查失败或 SSH 任务中断时，会一起恢复旧 Compose、旧镜像和数据库。
 - GitHub Actions 需要配置 `ALIYUN_MONITOR_SSH_KEY` 和 `ALIYUN_MONITOR_KNOWN_HOSTS` 两个 Actions Secret；部署密钥只用于新 Monitor 服务器。
 - 生产 Docker 镜像会安装 Playwright Chromium，用于生成真实网页 PNG；如果时间线出现 `Generated visual snapshot fallback`，应先检查 GitHub Actions、容器日志和 Chromium 资源限制。
 - SQLite 数据库与网页快照都存放在新机 `/opt/monitor/data`，容器内挂载到 `/app/data`，避免重新发布后丢失历史数据和截图。

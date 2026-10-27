@@ -843,6 +843,7 @@ def analyze_snapshots(
     start_date: str | None = None,
     end_date: str | None = None,
     refresh: bool = False,
+    cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     start, end = _resolve_window(days, start_date, end_date)
@@ -859,10 +860,13 @@ def analyze_snapshots(
             """,
             (brand_id, monitor_id, start, end),
         ).fetchone()
-        if cached and json.loads(cached["snapshot_ids_json"] or "[]") == snapshot_ids:
+        if cached and json.loads(cached["snapshot_ids_json"] or "[]") == snapshot_ids and _is_recent(cached["created_at"]):
             result = json.loads(cached["result_json"] or "{}")
             result.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
             return result
+
+    if cached_only:
+        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
 
     summary = _summary_payload(conn, brand_id, monitor_id, start, end)
     candidates = sorted(
@@ -953,3 +957,13 @@ def analyze_snapshots(
     )
     result.update({"cached": False, "created_at": created_at, "analysis_id": analysis_id, "range": {"start": start, "end": end}})
     return result
+
+
+def _is_recent(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        created = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - created < timedelta(hours=24)
+    except (TypeError, ValueError):
+        return False

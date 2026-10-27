@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterator
@@ -12,7 +13,8 @@ from ..db import db as _db
 from ..records import record_to_dict
 from ..relevance import google_news_record_is_relevant, reddit_search_record_is_relevant
 from ..connectors.creators.evidence import enrich_creator_record_evidence
-from ..connectors.creators.products import load_product_signals, match_record_to_products
+from ..connectors.creators.products import creator_product_queries, load_product_signals, match_record_to_products
+from ..connectors.creators.runner import _creator_record_is_relevant
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:
@@ -119,6 +121,7 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
     brand_names: dict[str, str] = {}
     creator_brands: dict[str, dict] = {}
     creator_products: dict[str, list[dict]] = {}
+    creator_product_queries_cache: dict[str, list[str]] = {}
     for row in rows:
         if row["source_id"] in {"google_news", "reddit_search"}:
             try:
@@ -164,6 +167,35 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
                     product_matches = match_record_to_products(item, creator_products.get(brand_id, []))
                 except (TypeError, ValueError):
                     product_matches = []
+                raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+                transcript_matches = raw.get("transcript_matches")
+                transcript_hit = isinstance(transcript_matches, list) and bool(transcript_matches)
+                brand_name = creator_brands.get(brand_id, {}).get("name") or ""
+                brand_mentions = bool(
+                    brand_name
+                    and brand_name.casefold() in f"{item.get('title') or ''} {item.get('body') or ''}".casefold()
+                )
+                if brand_id not in creator_product_queries_cache:
+                    try:
+                        creator_product_queries_cache[brand_id] = creator_product_queries(conn, brand_id, limit=8)
+                    except (sqlite3.OperationalError, TypeError, ValueError):
+                        creator_product_queries_cache[brand_id] = []
+                product_queries = creator_product_queries_cache[brand_id]
+                has_collection_metadata = bool(
+                    raw.get("query")
+                    or raw.get("matched_queries")
+                    or raw.get("collection_evidence")
+                )
+                if has_collection_metadata and not _creator_record_is_relevant(
+                    raw=raw,
+                    brand=creator_brands.get(brand_id) or {},
+                    products=creator_products.get(brand_id, []),
+                    product_matches=product_matches,
+                    transcript_hit=transcript_hit,
+                    brand_mentions=brand_mentions,
+                    product_queries=product_queries,
+                ):
+                    continue
                 item = enrich_creator_record_evidence(item, brand=creator_brands.get(brand_id), product_matches=product_matches)
         records.append(item)
         if len(records) >= requested:
@@ -209,6 +241,20 @@ def resolve_window(days: int | None = None, start_date: str | None = None, end_d
     return start.isoformat(), end.isoformat()
 
 
+def community_post_views(record: dict) -> int | None:
+    """Public topic views, when supplied; replies and missing counts are not views."""
+    if record.get("channel") != "community" or record.get("data_type") == "community_reply":
+        return None
+    value = (record.get("metrics") or {}).get("views")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return int(number) if math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days: int = 70) -> list[dict]:
     """Zero-filled sentiment trend across [start, end]; auto-switch to weekly buckets for long spans."""
     start_d = _safe_date(start) or (datetime.now(timezone.utc).date() - timedelta(days=29))
@@ -232,6 +278,7 @@ def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days
             "neutral": 0,
             "negative": 0,
             "estimated_reach": 0,
+            "community_views": None,
         }
         cursor += step
 
@@ -251,6 +298,9 @@ def build_trend(records: list[dict], start: str, end: str, weekly_threshold_days
             else:
                 bucket["neutral"] += 1
             metrics = record.get("metrics") or {}
+            views = community_post_views(record)
+            if views is not None:
+                bucket["community_views"] = (bucket["community_views"] or 0) + views
             try:
                 bucket["estimated_reach"] += int(metrics.get("monthly_traffic") or metrics.get("estimated_reach") or 0)
             except (TypeError, ValueError):

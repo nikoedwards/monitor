@@ -1,6 +1,8 @@
 """SQLite data layer: brand-rooted schema, migrations, and seed data."""
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sqlite3
 import time
@@ -9,6 +11,8 @@ from typing import Iterator
 
 from .config import DB_PATH
 from .util import new_id, utc_now
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -578,6 +582,21 @@ CREATE TABLE IF NOT EXISTS linkedin_profile_snapshots (
   created_at TEXT NOT NULL
 );
 
+-- Chinese summaries keyed to the current community post title/body.
+CREATE TABLE IF NOT EXISTS community_post_summaries (
+  record_id TEXT PRIMARY KEY REFERENCES records(id) ON DELETE CASCADE,
+  source_hash TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- Cached results for LLM-generated summaries and analyses.
+CREATE TABLE IF NOT EXISTS llm_summary_cache (
+  cache_key TEXT PRIMARY KEY,
+  result_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 -- LinkedIn employee activity feed (posts / comments / job changes).
 CREATE TABLE IF NOT EXISTS linkedin_activities (
   id TEXT PRIMARY KEY,
@@ -794,9 +813,16 @@ def init_db() -> None:
         # load time.
         from .connectors.sales.estimates import backfill_sales_metrics
 
-        backfill_sales_metrics(conn)
+        try:
+            backfill_sales_metrics(conn)
+        except Exception:
+            # Historical estimate backfill is opportunistic. A malformed or
+            # very large legacy row must not prevent the API from starting;
+            # the next maintenance run can retry it after the service is up.
+            logger.exception("Sales metric backfill failed during startup")
         conn.executescript(INDEXES)
         _backfill_brand_ids(conn)
+        _repair_legacy_sentiment_false_positives(conn)
         _cleanup_fake_boss_login_postings(conn)
 
 
@@ -817,6 +843,49 @@ def _cleanup_fake_boss_login_postings(conn: sqlite3.Connection) -> None:
     for row in rows:
         conn.execute("DELETE FROM job_snapshots WHERE posting_id = ?", (row["id"],))
         conn.execute("DELETE FROM job_postings WHERE id = ?", (row["id"],))
+
+
+def _repair_legacy_sentiment_false_positives(conn: sqlite3.Connection) -> None:
+    """Repair records misclassified by the old substring keyword matcher.
+
+    Before keyword boundaries were enforced, words such as the Spanish
+    ``grabadoras`` matched the English negative token ``bad``.  Re-analyse
+    only rows that still contain that exact legacy pattern and have no current
+    negative evidence, so explicitly supplied genuine negative labels remain
+    untouched.
+    """
+    from .nlp import NEGATIVE_TERMS, _term_matches, analyze_text
+
+    rows = conn.execute(
+        "SELECT id, title, body, sentiment FROM records WHERE sentiment = 'negative'"
+    ).fetchall()
+    for row in rows:
+        text = f"{row['title'] or ''} {row['body'] or ''}".strip()
+        lowered = text.lower()
+        analysis = analyze_text(text)
+        explanation = analysis.get("sentiment_explanation") or {}
+        if analysis["sentiment"] == "negative" or explanation.get("negative_terms"):
+            continue
+        legacy_matches = [
+            term for term in NEGATIVE_TERMS
+            if term in lowered and not _term_matches(lowered, term)
+        ]
+        if not legacy_matches:
+            continue
+        conn.execute(
+            """
+            UPDATE records
+            SET sentiment = ?, sentiment_score = ?, intent = ?, topics_json = ?
+            WHERE id = ?
+            """,
+            (
+                analysis["sentiment"],
+                analysis["sentiment_score"],
+                analysis["intent"],
+                json.dumps(analysis["topics"], ensure_ascii=False),
+                row["id"],
+            ),
+        )
 
 
 def _backfill_brand_ids(conn: sqlite3.Connection) -> None:

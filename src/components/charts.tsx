@@ -56,10 +56,9 @@ function TrendLegend({ keys, hiddenKeys, onToggle }: { keys: { key: string; name
   );
 }
 
-export function TrendChart({ data, keys, valueFormatter, interactive = false }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string; interactive?: boolean }) {
+export function TrendChart({ data, keys, valueFormatter, showPoints = false, interactive = false }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string; showPoints?: boolean; interactive?: boolean }) {
   const [hiddenKeys, setHiddenKeys] = useState<string[]>([]);
   const visibleKeys = interactive ? keys.filter((key) => !hiddenKeys.includes(key.key)) : keys;
-
   return (
     <div>
       <ResponsiveContainer width="100%" height={220}>
@@ -77,7 +76,7 @@ export function TrendChart({ data, keys, valueFormatter, interactive = false }: 
         <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 64 : 48} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
         {visibleKeys.map((k) => (
-          <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} />
+          <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} dot={showPoints ? { r: 3 } : false} />
         ))}
         </AreaChart>
       </ResponsiveContainer>

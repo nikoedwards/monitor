@@ -109,10 +109,16 @@ export function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement
   );
 }
 
-export function StatCard({ label, value, hint, tone }: { label: string; value: React.ReactNode; hint?: string; tone?: "negative" | "accent" }) {
+export function StatCard({ label, value, hint, tone, onClick }: { label: string; value: React.ReactNode; hint?: string; tone?: "negative" | "accent"; onClick?: () => void }) {
   const color = tone === "negative" ? "var(--danger)" : tone === "accent" ? "var(--accent)" : "var(--ink)";
   return (
-    <Card className="p-4">
+    <Card
+      className={cx("p-4", onClick && "cursor-pointer transition-shadow hover:shadow-md")}
+      onClick={onClick}
+      onKeyDown={onClick ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onClick(); } } : undefined}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+    >
       <div className="text-[12px] uppercase tracking-wide" style={{ color: "var(--mute)" }}>{label}</div>
       <div className="text-[28px] font-semibold mt-1 tabular-nums tracking-tight" style={{ color }}>{value}</div>
       {hint && <div className="text-[12px] mt-1" style={{ color: "var(--mute)" }}>{hint}</div>}

@@ -13,6 +13,7 @@ import Sources from "./features/Sources";
 import Compare from "./features/Compare";
 import Brands from "./features/Brands";
 import MarketShare from "./features/MarketShare";
+import McpCli from "./features/McpCli";
 
 function RootRedirect() {
   const { data: brands, isLoading } = useBrands();
@@ -35,6 +36,7 @@ export default function App() {
       <Route path="/brand/:brandId/creators" element={<Shell><Creators /></Shell>} />
       <Route path="/brand/:brandId/voice" element={<Shell><Voice /></Shell>} />
       <Route path="/brand/:brandId/web" element={<Shell><Web /></Shell>} />
+      <Route path="/brand/:brandId/mcp-cli" element={<Shell><McpCli /></Shell>} />
       <Route path="/brand/:brandId/sources" element={<Shell><Sources /></Shell>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

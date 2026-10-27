@@ -705,7 +705,12 @@ def _record_activities(conn: sqlite3.Connection, profile: dict, activities: list
             )
         ):
             continue
-        ext = (act.external_id or "").strip() or _jd_hash(text)[:32]
+        # Rendered activity pages do not always expose LinkedIn's internal
+        # activity id. Include stable event fields so different posts with
+        # identical text are retained while repeated daily crawls deduplicate.
+        ext = (act.external_id or "").strip() or _jd_hash(
+            "|".join((profile["id"], act.activity_type or "post", act.posted_at or "", act.url or "", text))
+        )[:32]
         dup = conn.execute(
             "SELECT 1 FROM linkedin_activities WHERE profile_id = ? AND external_id = ? LIMIT 1",
             (profile["id"], ext),
@@ -757,7 +762,11 @@ def discover_linkedin_people_candidates(
         if provider is None:
             continue
         provider_cookie = getattr(provider, "cookie", None)
-        summary["configured"] = True if provider_cookie is None else bool(str(provider_cookie).strip())
+        # Keep the aggregate flag true when any configured People source
+        # succeeds; a later unconfigured source must not overwrite it.
+        summary["configured"] = summary["configured"] or (
+            True if provider_cookie is None else bool(str(provider_cookie).strip())
+        )
         summary["links"] += 1
         if not summary["configured"]:
             error = "未配置 LinkedIn Cookie，请在设置中填写后再导入企业员工。"
@@ -808,7 +817,7 @@ def run_linkedin_people_collection(conn: sqlite3.Connection, brand: dict, link_i
             f"""
             SELECT * FROM linkedin_profiles
             WHERE brand_id = ? AND status = 'active' AND monitor = 1
-            ORDER BY last_activity_at IS NULL, last_seen DESC LIMIT 60
+            ORDER BY last_activity_at IS NULL, last_seen DESC LIMIT 300
             """,
             (brand["id"],),
         ).fetchall()

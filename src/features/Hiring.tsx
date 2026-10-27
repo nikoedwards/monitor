@@ -226,11 +226,18 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
 function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any }) {
   const { data: settings } = useSettings();
   const analyze = useAnalyzeJd(brandId, range);
-  const result = analyze.data;
-  const error = analyze.error instanceof Error ? analyze.error.message : "";
+  const [manualResult, setManualResult] = useState<any>(null);
+  const [error, setError] = useState("");
 
   const run = async () => {
-    try { await analyze.mutateAsync({ brandId, range }); } catch { /* error is rendered below */ }
+    setError("");
+    setManualResult(null);
+    try {
+      const res = await analyze.generate.mutateAsync({ refresh: !!(manualResult || analyze.data) });
+      setManualResult(res);
+    } catch (e: any) {
+      setError(e?.message || "分析失败");
+    }
   };
 
   return (
@@ -240,23 +247,23 @@ function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any 
         subtitle="用大模型从近期 JD 反推对方内部在推进的业务与团队重点"
         action={
           <div className="flex flex-col items-end">
-            <Button onClick={run} disabled={analyze.isPending || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
-              {analyze.isPending ? "分析中…" : "生成分析"}
+            <Button onClick={run} disabled={analyze.generate.isPending || analyze.isLoading || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
+              {analyze.generate.isPending ? "分析中…" : "生成分析"}
             </Button>
-            <AsyncProgress active={analyze.isPending} label="正在分析岗位数据" />
+            <AsyncProgress active={analyze.generate.isPending} label="正在分析岗位数据" />
           </div>
         }
       />
       {!settings?.configured && <p className="text-[13px]" style={{ color: "var(--mute)" }}>未配置大模型 Token，请在右上角设置中填写后再生成。</p>}
       {error && <p className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
-      {result && (
+      {(manualResult || analyze.data) && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>
-          <p style={{ color: "var(--ink)" }}>{result.summary}</p>
-          {!!result.business_directions?.length && (
+          <p style={{ color: "var(--ink)" }}>{(manualResult || analyze.data).summary}</p>
+          {!!(manualResult || analyze.data).business_directions?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>推导业务方向</div>
               <div className="space-y-1.5">
-                {result.business_directions.map((d: any, i: number) => (
+                {(manualResult || analyze.data).business_directions.map((d: any, i: number) => (
                   <div key={i} className="p-2 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
                     <div className="flex items-center gap-2">
                       <Badge tone="accent">{d.direction}</Badge>
@@ -268,17 +275,17 @@ function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any 
               </div>
             </div>
           )}
-          {!!result.strategic_signals?.length && (
+          {!!(manualResult || analyze.data).strategic_signals?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>战略信号</div>
               <ul className="list-disc pl-5 space-y-0.5">
-                {result.strategic_signals.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                {(manualResult || analyze.data).strategic_signals.map((s: string, i: number) => <li key={i}>{s}</li>)}
               </ul>
             </div>
           )}
-          {!!result.risks?.length && (
+          {!!(manualResult || analyze.data).risks?.length && (
             <div className="text-[12px]" style={{ color: "var(--mute)" }}>
-              解读说明：{result.risks.join("；")}
+              解读说明：{(manualResult || analyze.data).risks.join("；")}
             </div>
           )}
         </div>
@@ -395,15 +402,7 @@ function PostingDetailModal({ postingId, onClose }: { postingId?: string; onClos
 // ------------------------------------------------------------------- people tab
 function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigureSources: () => void }) {
   const { data: employees = [], isLoading } = useEmployees(brandId);
-  const [activityProfile, setActivityProfile] = useState("all");
-  const [activityType, setActivityType] = useState("all");
-  const [activityKeyword, setActivityKeyword] = useState("");
-  const { data: activities = [] } = useActivities(brandId, undefined, {
-    profileIds: activityProfile === "all" ? undefined : [activityProfile],
-    activityType,
-    keyword: activityKeyword,
-    limit: 300,
-  });
+  const { data: activities = [] } = useActivities(brandId);
   const sync = useEmployeesSync();
   const employeeImport = useEmployeeImport();
   const monitorSelection = useEmployeeMonitorSelection();
@@ -535,24 +534,7 @@ function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigu
       </Card>
 
       <Card>
-        <SectionTitle
-          title="重点人员信号 Feed"
-          subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据"
-          action={
-            <div className="flex flex-wrap items-center gap-2">
-              <Select value={activityProfile} onChange={(event) => setActivityProfile(event.target.value)}>
-                <option value="all">全部人员</option>
-                {focusPeople.map((person) => <option key={person.id} value={person.id}>{person.name || person.external_id || "未识别姓名"}</option>)}
-              </Select>
-              <Select value={activityType} onChange={(event) => setActivityType(event.target.value)}>
-                <option value="all">全部动态</option>
-                <option value="post">公开动态</option>
-                <option value="profile_change">个人页变更</option>
-              </Select>
-              <Input value={activityKeyword} onChange={(event) => setActivityKeyword(event.target.value)} placeholder="搜索动态内容" className="w-[170px]" />
-            </div>
-          }
-        />
+        <SectionTitle title="重点人员信号 Feed" subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据" />
         {visibleActivities.length ? (
           <div className="space-y-2 max-h-[480px] overflow-y-auto">
             {visibleActivities.map((a) => (

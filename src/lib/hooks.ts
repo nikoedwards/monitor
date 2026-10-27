@@ -4,6 +4,7 @@ import {
   api,
   qs,
   type Brand,
+  type CommunityPostSummary,
   type Link,
   type MarketShareModelKey,
   type MarketShareResponse,
@@ -134,11 +135,11 @@ export function useOverview(brandId?: string, range?: TimeRange, marketBrandIds?
   });
 }
 
-export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[], refreshKey = 0, enabled = true) {
+export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[], refreshKey = 0) {
   const rp = rangeParams(range);
   const storageKey = dailyPersistentTaskKey("executive-summary", [brandId, rp.start_date, rp.end_date, marketBrandIds?.join(",")]);
   const stored = readPersistentTask<any>(storageKey);
-  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 15 * 60_000;
+  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 30 * 60_000;
   return useQuery({
     queryKey: ["overview-summary", brandId, rp, marketBrandIds, refreshKey],
     queryFn: async () => {
@@ -152,7 +153,7 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
         throw error;
       }
     },
-    enabled: !!brandId && enabled && !activeTask,
+    enabled: !!brandId && (!activeTask || refreshKey > 0),
     staleTime: 10 * 60_000,
     gcTime: 24 * 60 * 60_000,
   });
@@ -266,6 +267,44 @@ export function useVocMutations() {
 }
 
 // ---------------------------------------------------------------- marketing
+export function useCommunitySummaries(records: RecordItem[]) {
+  const qc = useQueryClient();
+  const targets = records.filter((record) => record.channel === "community");
+  const queryKey = ["community-post-summaries", targets.map((record) => [record.id, record.title, record.body])];
+  return useQuery({
+    queryKey,
+    enabled: targets.length > 0,
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    queryFn: async ({ signal }) => {
+      const summaries: Record<string, CommunityPostSummary> = {};
+      // Publish each small batch as it finishes; the original content remains
+      // usable while summaries are generated and persisted on the server.
+      for (let index = 0; index < targets.length && !signal.aborted; index += 12) {
+        const batch = targets.slice(index, index + 12);
+        try {
+          const response = await api.post<{ summaries: Record<string, CommunityPostSummary> }>(
+            "/api/records/community-summaries", { record_ids: batch.map((record) => record.id) },
+          );
+          Object.assign(summaries, response.summaries);
+          if (Object.values(response.summaries).some((item) => item.status === "unconfigured")) {
+            targets.slice(index + 12).forEach((record) => { summaries[record.id] = { status: "unconfigured", summary: null }; });
+            qc.setQueryData(queryKey, { ...summaries });
+            break;
+          }
+        } catch {
+          targets.slice(index).forEach((record) => { summaries[record.id] = { status: "error", summary: null }; });
+          qc.setQueryData(queryKey, { ...summaries });
+          break;
+        }
+        qc.setQueryData(queryKey, { ...summaries });
+      }
+      return summaries;
+    },
+  });
+}
+
 export function useMarketingSummary(brandId?: string, channel?: string, range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
@@ -289,8 +328,7 @@ export function useMarketingOverviewSummary(brandId?: string, range?: TimeRange,
   const rp = rangeParams(range);
   const storageKey = dailyPersistentTaskKey("marketing-summary", [brandId, rp.start_date, rp.end_date]);
   const stored = readPersistentTask<any>(storageKey);
-  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 15 * 60_000;
-  const hasStoredResult = stored?.status === "success";
+  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 30 * 60_000;
   return useQuery({
     queryKey: ["marketing-overview-summary", brandId, rp, refreshKey],
     queryFn: async () => {
@@ -304,7 +342,7 @@ export function useMarketingOverviewSummary(brandId?: string, range?: TimeRange,
         throw error;
       }
     },
-    enabled: !!brandId && (refreshKey > 0 || (!activeTask && !hasStoredResult)),
+    enabled: !!brandId && (!activeTask || refreshKey > 0),
     staleTime: 10 * 60_000,
     gcTime: 24 * 60 * 60_000,
   });
@@ -340,12 +378,22 @@ export function useAds(brandId?: string, range?: TimeRange, filters?: Record<str
 // ---------------------------------------------------------------- insights summary (LLM)
 export function useInsightsSummary(brandId?: string, dimension?: string, channel?: string, range?: TimeRange) {
   const rp = rangeParams(range);
+  const queryClient = useQueryClient();
+  const queryKey = ["insights-summary", brandId, dimension, channel, rp];
   const storageKey = persistentTaskKey("insights-summary", [brandId, dimension, channel, rp.start_date, rp.end_date]);
-  return usePersistentTaskMutation<any, { brandId: string; dimension?: string; channel?: string; range?: TimeRange }>(
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, cached_only: true, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  });
+  const generate = usePersistentTaskMutation<any, { refresh?: boolean }>(
     storageKey,
-    ({ brandId: id, dimension: selectedDimension, channel: selectedChannel, range: selectedRange }) =>
-      api.get<any>(`/api/insights/summary${qs({ brand_id: id, dimension: selectedDimension, channel: selectedChannel, ...rangeParams(selectedRange) })}`),
+    ({ refresh = false }) => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...rp })}`),
+    (data) => queryClient.setQueryData(queryKey, data),
   );
+  return { ...query, data: generate.data || (query.data?.cache_miss ? undefined : query.data), generate };
 }
 
 // ---------------------------------------------------------------- creators
@@ -454,12 +502,20 @@ export function useCreatorsSync() {
 }
 
 export function useCreatorsReport(brandId?: string, productId?: string) {
-  const storageKey = persistentTaskKey("creators-report", [brandId, productId]);
-  return usePersistentTaskMutation<string, { brandId: string; productId?: string }>(
-    storageKey,
-    ({ brandId: id, productId: selectedProductId }) =>
-      api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: id, product_id: selectedProductId })}`).then((d) => d.report),
-  );
+  const qc = useQueryClient();
+  const queryKey = ["creators-report", brandId, productId];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.get<{ report?: string; cache_miss?: boolean }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, cached_only: true })}`),
+    enabled: !!brandId,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, refresh })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, data: query.data?.cache_miss ? undefined : query.data, generate };
 }
 
 // ---------------------------------------------------------------- sales
@@ -699,21 +755,30 @@ export function useEmployeeMutations() {
   };
 }
 
-export function useActivities(brandId?: string, profileId?: string, filters?: { profileIds?: string[]; activityType?: string; startDate?: string; endDate?: string; keyword?: string; limit?: number }) {
+export function useActivities(brandId?: string, profileId?: string) {
   return useQuery({
-    queryKey: ["li-activities", brandId, profileId, filters],
-    queryFn: () => api.get<{ activities: import("./api").LinkedInActivity[] }>(`/api/hiring/activities${qs({ brand_id: brandId, profile_id: profileId, profile_ids: filters?.profileIds?.join(","), activity_type: filters?.activityType, start_date: filters?.startDate, end_date: filters?.endDate, keyword: filters?.keyword, limit: filters?.limit })}`).then((d) => d.activities),
+    queryKey: ["li-activities", brandId, profileId],
+    queryFn: () => api.get<{ activities: import("./api").LinkedInActivity[] }>(`/api/hiring/activities${qs({ brand_id: brandId, profile_id: profileId })}`).then((d) => d.activities),
     enabled: !!brandId,
   });
 }
 
 export function useAnalyzeJd(brandId?: string, range?: TimeRange) {
+  const qc = useQueryClient();
   const rp = rangeParams(range);
-  const storageKey = persistentTaskKey("hiring-analysis", [brandId, rp.start_date, rp.end_date]);
-  return usePersistentTaskMutation<any, { brandId: string; range?: TimeRange }>(
-    storageKey,
-    ({ brandId: id, range: selectedRange }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: id, ...rangeParams(selectedRange) })}`),
-  );
+  const queryKey = ["hiring-analysis", brandId, rp];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, ...rp })}`),
+    enabled: !!brandId,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...rp })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, data: query.data?.cache_miss ? undefined : query.data, generate };
 }
 
 // ---------------------------------------------------------------- web
@@ -753,13 +818,21 @@ export function useWebSummary(brandId?: string, monitorId?: string, range?: Time
 }
 
 export function useWebAnalysis(brandId?: string, monitorId?: string, range?: TimeRange) {
+  const qc = useQueryClient();
   const rp = rangeParams(range);
-  const storageKey = persistentTaskKey("web-analysis", [brandId, monitorId, rp.start_date, rp.end_date]);
-  return usePersistentTaskMutation<WebAiAnalysis, { brandId: string; monitorId?: string; range: TimeRange; refresh?: boolean }>(
-    storageKey,
-    ({ brandId: id, monitorId: selectedMonitorId, range: selectedRange, refresh = false }) =>
-      api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: id, monitor_id: selectedMonitorId, refresh, ...rangeParams(selectedRange) })}`),
-  );
+  const queryKey = ["web-analysis", brandId, monitorId, rp];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, cached_only: true, ...rp })}`),
+    enabled: !!brandId && !!range,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
+  });
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rp })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, data: (query.data as any)?.cache_miss ? undefined : query.data, generate };
 }
 
 export function useDeleteWebSnapshot() {
@@ -842,8 +915,6 @@ export function useSourceMutations() {
         qc.invalidateQueries({ queryKey: ["sources"] });
         qc.invalidateQueries({ queryKey: ["links"] });
         qc.invalidateQueries({ queryKey: ["records"] });
-        qc.invalidateQueries({ queryKey: ["voc-records"] });
-        qc.invalidateQueries({ queryKey: ["voc-summary"] });
         qc.invalidateQueries({ queryKey: ["overview"] });
         qc.invalidateQueries({ queryKey: ["marketing-summary"] });
       },

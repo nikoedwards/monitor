@@ -28,7 +28,7 @@ COPY server ./server
 COPY browser_extensions ./browser_extensions
 COPY --from=frontend /app/dist ./dist
 
-# Persist SQLite DB + snapshots here (mount a Railway volume at /app/data).
+# Persist SQLite DB + snapshots here (mount the Aliyun host data directory at /app/data).
 RUN mkdir -p /app/data
 
 EXPOSE 8790
