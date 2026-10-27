@@ -17,6 +17,10 @@ services:
     volumes:
       # SQLite, PNG screenshots and HTML archives survive image rebuilds.
       - ./data:/app/data
+    # Keep a runaway Chromium process inside the container. The production
+    # host has 1 GiB RAM; leaving headroom keeps SSH, Docker and the watchdog
+    # responsive even if a browser process misbehaves.
+    mem_limit: "700m"
     # Chromium is more reliable with a larger shared-memory mount.
     shm_size: "1gb"
     init: true
