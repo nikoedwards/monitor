@@ -1,0 +1,52 @@
+name: Deploy Monitor to Aliyun
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: monitor-intelligence-hub:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Validate backend
+        run: docker run --rm --network none -e MONITOR_SCHEDULER=0 monitor-intelligence-hub:${{ github.sha }} python -m compileall -q server
+      - name: Transfer image and restart Monitor
+        env:
+          SSH_HOST: ${{ secrets.ALIYUN_MONITOR_HOST }}
+          SSH_KEY: ${{ secrets.ALIYUN_MONITOR_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.ALIYUN_MONITOR_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$tmp/key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$tmp/known_hosts"
+          chmod 600 "$tmp/key" "$tmp/known_hosts"
+          docker save "monitor-intelligence-hub:${GITHUB_SHA}" | gzip -1 | \
+            ssh -T -i "$tmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$tmp/known_hosts" \
+              -o ConnectTimeout=20 "root@$SSH_HOST" \
+              "gzip -d | docker load && docker tag monitor-intelligence-hub:${GITHUB_SHA} monitor-intelligence-hub:isolated-20261027 && cd /opt/monitor && docker compose -f docker-compose.yml -f deploy/aliyun/docker-compose.monitor-ljei.yml up -d --no-build monitor && curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:8790/api/health"
+      - name: Check public endpoint
+        env:
+          SSH_HOST: ${{ secrets.ALIYUN_MONITOR_HOST }}
+        run: curl --fail --retry 5 --retry-delay 5 --max-time 30 "http://$SSH_HOST/api/health"
