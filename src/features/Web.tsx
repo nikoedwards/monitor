@@ -207,7 +207,7 @@ export default function Web() {
           )}
         </Card>
 
-        <Card className="lg:col-span-2">
+        <Card className="lg:col-span-2 min-w-0">
           <SnapshotTimeline snapshots={snapshots} loading={snapshotsLoading} brandId={brandId || ""} monitorId={selected} rangeText={rangeLabel(range)} />
         </Card>
       </div>
@@ -598,9 +598,12 @@ function SnapshotTimeline({ snapshots, loading, brandId, monitorId, rangeText }:
           <div className="text-[13px]" style={{ color: "var(--mute)" }}>正在加载所选日期范围的快照…</div>
         </div>
       ) : snapshots.length ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-[720px] overflow-y-auto pr-1">
+        <div
+          className="grid min-w-0 gap-3 max-h-[720px] overflow-y-auto overflow-x-hidden pr-1"
+          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))" }}
+        >
           {snapshots.map((snapshot) => (
-            <div key={snapshot.id} className="relative panel overflow-hidden" style={{ padding: 0 }}>
+            <div key={snapshot.id} className="relative min-w-0 panel overflow-hidden" style={{ padding: 0 }}>
               <button
                 onClick={() => { setActive(snapshot); setMode("screenshot"); }}
                 className="w-full text-left cursor-pointer"
