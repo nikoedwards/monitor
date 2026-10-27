@@ -30,6 +30,11 @@ class ReleaseFailed(RuntimeError):
     """Raised when a candidate cannot become healthy without intervention."""
 
 
+MIN_RESTART_HEADROOM = 3 * 1024**3
+SQLITE_HEADER = b"SQLite format 3\x00"
+SQLITE_HEADER_BYTES = 100
+
+
 def backup_database(source, destination):
     pending = destination.with_suffix(".pending")
     pending.unlink(missing_ok=True)
@@ -240,6 +245,40 @@ class SourceDeployer:
     def install_base(self, contents):
         atomic_write(self.stable_base, contents)
 
+    def deployment_storage_is_shared(self):
+        return self.state_dir.stat().st_dev == self.data_dir.stat().st_dev
+
+    def ensure_deployment_capacity(self):
+        if not self.deployment_storage_is_shared():
+            raise RuntimeError(
+                "Monitor data and deployment state must be on the same filesystem "
+                "for atomic rollback"
+            )
+        try:
+            backup_bytes = self.database.stat().st_size
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Database disappeared before deployment: {self.database}"
+            ) from exc
+        for path in (
+            Path(str(self.database) + "-wal"),
+            Path(str(self.database) + "-shm"),
+        ):
+            try:
+                backup_bytes += path.stat().st_size
+            except FileNotFoundError:
+                pass
+        backup_free = shutil.disk_usage(self.state_dir).free
+        required = backup_bytes + MIN_RESTART_HEADROOM
+        if backup_free < required:
+            raise RuntimeError(
+                "Need at least "
+                f"{required} bytes free before stopping Monitor "
+                f"({backup_bytes} for the SQLite backup and "
+                f"{MIN_RESTART_HEADROOM} reserved for restart); "
+                f"only {backup_free} available"
+            )
+
     def discard_candidate(self):
         try:
             self.run(["docker", "image", "rm", self.image], timeout=120)
@@ -397,32 +436,87 @@ class SourceDeployer:
                 shutil.rmtree(old_source)
         self.prune_releases(current_release)
 
-    def prune_releases(self, current_release):
+    def release_has_valid_backup(self, release):
+        backup = release / "before-deploy.db"
+        try:
+            if not backup.is_file():
+                return False
+            size = backup.stat().st_size
+            if size < SQLITE_HEADER_BYTES:
+                return False
+            with backup.open("rb") as handle:
+                header = handle.read(SQLITE_HEADER_BYTES)
+            if not header.startswith(SQLITE_HEADER):
+                return False
+            encoded_page_size = int.from_bytes(header[16:18], "big")
+            page_size = 65536 if encoded_page_size == 1 else encoded_page_size
+            declared_pages = int.from_bytes(header[28:32], "big")
+            actual_pages = size // page_size if page_size else 0
+            header_size_is_current = header[24:28] == header[92:96]
+            return (
+                512 <= page_size <= 65536
+                and (page_size & (page_size - 1)) == 0
+                and size >= page_size
+                and size % page_size == 0
+                and (
+                    declared_pages == 0
+                    or not header_size_is_current
+                    or declared_pages == actual_pages
+                )
+            )
+        except OSError:
+            return False
+
+    def prune_releases(self, current_release=None):
+        valid = []
+        for release in self.state_dir.glob("release-*"):
+            if not release.is_dir():
+                continue
+            if self.release_has_valid_backup(release):
+                valid.append(release)
+            elif release != current_release and release.parent == self.state_dir:
+                shutil.rmtree(release)
+
         releases = sorted(
-            (path for path in self.state_dir.glob("release-*") if path.is_dir()),
+            valid,
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-        for old in releases[5:]:
-            if old != current_release and old.parent == self.state_dir:
+        keep = set(releases[:5])
+        if current_release in releases and current_release not in keep:
+            keep.discard(releases[4])
+            keep.add(current_release)
+        for old in releases:
+            if old not in keep and old.parent == self.state_dir:
                 shutil.rmtree(old)
 
     def deploy(self):
         self.validate_inputs()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.build_image()
-        candidate_image = self.image_id(self.image)
-        previous_image = self.current_image_id(self.stable_base)
-        self.validate_live_data_mount(self.stable_base)
-        previous_base = self.stable_base.read_bytes()
-        self.tag(previous_image, self.rollback_image)
+        release_dir = None
+        try:
+            self.prune_releases()
+            candidate_image = self.image_id(self.image)
+            previous_image = self.current_image_id(self.stable_base)
+            self.validate_live_data_mount(self.stable_base)
+            previous_base = self.stable_base.read_bytes()
+            self.tag(previous_image, self.rollback_image)
 
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        release_dir = self.state_dir / (
-            f"release-{stamp}-{self.revision[:12]}-{os.getpid()}"
-        )
-        release_dir.mkdir(mode=0o700)
-        self.prune_releases(release_dir)
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y%m%dT%H%M%SZ"
+            )
+            release_dir = self.state_dir / (
+                f"release-{stamp}-{self.revision[:12]}-{os.getpid()}"
+            )
+            release_dir.mkdir(mode=0o700)
+            self.prune_releases(release_dir)
+            self.ensure_deployment_capacity()
+        except BaseException:
+            if release_dir is not None:
+                shutil.rmtree(release_dir, ignore_errors=True)
+            self.discard_candidate()
+            raise
         backup = release_dir / "before-deploy.db"
         backup_ready = False
         stop_started = False
@@ -457,6 +551,13 @@ class SourceDeployer:
                     ) from deployment_error
                 finally:
                     self.rolling_back = False
+                try:
+                    self.prune_releases()
+                except Exception as cleanup_error:
+                    print(
+                        f"Rollback completed; release cleanup needs attention: {cleanup_error}",
+                        file=sys.stderr,
+                    )
                 self.discard_candidate()
             raise
 
