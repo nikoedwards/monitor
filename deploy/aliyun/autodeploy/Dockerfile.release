@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+
+# The frontend is validated and built by GitHub Actions. Reusing that dist/
+# avoids repeating npm install on the production host.
+FROM python:3.12-slim AS runtime
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    HOST=0.0.0.0 \
+    PORT=8790
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir "playwright>=1.50,<2" \
+    && python -m playwright install --with-deps chromium
+
+COPY server ./server
+COPY browser_extensions ./browser_extensions
+COPY dist ./dist
+
+RUN mkdir -p /app/data
+
+EXPOSE 8790
+CMD ["python", "-m", "server.app"]

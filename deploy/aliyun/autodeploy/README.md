@@ -1,69 +1,44 @@
 # Monitor continuous deployment
 
-Every push to `main` runs `.github/workflows/deploy-monitor.yml`. Manual reruns
-are available through GitHub Actions (`workflow_dispatch`). Standard hosted
-runners are free for this public repository. Images are streamed directly to
-the server; no container registry or image artifact storage is required.
+Every push to `main` runs `.github/workflows/deploy-monitor.yml`. The workflow
+validates the frontend, compiles the backend, and runs the deployment rollback
+tests before it contacts production.
 
-GitHub builds the normal project Dockerfile (including frontend type checking),
-checks backend syntax and the voice/source regression tests, then
-uploads the compressed Docker image over SSH. The server first checks the image
-identity and starts an isolated candidate with a database copy, read-only access
-to snapshots, and collection disabled. A failed candidate leaves production alone.
+GitHub adds the validated frontend `dist/` to a `git archive` for the exact
+commit and sends it to `/opt/monitor/.deploy-src/<commit>`. The server builds the
+Python runtime image locally with `Dockerfile.release`, so it reuses the current
+runtime dependency layers without repeating `npm ci`, and large images do not
+have to pass through the Actions SSH connection.
 
-After preflight, only Monitor stops. The server takes a fresh SQLite backup,
-changes its image override, and starts the new release. The host data directory
-and collector settings stay in place. If its HTTP/frontend checks fail, the old
-image and that fresh database backup are restored. The previous image and the
-five most recent deployment directories are retained. Kicksonar is not deployed
-by this workflow.
+`deploy_source.py` owns the production transaction:
+
+1. Validate the tracked Compose file and build the candidate image while the old
+   service is still running.
+2. Record the old container image, stop Monitor, and create a consistent SQLite
+   backup with the SQLite backup API.
+3. Install the release's tracked `docker-compose.yml`, move the stable image tag,
+   and recreate only the `monitor` service.
+4. Check the local health API, brands API, frontend entry point and assets, then
+   check the public endpoint.
+5. On startup, health, SSH `HUP`, `INT`, or `TERM` failure, stop the candidate,
+   restore the database and its WAL/SHM state, restore the previous Compose file
+   and image, and verify the old release locally.
+
+The server keeps `/opt/monitor/deploy/aliyun/docker-compose.monitor-ljei.yml` as
+a host-only override. It contains production-specific settings and is not copied
+from Git. Runtime data remains in `/opt/monitor/data`. Deployment reports and the
+five newest pre-release database backups are kept in
+`/opt/monitor/.deploy-state`.
 
 GitHub repository secrets:
 
-- `ALIYUN_MONITOR_HOST`: the SSH hostname or IP.
-- `ALIYUN_MONITOR_SSH_KEY`: a dedicated Ed25519 deployment private key.
-- `ALIYUN_MONITOR_KNOWN_HOSTS`: verified OpenSSH known_hosts entry for that host.
+- `ALIYUN_MONITOR_HOST`: the SSH hostname or IPv4 address.
+- `ALIYUN_MONITOR_SSH_KEY`: the production deployment private key.
+- `ALIYUN_MONITOR_KNOWN_HOSTS`: the verified OpenSSH known-hosts entry.
 
-The dedicated `monitor-deploy` SSH user has a forced command and no Docker group
-membership. Its key accepts only `deploy <40-character commit SHA>`; forwarding,
-PTYs, and arbitrary shell commands are disabled. Root owns the deploy script,
-SSH gateway, sudo rule, and `/etc/monitor-deploy.json`. Runtime environment
-credentials stay on the server and are not copied into the repository or image.
-
-Server configuration schema (paths are examples):
-
-```json
-{
-  "data_dir": "/opt/aliyun/data/monitor",
-  "state_dir": "/opt/aliyun/monitor-deploy",
-  "release_override": "/opt/aliyun/deploy/aliyun/docker-compose.monitor-release.yml",
-  "compose_files": [
-    "/opt/aliyun/deploy/aliyun/docker-compose.yml",
-    "/opt/aliyun/deploy/aliyun/docker-compose.monitor-ip.yml"
-  ],
-  "container": "aliyun-production-monitor-1",
-  "env_file": "/opt/aliyun/env/monitor.env",
-  "public_url": "http://YOUR_SERVER_IP"
-}
-```
-
-Root installs `deploy_monitor.py` as `/usr/local/sbin/deploy-monitor` and
-`ssh-gateway.sh` as `/usr/local/sbin/monitor-ssh-gateway`. The SSH authorized key
-uses `restrict,command="/usr/local/sbin/monitor-ssh-gateway"`; sudo allows only
-`/usr/local/sbin/deploy-monitor`. The root script validates the argument again.
-
-Deployment status is in `/opt/aliyun/monitor-deploy/current.json`; root-only
-release folders contain the pre-deploy database backup and deployment metadata.
-Include the generated `docker-compose.monitor-release.yml` after both existing
-Compose files when manually restarting Monitor, so it uses the current release.
-After changing domains, update `public_url` in the root-owned configuration and
-the final workflow HTTP check to the new HTTPS address.
-
-Host-side gateway/script/config changes are installed separately through the
-administrator SSH session; repository code cannot replace the SSH gateway.
-
-The deployment gate also tests failed preflight, failed startup with database
-restoration, backup failure, and successful rollout bookkeeping. It does not run
-the full legacy suite: the initial audit found existing creator/sales failures
-and tests requiring development-only HTTP-client/browser-worker dependencies.
-Those unrelated failures are not silently treated as passing checks.
+The workflow connects as `root` because the deployment must stop Docker, take a
+host-level database backup, update the stable Compose file, and restore all three
+on failure. Source upload uses a staging directory and only replaces a commit's
+release directory after the archive extracts successfully. Successful releases
+remove temporary source trees and SHA tags while retaining the stable and
+rollback image tags.
