@@ -82,10 +82,6 @@ BOSS 与 LinkedIn 采用不同采集方式。LinkedIn 保持后台 Cookie 采集
 
 ## 本地运行
 
-社群内容流会在每条帖子的标题下自动生成「一句话总结」，用中文概括核心诉求、问题或反馈，原文保留在下方。使用设置中的现有大模型，按小批次逐步生成；摘要保存在数据库，刷新可复用，标题或正文变更后重新生成。未配置模型或生成失败时明确提示并可重试，不用原文截断冒充中文摘要。
-
-社群监控区分声量与浏览量：默认按帖子、回复展示声量趋势；仅在帖子提供公开浏览量（如 Discourse）时显示浏览量切换和汇总，并标注覆盖帖子数。浏览量按帖子发布日期归集当前累计读数，不代表每日新增曝光或去重人数。Reddit、Frill 等未提供的浏览量显示「未公开」，不会按零或根据投票、关注数估算；切换渠道会重置趋势指标，避免沿用媒体公关的预计曝光。
-
 前置：Python 3.10+、Node 18+。
 
 ```bash
@@ -113,11 +109,13 @@ npm run dev         # 终端 B → http://localhost:5173
 
 ## 阿里云部署与维护
 
-- 生产环境运行在阿里云 Linux VPS。推送到 GitHub 的 `main` 分支后，`.github/workflows/deploy-monitor.yml` 会通过 GitHub Actions 构建 Docker 镜像，经受限 SSH 部署账号传输到服务器，并执行候选实例预检、切换和失败回滚。
-- 生产 Docker 镜像会安装 Playwright Chromium，用于生成真实网页 PNG；如果时间线出现 `Generated visual snapshot fallback`，说明浏览器启动或页面导航失败，应先检查 Railway 构建/运行日志。
-- SQLite 数据库与网页快照都存放在 `/app/data`，由阿里云主机持久化目录挂载，避免重新发布后丢失历史数据和截图。
+- Monitor 生产环境运行在阿里云服务器 `47.79.224.196`，Kicksonar 运行在独立服务器 `47.82.154.207`。两个项目使用独立 Docker Compose、数据目录和公网入口。
+- 推送或合并到 GitHub 的 `main` 分支后，`.github/workflows/deploy-monitor.yml` 会构建 Monitor 镜像，通过 GitHub Actions SSH 密钥部署到 `/opt/monitor`，并检查 `/api/health`。
+- GitHub Actions 需要配置 `ALIYUN_MONITOR_SSH_KEY` 和 `ALIYUN_MONITOR_KNOWN_HOSTS` 两个 Actions Secret；部署密钥只用于新 Monitor 服务器。
+- 生产 Docker 镜像会安装 Playwright Chromium，用于生成真实网页 PNG；如果时间线出现 `Generated visual snapshot fallback`，应先检查 GitHub Actions、容器日志和 Chromium 资源限制。
+- SQLite 数据库与网页快照都存放在新机 `/opt/monitor/data`，容器内挂载到 `/app/data`，避免重新发布后丢失历史数据和截图。
 - 每次功能修改或 Bug 修复完成后，应先运行相关测试与 `npm run build`，必要时同步更新 README，然后提交并推送到 GitHub。
-- 推送后检查 GitHub Actions 发布结果、阿里云服务状态和 `/api/health`，并在生产页面复核本次修改涉及的功能。
+- 推送后检查 GitHub Actions、`http://47.79.224.196/api/health` 和生产页面。
 
 ### Codex 代码交付约定
 
@@ -148,7 +146,7 @@ npm run dev         # 终端 B → http://localhost:5173
 
 ### 网页快照存储与模型要求
 
-- 阿里云主机的持久化数据目录仍需挂载到容器 `/app/data`。每次完整快照会新增一个原始 PNG 和一个经过回放优化的 HTML 文件；抓取阶段最多处理约 30 MB 资源，写入前会压缩大图，长期运行时仍应配置容量监控和保留策略。
+- 阿里云主机的 `/opt/monitor/data` 持久化目录挂载到容器 `/app/data`。每次完整快照会新增一个原始 PNG 和一个经过回放优化的 HTML 文件；抓取阶段最多处理约 30 MB 资源，写入前会压缩大图，长期运行时仍应配置容量监控和保留策略。
 - `Pillow` 用于本地截图差异计算；生产依赖已写入 `requirements.txt`。
 - AI 快照分析需要设置页中的模型支持 Anthropic Messages 图片内容块；未配置 Token 时，日期筛选、视觉统计和周期环比仍可正常使用。
 - 动态接口、登录态、WebSocket、Canvas、Service Worker、跨域 iframe 和完整视频无法保证离线复原；这类限制会在归档和 AI 分析中标注，不应视为完整的 Web Archive 替代品。
