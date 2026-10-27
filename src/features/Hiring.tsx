@@ -22,7 +22,7 @@ import {
   useSettings,
 } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import type { JobPosting, Link, LinkedInEmployee, LinkedInEmployeeImportResult } from "../lib/api";
+import type { HiringWindowPosting, JobPosting, Link, LinkedInEmployee, LinkedInEmployeeImportResult } from "../lib/api";
 import { fmtDate, fmtDateTime, fmtNum } from "../lib/format";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -48,6 +48,7 @@ export default function Hiring() {
   const [tab, setTab] = useState<"jobs" | "people">("jobs");
   const [platform, setPlatform] = useState("all");
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [windowDetail, setWindowDetail] = useState<"released" | "closed">();
 
   const [range] = useTimeRange();
   const { data: summary, isLoading } = useHiringSummary(brandId, platform, range);
@@ -70,8 +71,8 @@ export default function Hiring() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard label="在招职位" value={fmtNum(summary?.total_open)} tone="accent" />
-        <StatCard label="窗口内新增 JD" value={fmtNum(summary?.released_in_window)} />
-        <StatCard label="窗口内下线" value={fmtNum(summary?.closed_in_window)} />
+        <StatCard label="窗口内新增 JD" value={fmtNum(summary?.released_in_window)} onClick={() => setWindowDetail("released")} />
+        <StatCard label="窗口内下线" value={fmtNum(summary?.closed_in_window)} onClick={() => setWindowDetail("closed")} />
         <StatCard label="平均在招天数" value={summary?.avg_open_days != null ? `${summary.avg_open_days}天` : "—"} />
       </div>
 
@@ -88,7 +89,76 @@ export default function Hiring() {
       )}
 
       <SourceModal open={sourceOpen} onClose={() => setSourceOpen(false)} brandId={brandId!} />
+      <HiringWindowModal
+        open={!!windowDetail}
+        kind={windowDetail || "released"}
+        window={summary?.window}
+        postings={windowDetail === "closed" ? (summary?.closed_postings || []) : (summary?.released_postings || [])}
+        onClose={() => setWindowDetail(undefined)}
+      />
     </div>
+  );
+}
+
+function HiringWindowModal({
+  open,
+  kind,
+  window,
+  postings,
+  onClose,
+}: {
+  open: boolean;
+  kind: "released" | "closed";
+  window?: { start: string; end: string };
+  postings: HiringWindowPosting[];
+  onClose: () => void;
+}) {
+  const isReleased = kind === "released";
+  const label = isReleased ? "窗口内新增 JD" : "窗口内下线";
+
+  return (
+    <Modal open={open} onClose={onClose} title={`${label}（${postings.length}）`} width={900}>
+      <div className="space-y-3">
+        <div className="text-[12px]" style={{ color: "var(--mute)" }}>
+          统计窗口：{window?.start || "—"} 至 {window?.end || "—"} · 按{isReleased ? "上线" : "下线"}时间倒序
+        </div>
+        {postings.length ? (
+          <div className="space-y-2 max-h-[66vh] overflow-y-auto pr-1">
+            {postings.map((posting) => (
+              <div key={posting.id} className="p-3 rounded-md" style={{ background: "var(--bg-soft-2)", border: "1px solid var(--hairline)" }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[14px] font-medium" style={{ color: "var(--ink)" }}>{posting.title || "未识别职位"}</span>
+                      <Badge tone={posting.status === "closed" ? "warning" : "positive"}>{posting.status === "closed" ? "已下线" : "在招"}</Badge>
+                      {posting.platform && <Badge tone="neutral">{PLATFORM_LABEL[posting.platform] || posting.platform}</Badge>}
+                    </div>
+                    <div className="text-[12px] mt-1" style={{ color: "var(--body)" }}>
+                      {[posting.department, posting.city].filter(Boolean).join(" · ") || "部门/城市未记录"}
+                    </div>
+                  </div>
+                  {posting.url && <a href={posting.url} target="_blank" rel="noreferrer" className="text-[12px] shrink-0" style={{ color: "var(--accent)" }}>打开职位</a>}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3 text-[12px]" style={{ color: "var(--body)" }}>
+                  <div><span style={{ color: "var(--mute)" }}>上线时间：</span>{fmtDateTime(posting.first_seen || posting.posted_at)}</div>
+                  <div><span style={{ color: "var(--mute)" }}>下线时间：</span>{fmtDateTime(posting.closed_at)}</div>
+                  {posting.last_seen && <div><span style={{ color: "var(--mute)" }}>最近看到：</span>{fmtDateTime(posting.last_seen)}</div>}
+                  {posting.refreshed_at && <div><span style={{ color: "var(--mute)" }}>最近刷新：</span>{fmtDateTime(posting.refreshed_at)}</div>}
+                </div>
+                <div className="mt-3">
+                  <div className="text-[12px] font-medium mb-1" style={{ color: "var(--ink)" }}>岗位信息</div>
+                  <div className="text-[12px] whitespace-pre-wrap max-h-32 overflow-y-auto" style={{ color: "var(--body)" }}>
+                    {posting.jd_text || "未抓取到 JD 正文；可点击“打开职位”查看原页面。"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title={`窗口内暂无${isReleased ? "新增" : "下线"} JD`} hint="调整时间范围或先同步招聘采集源后再查看。" />
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -155,19 +225,12 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
 
 function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any }) {
   const { data: settings } = useSettings();
-  const analyze = useAnalyzeJd();
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState("");
+  const analyze = useAnalyzeJd(brandId, range);
+  const result = analyze.data;
+  const error = analyze.error instanceof Error ? analyze.error.message : "";
 
   const run = async () => {
-    setError("");
-    setResult(null);
-    try {
-      const res = await analyze.mutateAsync({ brandId, range });
-      setResult(res);
-    } catch (e: any) {
-      setError(e?.message || "分析失败");
-    }
+    try { await analyze.mutateAsync({ brandId, range }); } catch { /* error is rendered below */ }
   };
 
   return (
@@ -332,7 +395,15 @@ function PostingDetailModal({ postingId, onClose }: { postingId?: string; onClos
 // ------------------------------------------------------------------- people tab
 function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigureSources: () => void }) {
   const { data: employees = [], isLoading } = useEmployees(brandId);
-  const { data: activities = [] } = useActivities(brandId);
+  const [activityProfile, setActivityProfile] = useState("all");
+  const [activityType, setActivityType] = useState("all");
+  const [activityKeyword, setActivityKeyword] = useState("");
+  const { data: activities = [] } = useActivities(brandId, undefined, {
+    profileIds: activityProfile === "all" ? undefined : [activityProfile],
+    activityType,
+    keyword: activityKeyword,
+    limit: 300,
+  });
   const sync = useEmployeesSync();
   const employeeImport = useEmployeeImport();
   const monitorSelection = useEmployeeMonitorSelection();
@@ -464,7 +535,24 @@ function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigu
       </Card>
 
       <Card>
-        <SectionTitle title="重点人员信号 Feed" subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据" />
+        <SectionTitle
+          title="重点人员信号 Feed"
+          subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据"
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={activityProfile} onChange={(event) => setActivityProfile(event.target.value)}>
+                <option value="all">全部人员</option>
+                {focusPeople.map((person) => <option key={person.id} value={person.id}>{person.name || person.external_id || "未识别姓名"}</option>)}
+              </Select>
+              <Select value={activityType} onChange={(event) => setActivityType(event.target.value)}>
+                <option value="all">全部动态</option>
+                <option value="post">公开动态</option>
+                <option value="profile_change">个人页变更</option>
+              </Select>
+              <Input value={activityKeyword} onChange={(event) => setActivityKeyword(event.target.value)} placeholder="搜索动态内容" className="w-[170px]" />
+            </div>
+          }
+        />
         {visibleActivities.length ? (
           <div className="space-y-2 max-h-[480px] overflow-y-auto">
             {visibleActivities.map((a) => (

@@ -151,8 +151,6 @@ export default function Creators() {
   const [platform, setPlatform] = useState("all");
   const [productId, setProductId] = useState("all");
   const [query, setQuery] = useState("");
-  const [report, setReport] = useState("");
-  const [reportError, setReportError] = useState("");
   const plat = platform === "all" ? undefined : platform;
   const selectedProductId = productId === "all" ? undefined : productId;
 
@@ -165,7 +163,9 @@ export default function Creators() {
   const { data: roster = [] } = useCreatorsRoster(brandId, plat, selectedProductId);
   const { data: records = [] } = useRecords({ brand_id: brandId, product_id: selectedProductId, dimension: "marketing", channel: "creators", platform: plat, q: query || undefined, ...rangeParams(range), limit: 60 });
   const sync = useCreatorsSync();
-  const reportMut = useCreatorsReport();
+  const reportMut = useCreatorsReport(brandId, selectedProductId);
+  const report = reportMut.data || "";
+  const reportError = reportMut.error instanceof Error ? reportMut.error.message : "";
 
   if (isLoading || !summary) return <Spinner />;
   const t = summary.totals || {};
@@ -178,12 +178,7 @@ export default function Creators() {
 
   const runReport = async () => {
     if (!brandId) return;
-    setReportError("");
-    try {
-      setReport(await reportMut.mutateAsync({ brandId, productId: selectedProductId }));
-    } catch (e: any) {
-      setReportError(e?.message || "生成失败");
-    }
+    try { await reportMut.mutateAsync({ brandId, productId: selectedProductId }); } catch { /* error is rendered below */ }
   };
 
   return (
@@ -198,8 +193,6 @@ export default function Creators() {
               value={productId}
               onChange={(event) => {
                 setProductId(event.target.value);
-                setReport("");
-                setReportError("");
               }}
               className="max-w-[190px]"
               aria-label="红人数据范围"
