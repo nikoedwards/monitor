@@ -820,9 +820,15 @@ _GOOGLE_ADS_RPC = "https://adstransparency.google.com/anji/_/rpc"
 _GOOGLE_ADS_REGION_CODE = 2840  # United States
 _GOOGLE_ADS_REGION = "US"
 _GOOGLE_ADS_PAGE_SIZE = 40
-_GOOGLE_ADS_MAX_PAGES = 5
-_GOOGLE_ADS_MAX_ADVERTISERS = 4
-_GOOGLE_ADS_MAX_PREVIEWS = 12
+# SearchCreatives is cursor based. Keep a high safety bound while following
+# every continuation token returned by the public endpoint so a large
+# advertiser page is not silently reduced to the first 200 creatives.
+_GOOGLE_ADS_MAX_PAGES = 25
+_GOOGLE_ADS_MAX_ADVERTISERS = 10
+# Preview scripts contain the copy/video fields omitted from SearchCreatives.
+# Fetch every unique preview URL in the normal crawl (the bound is a runaway
+# protection for a malformed response, not a sampling policy).
+_GOOGLE_ADS_MAX_PREVIEWS = 500
 _GOOGLE_ADS_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -955,6 +961,17 @@ def _google_preview_fields(preview_url: str, cache: dict[str, dict]) -> dict:
         value = first(patterns, decoded_text if key in {"destination_url", "final_url", "visible_url"} else text)
         if value:
             fields[key] = unquote(value) if key.endswith("url") else value
+    # Image-only previews often expose the asset through a renderer call
+    # instead of ``google_template_data.adData``. Preserve that thumbnail so
+    # distinct creatives do not collapse into identical text-only cards.
+    if "thumbnail_url" not in fields:
+        image_matches = re.findall(
+            r"insertPreviewImageContent\(\s*['\"][^'\"]*['\"]\s*,\s*['\"][^'\"]*['\"]\s*,\s*['\"]((?:\\.|[^'\"])*)['\"]",
+            text,
+            flags=re.I | re.S,
+        )
+        if image_matches:
+            fields["thumbnail_url"] = unquote(_google_js_unescape(image_matches[-1]))
     cache[preview_url] = fields
     return fields
 
@@ -1094,6 +1111,14 @@ def _google_public_payload(
         if value and value not in body_parts:
             body_parts.append(value)
     body = " · ".join(body_parts)
+    if not body:
+        # Image-only creatives legitimately have no headline or description.
+        # Using the advertiser as the body made every card look like a
+        # duplicate, even though the creative IDs and thumbnails were unique.
+        creative_type = clean_text(str(item.get("4") or ""))
+        body = f"图片素材 · 创意 {creative_id}"
+        if creative_type:
+            body += f" · 类型 {creative_type}"
     landing_url = fields.get("destination_url") or fields.get("final_url") or fields.get("visible_url")
     start_at = _google_timestamp(item.get("6"))
     last_seen_at = _google_timestamp(item.get("7"))
@@ -1163,7 +1188,12 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
     # another advertiser is not silently dropped.
     seen_creatives: set[tuple[str, str]] = set()
     preview_cache: dict[str, dict] = {}
-    queries = brand_queries(brand)[:4]
+    queries = brand_queries(brand)[:10]
+    configured_advertiser_ids = [
+        clean_text(str(value))
+        for value in (brand.get("_google_advertiser_ids") or [])
+        if isinstance(value, (str, int, float)) and clean_text(str(value))
+    ]
     report = {
         "matched_advertiser_ids": [],
         "queries_completed": 0,
@@ -1181,7 +1211,7 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
             suggestions = _google_advertiser_suggestions(query)
         except Exception:
             report["suggestion_failed"] = True
-            continue
+            suggestions = []
         report["queries_completed"] += 1
         if not isinstance(suggestions, list):
             report["suggestion_failed"] = True
@@ -1192,6 +1222,11 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
             if isinstance(advertiser, dict)
             and _google_name_matches_query(advertiser.get("name", ""), query, brand.get("name"))
         ]
+        if queries and query == queries[0] and configured_advertiser_ids:
+            matching = [
+                {"id": advertiser_id, "name": brand.get("name") or query}
+                for advertiser_id in configured_advertiser_ids
+            ] + matching
         # Do not attach an arbitrary suggestion when the advertiser name does
         # not match the monitored brand. Google sometimes returns a single
         # generic result for product-like queries; treating that as a match
@@ -1234,6 +1269,8 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
                     if not creative_id or creative_key in seen_creatives:
                         continue
                     seen_creatives.add(creative_key)
+                    if isinstance(item, dict) and not item.get("12") and advertiser.get("name"):
+                        item = {**item, "12": advertiser.get("name")}
                     raw_items.append((item, query))
                 raw_next_token = response.get("2") if isinstance(response, dict) else None
                 next_token = clean_text(str(raw_next_token)) if raw_next_token is not None else ""
@@ -1250,9 +1287,9 @@ def _collect_google_public_ads_with_report(brand: dict) -> tuple[list[dict], dic
                     report["pagination_truncated"] = True
                     break
                 page_token = next_token
-    # Image creatives expose a stable archive URL directly. Fetch a bounded
-    # number of preview scripts for richer copy/video thumbnails; fetching all
-    # scripts makes a daily public crawl unnecessarily slow and noisy.
+    # Image creatives expose a stable archive URL directly. Preview scripts
+    # carry the richer copy/video/landing fields, so fetch every unique script
+    # URL rather than sampling the first handful of creatives.
     priority_preview_urls: list[str] = []
     fallback_preview_urls: list[str] = []
     for item, _query in raw_items:
@@ -1303,7 +1340,24 @@ def _collect_google_public_ads(brand: dict) -> list[dict]:
 
 def collect_google_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     """Collect public Google Ads Transparency creatives without credentials."""
-    payloads, report = _collect_google_public_ads_with_report(brand)
+    advertiser_ids: list[str] = []
+    try:
+        rows = conn.execute(
+            "SELECT url, config_json FROM links WHERE brand_id = ? AND channel = 'ads' AND platform = 'google_ads'",
+            (brand.get("id"),),
+        ).fetchall()
+        for row in rows:
+            for value in (row["url"] or "", row["config_json"] or ""):
+                matches = re.findall(r"/advertiser/([A-Za-z0-9_-]+)", value)
+                matches.extend(re.findall(r"advertiser_id[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_-]+)", value))
+                for match in matches:
+                    if match not in advertiser_ids:
+                        advertiser_ids.append(match)
+    except sqlite3.Error:
+        pass
+    payloads, report = _collect_google_public_ads_with_report(
+        {**brand, "_google_advertiser_ids": advertiser_ids}
+    )
     if report.get("cleanup_eligible"):
         cleanup_google_ad_mismatches(conn, brand, report["matched_advertiser_ids"])
     return payloads

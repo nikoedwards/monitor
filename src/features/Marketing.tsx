@@ -888,9 +888,11 @@ function AdCard({ ad, onOpen }: { ad: MarketingAd; onOpen: () => void }) {
             <div className="truncate text-[13px] font-medium" style={{ color: "var(--ink)" }}>{advertiser}</div>
             <Badge tone={status === "active" ? "positive" : status === "stopped" ? "warning" : "neutral"}>{adStatusLabel(status)}</Badge>
           </div>
-          <div className="text-[12px] mt-1 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>{ad.title || ad.body || ad.description || "暂无文案"}</div>
+          <div className="text-[12px] mt-1 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>{ad.body || ad.description || ad.title || "暂无文案"}</div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] mt-2" style={{ color: "var(--mute)" }}>
             <span>{AD_SOURCE_LABEL[ad.source || ""] || ad.source || "广告库"}</span>
+            {ad.duplicate_count && ad.duplicate_count > 1 && <span>相同文案 {ad.duplicate_count} 条</span>}
+            {ad.source === "google_ads" && ad.source_ad_id && <span>素材 {ad.source_ad_id.split(":").pop()}</span>}
             {duration !== undefined && <span>持续 {duration} 天</span>}
             {score !== undefined && <span>稳定度 {Math.round(score)}</span>}
             {(ad.countries?.length || ad.country) && <span>{ad.countries?.length ? `${ad.countries.length} 个地区` : ad.country}</span>}

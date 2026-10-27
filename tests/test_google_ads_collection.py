@@ -138,6 +138,13 @@ def test_google_preview_fields_extracts_copy_urls_and_media_and_caches_result() 
     fetch.assert_called_once()
 
 
+def test_google_preview_fields_extracts_renderer_image_when_copy_is_absent() -> None:
+    script = "previewservice.insertPreviewImageContent('root', 'image', 'https://img.test/renderer.jpg', 480, 360);"
+    with patch.object(collectors, "fetch_bytes", return_value=script.encode("utf-8")):
+        fields = collectors._google_preview_fields("https://preview.test/image.js", {})
+    assert fields["thumbnail_url"] == "https://img.test/renderer.jpg"
+
+
 def test_google_public_payload_maps_lifecycle_copy_media_and_landing_url() -> None:
     item = _creative_item(image_url=None)
     preview_url = item["3"]["1"]["4"]
@@ -193,6 +200,15 @@ def test_google_public_payload_marks_old_creative_inactive_and_handles_image_htm
     assert payload["metrics"]["thumbnail_url"] == "https://img.test/archive.jpg"
     assert payload["metrics"]["ad_landing_url"] is None
     assert collectors._google_html_image('<img class="creative" src="https://img.test/archive.jpg">') == "https://img.test/archive.jpg"
+
+
+def test_google_image_only_payload_has_distinct_creative_copy() -> None:
+    item = _creative_item(creative_id="CR_IMAGE", image_url="https://img.test/archive.jpg")
+    payload = collectors._google_public_payload(item, {"id": "brand-1"}, "PLAUD")
+
+    assert payload is not None
+    assert payload["body"] == "图片素材 · 创意 CR_IMAGE · 类型 2"
+    assert payload["body"] != payload["title"]
     assert collectors._google_html_image("<div>no image</div>") is None
 
 
@@ -283,6 +299,23 @@ def test_collect_google_public_ads_does_not_use_unmatched_first_suggestion() -> 
 
     assert payloads == []
     search.assert_not_called()
+
+
+def test_collect_google_public_ads_uses_configured_advertiser_id() -> None:
+    item = _creative_item(advertiser_id="AR11608288606623367169", creative_id="CR_CONFIGURED")
+    with (
+        patch.object(collectors, "_google_advertiser_suggestions", return_value=[]),
+        patch.object(collectors, "_google_search_creatives", return_value={"1": [item]}),
+    ):
+        payloads = collectors._collect_google_public_ads({
+            "id": "brand-1",
+            "name": "PLAUD",
+            "monitoring_keywords_json": "[\"PLAUD\"]",
+            "_google_advertiser_ids": ["AR11608288606623367169"],
+        })
+    assert [payload["external_id"] for payload in payloads] == [
+        "brand-1:AR11608288606623367169:CR_CONFIGURED"
+    ]
 
 
 def test_google_collection_report_marks_complete_crawl_safe_for_cleanup() -> None:

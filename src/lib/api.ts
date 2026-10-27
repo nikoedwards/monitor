@@ -520,6 +520,7 @@ export interface MarketingAd {
   reach?: number | null;
   creative_changes?: number;
   variants?: number;
+  duplicate_count?: number;
   raw?: Record<string, unknown>;
 }
 
