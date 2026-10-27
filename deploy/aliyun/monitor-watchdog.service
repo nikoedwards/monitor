@@ -1,0 +1,8 @@
+[Unit]
+Description=Monitor service recovery check
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/monitor/deploy/aliyun/monitor-watchdog.sh

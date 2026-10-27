@@ -258,6 +258,29 @@ class SourceDeployer:
             "--force-recreate",
             "monitor",
         )
+        container = self.container_id(base_file)
+        if not container:
+            raise RuntimeError("Monitor container was not created")
+        # Compose configuration can drift from an already-created container.
+        # Make the runtime policy explicit so a later process exit self-heals.
+        self.run(
+            ["docker", "update", "--restart=unless-stopped", container],
+            timeout=30,
+        )
+        policy = self.run(
+            [
+                "docker",
+                "inspect",
+                container,
+                "--format",
+                "{{.HostConfig.RestartPolicy.Name}}",
+            ],
+            timeout=30,
+        )
+        if policy != "unless-stopped":
+            raise RuntimeError(
+                f"Monitor restart policy is {policy!r}, expected 'unless-stopped'"
+            )
 
     def install_base(self, contents):
         atomic_write(self.stable_base, contents)

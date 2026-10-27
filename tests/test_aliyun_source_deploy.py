@@ -107,6 +107,36 @@ class SourceDeploymentTests(unittest.TestCase):
         state = json.loads((self.state / "current.json").read_text())
         self.assertEqual(state["revision"], REVISION)
 
+    def test_start_enforces_restart_policy_on_created_container(self):
+        with patch.object(self.deployer, "compose") as compose, patch.object(
+            self.deployer, "container_id", return_value="container-id"
+        ), patch.object(
+            self.deployer,
+            "run",
+            side_effect=["", "unless-stopped"],
+        ) as run:
+            module.SourceDeployer.start(
+                self.deployer, self.project / "docker-compose.yml"
+            )
+
+        compose.assert_called_once_with(
+            self.project / "docker-compose.yml",
+            "up",
+            "-d",
+            "--no-build",
+            "--no-deps",
+            "--force-recreate",
+            "monitor",
+        )
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            ["docker", "update", "--restart=unless-stopped", "container-id"],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0][-1],
+            "{{.HostConfig.RestartPolicy.Name}}",
+        )
+
     def test_build_failure_never_stops_the_live_service(self):
         self.build_image.side_effect = RuntimeError("build failed")
 
