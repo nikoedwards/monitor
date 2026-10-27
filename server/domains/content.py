@@ -490,7 +490,7 @@ def _issue_priority_reason(records: list[dict], comparison_records: list[dict] |
         return f"负向内容在当前范围内的传播表现靠前：{'、'.join(details)}。"
     if impact["moderate"]:
         return "负向内容在当前范围内的传播表现高于多数帖子，已纳入相对影响评估。"
-    return "当前主要依据负向反馈量、投诉量和负向率判断。"
+    return ""
 
 
 def _topic_breakdown(records: list[dict], comparison_records: list[dict] | None = None) -> list[dict]:
