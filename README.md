@@ -25,7 +25,7 @@
 
 | 档位 | 含义 | 连接器 |
 | --- | --- | --- |
-| 第 1 档 | 免费、无需凭证、可直接采真实数据 | Google News、Reddit 搜索、YouTube/Instagram/TikTok 官方账号、App Store 评论、品牌站点分析、网页快照 |
+| 第 1 档 | 免费、无需凭证、可直接采真实数据 | Google News、Reddit 搜索、YouTube/Instagram/TikTok 官方账号、App Store / Google Play 评论、品牌站点分析、网页快照 |
 | 第 2 档 | 需配置凭证后启用 | Meta 广告库、YouTube、Discord、Facebook 群组 |
 | 第 3 档 | 难获取，预留接缝 + 手动录入 | Amazon 竞品销量、Instagram / TikTok / X 全站关键词发现、线下销售 |
 

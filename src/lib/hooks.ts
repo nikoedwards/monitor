@@ -190,7 +190,7 @@ export function useRefreshMarketShareData() {
   return useMutation({
     mutationFn: async (brandIds: string[]) => {
       const result = await Promise.all(
-        brandIds.map((brandId) => api.post(`/api/sources/app_store_reviews/collect${qs({ brand_id: brandId })}`)),
+        brandIds.flatMap((brandId) => ["app_store_reviews", "google_play_reviews"].map((sourceId) => api.post(`/api/sources/${sourceId}/collect${qs({ brand_id: brandId })}`))),
       );
       await api.post(`/api/market-share/snapshots/refresh${qs({ brand_ids: brandIds.join(",") })}`);
       return result;

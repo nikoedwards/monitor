@@ -15,6 +15,7 @@ class VocSourceTests(unittest.TestCase):
             ({"dimension": "marketing", "channel": "creators", "platform": "tiktok"}, "creator_comments"),
             ({"dimension": "voc", "channel": "app", "source_id": "app_store_reviews"}, "app_reviews"),
             ({"dimension": "platform", "channel": "app", "source_id": "app_store_reviews", "platform": "app_store"}, "app_reviews"),
+            ({"dimension": "voc", "channel": "app", "source_id": "google_play_reviews", "platform": "google_play"}, "app_reviews"),
             ({"dimension": "voc", "source_id": "manual_csv"}, "manual_feedback"),
         ]
 
@@ -123,6 +124,7 @@ class VocSourceTests(unittest.TestCase):
         records_by_filter = {
             ("platform", "app"): [
                 {"id": "metric", "dimension": "platform", "channel": "app", "source_id": "app_store_reviews", "data_type": "app_metric"},
+                {"id": "play-metric", "dimension": "platform", "channel": "app", "source_id": "google_play_reviews", "platform": "google_play", "data_type": "app_metric"},
                 {"id": "review", "dimension": "voc", "channel": "app", "source_id": "app_store_reviews", "data_type": "user_voice", "body": "The app is useful."},
             ],
         }

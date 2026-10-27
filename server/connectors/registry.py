@@ -53,6 +53,12 @@ REGISTRY: list[ConnectorSpec] = [
         collect=collectors.collect_app_store,
     ),
     ConnectorSpec(
+        id="google_play_reviews", name="Google Play 评分与评论", category="voc", dimension="voc",
+        tier=1, vendor="Google", sync_mode="scheduled", cadence="daily",
+        notes="通过 Google Play 公开详情页 JSON-LD 与 PlayStoreUi RPC 抓取 US/JP 累计评分、平均星级和最新评论；未配置链接时按品牌名自动发现应用。",
+        collect=collectors.collect_google_play,
+    ),
+    ConnectorSpec(
         id="brand_site", name="品牌站点分析", category="web", dimension="platform",
         tier=1, vendor="Web", sync_mode="manual",
         notes="抓取官网元数据 / JSON-LD 建立品牌档案与链接发现。",

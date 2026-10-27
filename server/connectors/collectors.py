@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 from ..config import CREDENTIALS, USER_AGENT
-from ..fetchers import FetchError, fetch_bytes, fetch_form_json, fetch_json, fetch_page, parse_rss
+from ..fetchers import FetchError, fetch_bytes, fetch_bytes_post, fetch_form_json, fetch_json, fetch_page, fetch_text, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
 from ..records import cleanup_google_ad_mismatches
 from ..relevance import google_news_match_evidence, query_match_evidence, reddit_post_id, search_query_parts
@@ -467,6 +467,7 @@ _DEFAULT_APP_STORE_COUNTRIES = (
     "TW", "IN", "BR", "MX", "IT", "ES", "NL", "ID", "TH", "VN",
 )
 _APP_STORE_DISCOVERY_COUNTRIES = ("US", "CN", "GB")
+_APP_STORE_REVIEW_COUNTRIES = ("US", "JP")
 _APP_STORE_MARKET_WORKERS = 6
 
 
@@ -682,21 +683,23 @@ def _configured_review_payloads(
         _touch_link(conn, row["id"], status="empty", error="App Store 链接中未找到应用 ID")
         return []
     app_id = match.group(1)
-    country = (row["region"] or "US").upper()[:2]
+    configured_country = (row["region"] or "US").upper()[:2]
+    countries = list(dict.fromkeys([configured_country, *_APP_STORE_REVIEW_COUNTRIES]))
     errors: list[str] = []
 
-    try:
-        payloads = _app_store_review_payloads(
-            brand,
-            app_id,
-            country,
-            link_id=row["id"],
-            product_id=row["product_id"],
-            url=row["url"],
-        )
-    except FetchError as exc:
-        payloads = []
-        errors.append(str(exc))
+    payloads: list[dict] = []
+    for country in countries:
+        try:
+            payloads.extend(_app_store_review_payloads(
+                brand,
+                app_id,
+                country,
+                link_id=row["id"] if country == configured_country else f"{row['id']}:{country}",
+                product_id=row["product_id"],
+                url=_app_store_storefront_url(row["url"], country, app_id),
+            ))
+        except FetchError as exc:
+            errors.append(f"{country}: {exc}")
 
     _touch_link(
         conn,
@@ -758,6 +761,21 @@ def _app_store_review_payloads(
     return payloads
 
 
+def _app_store_storefront_url(url: str, country: str, app_id: str) -> str:
+    """Return the same App Store listing under a specific storefront."""
+    value = clean_text(url)
+    try:
+        parsed = urlparse(value)
+        if parsed.netloc and parsed.path:
+            parts = parsed.path.split("/")
+            if len(parts) > 1 and parts[1]:
+                parts[1] = country.lower()
+                return urlunparse(parsed._replace(path="/".join(parts)))
+    except ValueError:
+        pass
+    return f"https://apps.apple.com/{country.lower()}/app/id{app_id}"
+
+
 def _discovered_app_payloads(brand: dict) -> list[dict]:
     portfolio = _discover_app_store_portfolio(brand)
     app_ids = [clean_text(str(app.get("trackId") or "")) for app in portfolio if app.get("trackId")]
@@ -784,16 +802,17 @@ def _discovered_app_payloads(brand: dict) -> list[dict]:
     for app in portfolio:
         app_id = clean_text(str(app.get("trackId") or ""))
         if app_id:
-            try:
-                payloads.extend(_app_store_review_payloads(
-                    brand,
-                    app_id,
-                    "US",
-                    link_id=f"auto-app-store:US:{app_id}",
-                    url=clean_text(app.get("trackViewUrl")),
-                ))
-            except FetchError:
-                continue
+            for country in _APP_STORE_REVIEW_COUNTRIES:
+                try:
+                    payloads.extend(_app_store_review_payloads(
+                        brand,
+                        app_id,
+                        country,
+                        link_id=f"auto-app-store:{country}:{app_id}",
+                        url=_app_store_storefront_url(clean_text(app.get("trackViewUrl")), country, app_id),
+                    ))
+                except FetchError:
+                    continue
     return payloads
 
 
@@ -812,6 +831,310 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
             row,
             has_metric=row["id"] in successful_links,
         ))
+    return payloads
+
+
+# ------------------------------------------------------------- Google Play
+# Google Play does not expose a free API for reviews.  The storefront page
+# exposes public JSON-LD metrics and its public PlayStoreUi RPC serves the
+# same newest-review stream used by the web client.  Keep this connector
+# credential-free, but retain the collection method in raw so users can see
+# exactly which public surface supplied each record.
+_GOOGLE_PLAY_REVIEW_COUNTRIES = ("US", "JP")
+_GOOGLE_PLAY_DISCOVERY_COUNTRIES = ("US", "JP", "GB")
+_GOOGLE_PLAY_MARKET_WORKERS = 4
+_GOOGLE_PLAY_MAX_DISCOVERY_APPS = 8
+_GOOGLE_PLAY_RPC = "https://play.google.com/_/PlayStoreUi/data/batchexecute"
+
+
+def _google_play_app_id(url: str) -> str:
+    match = re.search(r"(?:[?&]id=|/details\?id=)([A-Za-z0-9_.-]+)", clean_text(url))
+    return match.group(1) if match else ""
+
+
+def _google_play_storefront_url(app_id: str, country: str, *, lang: str = "en") -> str:
+    return (
+        "https://play.google.com/store/apps/details?"
+        f"id={quote_plus(app_id)}&hl={quote_plus(lang)}&gl={quote_plus(country.lower())}"
+    )
+
+
+def _google_play_json_ld(html: str) -> dict:
+    """Extract the application JSON-LD object from a Play storefront page."""
+    scripts = re.findall(
+        r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for script in scripts:
+        try:
+            item = json.loads(html_lib.unescape(script.strip()))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict) and (item.get("aggregateRating") or item.get("name")):
+            return item
+        if isinstance(item, list):
+            for candidate in item:
+                if isinstance(candidate, dict) and (candidate.get("aggregateRating") or candidate.get("name")):
+                    return candidate
+    return {}
+
+
+def _google_play_detail(brand: dict, app_id: str, country: str, *, link_id: str | None = None, product_id: str | None = None, discovery: str = "public_jsonld") -> dict | None:
+    html = fetch_text(_google_play_storefront_url(app_id, country), timeout=20)
+    detail = _google_play_json_ld(html)
+    rating_data = detail.get("aggregateRating") if isinstance(detail.get("aggregateRating"), dict) else {}
+    try:
+        rating = float(rating_data.get("ratingValue")) if rating_data.get("ratingValue") is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    try:
+        rating_count = max(0, int(float(rating_data.get("ratingCount") or 0)))
+    except (TypeError, ValueError):
+        rating_count = 0
+    if not app_id or rating_count <= 0:
+        return None
+    name = clean_text(detail.get("name")) or brand.get("name") or app_id
+    author = detail.get("author") if isinstance(detail.get("author"), dict) else {}
+    developer = clean_text(author.get("name")) if isinstance(author, dict) else ""
+    url = _google_play_storefront_url(app_id, country)
+    return {
+        "source_id": "google_play_reviews",
+        "brand_id": brand.get("id"),
+        "product_id": product_id,
+        "link_id": link_id or f"auto-google-play:{country}:{app_id}",
+        "external_id": f"{brand.get('id')}:google-play:{country}:{app_id}:metrics:{today()}",
+        "data_type": "app_metric",
+        "dimension": "platform",
+        "channel": "app",
+        "platform": "google_play",
+        "title": f"{name} Google Play 指标",
+        "body": f"{country} Google Play 累计评分 {rating_count}",
+        "url": url,
+        "region": country,
+        "metrics": {"rating": rating, "rating_count": rating_count, "rating_count_observed": True},
+        "raw": {
+            "package_name": app_id,
+            "app_name": name,
+            "developer": developer,
+            "rating_count": rating_count,
+            "average_rating": rating,
+            "storefront": country,
+            "public_data": True,
+            "collection_method": discovery,
+        },
+    }
+
+
+def _google_play_search_app_ids(brand: dict, country: str) -> list[str]:
+    name = clean_text(brand.get("name"))
+    if not name:
+        return []
+    url = (
+        "https://play.google.com/store/search?"
+        f"q={quote_plus(name)}&c=apps&hl=en&gl={quote_plus(country.lower())}"
+    )
+    html = fetch_text(url, timeout=20)
+    seen: set[str] = set()
+    ids: list[str] = []
+    for app_id in re.findall(r"/store/apps/details\?id=([A-Za-z0-9_.-]+)", html):
+        if app_id not in seen:
+            seen.add(app_id)
+            ids.append(app_id)
+        if len(ids) >= _GOOGLE_PLAY_MAX_DISCOVERY_APPS:
+            break
+    return ids
+
+
+def _google_play_discover_app_ids(brand: dict) -> list[str]:
+    for country in _GOOGLE_PLAY_DISCOVERY_COUNTRIES:
+        try:
+            ids = _google_play_search_app_ids(brand, country)
+        except FetchError:
+            continue
+        if ids:
+            brand_key = _app_store_identity(brand.get("name"))
+            # Search results often include adjacent competitors.  Inspect a
+            # small prefix of candidates and stop at the first seller/name
+            # match so automatic collection stays within a normal request
+            # budget even when the search page is large.
+            matches: list[str] = []
+            for app_id in ids[:4]:
+                try:
+                    detail = _google_play_json_ld(fetch_text(_google_play_storefront_url(app_id, country), timeout=20))
+                except FetchError:
+                    continue
+                author = detail.get("author") if isinstance(detail.get("author"), dict) else {}
+                developer = author.get("name") if isinstance(author, dict) else ""
+                candidate_key = _app_store_identity(detail.get("name"))
+                developer_key = _app_store_identity(developer)
+                if brand_key and (brand_key in candidate_key or brand_key in developer_key):
+                    matches.append(app_id)
+                    if len(matches) >= 1:
+                        break
+            # Do not attach an unrelated search result when the brand name is
+            # absent from both the app title and developer name.
+            return matches[:3]
+    return []
+
+
+def _google_play_review_body(app_id: str, count: int = 100, pagination_token: str | None = None) -> bytes:
+    # This is the public request shape used by the web client and by the
+    # google-play-scraper project.  Keeping it local avoids a runtime package
+    # dependency while preserving the public, credential-free integration.
+    score = "null"
+    device = "null"
+    app_ref = json.dumps([app_id, 7], separators=(",", ":"))
+    if pagination_token:
+        count_ref = f"[{count},null,{json.dumps(pagination_token)}]"
+    else:
+        count_ref = f"[{count}]"
+    reviews = f"[null,[2,2,{count_ref},null,[null,{score},null,null,null,null,null,null,{device}]],{app_ref}]"
+    request = [[[
+        "oCPfdb",
+        reviews,
+        None,
+        "generic",
+    ]]]
+    return urlencode({"f.req": json.dumps(request, separators=(",", ":")) + "\n"}).encode("utf-8")
+
+
+def _google_play_reviews(app_id: str, country: str, *, limit: int = 100) -> list[dict]:
+    url = f"{_GOOGLE_PLAY_RPC}?hl=en&gl={quote_plus(country.lower())}"
+    body = _google_play_review_body(app_id, count=min(100, max(1, limit)))
+    try:
+        raw = fetch_bytes_post(
+            url,
+            body,
+            timeout=20,
+            max_bytes=6_000_000,
+            headers={
+                "Accept": "application/json,text/plain,*/*",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        text = raw.decode("utf-8", errors="replace")
+        match = re.search(r"\)]}'\s*\n\s*([\s\S]+)", text)
+        if not match:
+            raise FetchError("Google Play reviews returned an invalid public RPC response")
+        envelope = json.loads(match.group(1))
+        payload = json.loads(envelope[0][2])
+    except (FetchError, TypeError, ValueError, IndexError, KeyError) as exc:
+        raise FetchError("Google Play reviews response could not be decoded") from exc
+    rows = payload[0] if isinstance(payload, list) and payload and isinstance(payload[0], list) else []
+    reviews: list[dict] = []
+    for row in rows[: max(0, limit)]:
+        if not isinstance(row, list) or len(row) < 7:
+            continue
+        review_id = clean_text(row[0])
+        user = row[1] if isinstance(row[1], list) else []
+        author = clean_text(user[0]) if user else ""
+        score = row[2]
+        body = clean_text(row[4])
+        thumbs = row[6]
+        created = row[5][0] if isinstance(row[5], list) and row[5] else None
+        try:
+            occurred_at = datetime.fromtimestamp(float(created), tz=timezone.utc).isoformat() if created else utc_now()
+        except (TypeError, ValueError, OverflowError):
+            occurred_at = utc_now()
+        reviews.append({
+            "review_id": review_id,
+            "author": author,
+            "body": body,
+            "rating": score,
+            "thumbs_up": thumbs,
+            "occurred_at": occurred_at,
+        })
+    return reviews
+
+
+def _google_play_review_payloads(brand: dict, app_id: str, country: str, *, link_id: str | None = None, product_id: str | None = None) -> list[dict]:
+    payloads: list[dict] = []
+    for review in _google_play_reviews(app_id, country):
+        review_id = review.get("review_id") or f"{app_id}:{country}:{review.get('occurred_at')}:{review.get('body')}"
+        payloads.append({
+            "source_id": "google_play_reviews",
+            "brand_id": brand.get("id"),
+            "product_id": product_id,
+            "link_id": link_id or f"auto-google-play:{country}:{app_id}",
+            # Review ids are usually globally unique, but prefixing the
+            # storefront keeps US and JP records separate if Google reuses an
+            # id across regional views.
+            "external_id": f"{country}:{review_id}",
+            "data_type": "user_voice",
+            "dimension": "voc",
+            "channel": "app",
+            "platform": "google_play",
+            "title": "Google Play 用户评价",
+            "author": review.get("author"),
+            "body": review.get("body") or "Google Play 用户评价",
+            "url": _google_play_storefront_url(app_id, country),
+            "region": country,
+            "occurred_at": review.get("occurred_at"),
+            "metrics": {"rating": review.get("rating"), "thumbs_up": review.get("thumbs_up")},
+            "raw": {
+                "package_name": app_id,
+                "storefront": country,
+                "rating": review.get("rating"),
+                "thumbs_up": review.get("thumbs_up"),
+                "collection_method": "playstoreui_batchexecute_public_rpc",
+            },
+        })
+    return payloads
+
+
+def _collect_google_play_markets(brand: dict, app_ids: list[str], rows_by_id: dict[str, sqlite3.Row] | None = None) -> list[dict]:
+    countries = list(_GOOGLE_PLAY_REVIEW_COUNTRIES)
+    workers = min(_GOOGLE_PLAY_MARKET_WORKERS, len(countries))
+
+    def collect(country: str) -> list[dict]:
+        payloads: list[dict] = []
+        for app_id in app_ids:
+            row = (rows_by_id or {}).get(app_id)
+            link_id = f"{row['id']}:{country}" if row else f"auto-google-play:{country}:{app_id}"
+            product_id = row["product_id"] if row else None
+            try:
+                metric = _google_play_detail(brand, app_id, country, link_id=link_id, product_id=product_id, discovery="configured_link_jsonld" if row else "brand_search_jsonld")
+                if metric:
+                    payloads.append(metric)
+                payloads.extend(_google_play_review_payloads(brand, app_id, country, link_id=link_id, product_id=product_id))
+            except FetchError:
+                continue
+        return payloads
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(collect, countries)
+        return [item for batch in results for item in batch]
+
+
+def collect_google_play(conn: sqlite3.Connection, brand: dict) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM links WHERE brand_id = ? AND platform = 'google_play' AND status = 'active'",
+        (brand.get("id"),),
+    ).fetchall()
+    rows_by_id: dict[str, sqlite3.Row] = {}
+    app_ids: list[str] = []
+    for row in rows:
+        app_id = _google_play_app_id(row["url"] or "")
+        if app_id:
+            rows_by_id[app_id] = row
+            app_ids.append(app_id)
+    if not app_ids:
+        app_ids = _google_play_discover_app_ids(brand)
+    if not app_ids:
+        for row in rows:
+            _touch_link(conn, row["id"], status="empty", error="未找到 Google Play 应用包名")
+        return []
+    payloads = _collect_google_play_markets(brand, list(dict.fromkeys(app_ids)), rows_by_id)
+    if rows:
+        for row in rows:
+            matched = [item for item in payloads if str(item.get("link_id") or "").startswith(f"{row['id']}:")]
+            _touch_link(
+                conn,
+                row["id"],
+                status="ok" if matched else "empty",
+                error="" if matched else "Google Play 公开页面未返回评分或评论",
+            )
     return payloads
 
 
