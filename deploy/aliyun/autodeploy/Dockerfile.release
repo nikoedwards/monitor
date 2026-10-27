@@ -2,7 +2,9 @@
 
 # The frontend is validated and built by GitHub Actions. Reusing that dist/
 # avoids repeating npm install on the production host.
-FROM python:3.12-slim AS runtime
+# Pin the production base layer so deployments reuse the target host cache
+# instead of resolving a moving tag from Docker Hub.
+FROM python:3.12-slim@sha256:5b8b1421ccb6a525860a77863c049eab5847076cda34e030c75a80c58faf3f3c AS runtime
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
