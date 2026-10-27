@@ -122,7 +122,7 @@ class SourceDeployer:
                 f"Command failed ({result.returncode}): {' '.join(args)}"
                 + (f"\n{detail}" if detail else "")
             )
-        return result.stdout.strip()
+        return (result.stdout or "").strip()
 
     def compose(self, base_file, *args):
         command = [
