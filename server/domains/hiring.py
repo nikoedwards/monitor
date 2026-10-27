@@ -487,6 +487,11 @@ def delete_employee(profile_id: str, conn: sqlite3.Connection = Depends(get_conn
 def list_activities(
     brand_id: str,
     profile_id: str | None = None,
+    profile_ids: str | None = None,
+    activity_type: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    keyword: str | None = None,
     limit: int = 100,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
@@ -494,6 +499,24 @@ def list_activities(
     if profile_id:
         clauses.append("a.profile_id = ?")
         params.append(profile_id)
+    if profile_ids:
+        ids = [value.strip() for value in profile_ids.split(",") if value.strip()]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"a.profile_id IN ({placeholders})")
+            params.extend(ids)
+    if activity_type and activity_type != "all":
+        clauses.append("a.activity_type = ?")
+        params.append(activity_type)
+    if start_date:
+        clauses.append("substr(COALESCE(a.posted_at, a.created_at), 1, 10) >= ?")
+        params.append(start_date)
+    if end_date:
+        clauses.append("substr(COALESCE(a.posted_at, a.created_at), 1, 10) <= ?")
+        params.append(end_date)
+    if keyword and keyword.strip():
+        clauses.append("lower(COALESCE(a.text, '')) LIKE ?")
+        params.append(f"%{keyword.strip().lower()}%")
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"""

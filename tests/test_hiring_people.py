@@ -4,14 +4,15 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from server.connectors.hiring.base import ProfileRef, ProfileSnapshot, RenderResult
+from server.connectors.hiring.base import ActivityRef, ProfileRef, ProfileSnapshot, RenderResult
 from server.connectors.hiring.linkedin import LinkedInPeopleProvider
-from server.connectors.hiring.runner import discover_linkedin_people_candidates, run_linkedin_people_collection
+from server.connectors.hiring.runner import _record_activities, discover_linkedin_people_candidates, run_linkedin_people_collection
 from server.db import SCHEMA
 from server.domains.hiring import (
     create_employee,
     employee_history,
     import_company_employees,
+    list_activities,
     update_employee,
     update_employee_monitor_selection,
 )
@@ -259,6 +260,32 @@ class HiringPeopleTests(unittest.TestCase):
 
         self.assertEqual(snapshot.status, "blocked")
         self.assertIn("登录", snapshot.error)
+
+    def test_activity_feed_filters_and_keeps_same_text_posts_with_different_urls(self):
+        profile = create_employee(
+            LinkedInProfileIn(
+                brand_id="brand-1",
+                profile_url="https://www.linkedin.com/in/ada-example/",
+                name="Ada Example",
+            ),
+            self.conn,
+        )
+        _record_activities(
+            self.conn,
+            profile,
+            [
+                ActivityRef(text="AI hiring update", url="https://www.linkedin.com/feed/update/1", posted_at="2026-10-26T10:00:00Z"),
+                ActivityRef(text="AI hiring update", url="https://www.linkedin.com/feed/update/2", posted_at="2026-10-27T10:00:00Z"),
+                ActivityRef(text="Quarterly planning", url="https://www.linkedin.com/feed/update/3", posted_at="2026-10-27T11:00:00Z"),
+            ],
+        )
+        all_items = list_activities("brand-1", conn=self.conn)
+        self.assertEqual(len(all_items["activities"]), 3)
+        filtered = list_activities(
+            "brand-1", activity_type="post", start_date="2026-10-27", keyword="ai", conn=self.conn
+        )
+        self.assertEqual(len(filtered["activities"]), 1)
+        self.assertEqual(filtered["activities"][0]["url"], "https://www.linkedin.com/feed/update/2")
 
 
 if __name__ == "__main__":
