@@ -10,6 +10,7 @@ from .config import SCHEDULER_ENABLED, SCHEDULER_SECONDS, WEB_SCHEDULER_SECONDS
 from .connectors.base import run_collector
 from .connectors.registry import REGISTRY
 from .db import db
+from .snapshot import SnapshotCaptureBusy
 from .util import today
 
 _started = False
@@ -165,6 +166,9 @@ def _run_due_web_snapshots() -> None:
                     capture_monitor(conn, monitor)
                 elif monitor_is_due(monitor, "check", now):
                     check_monitor(conn, monitor)
+        except SnapshotCaptureBusy:
+            logger.info("Skipping web snapshot while another capture is active for %s", monitor.get("id"))
+            continue
         except Exception:
             logger.exception("Web monitor scheduler failed for %s", monitor.get("id"))
             continue

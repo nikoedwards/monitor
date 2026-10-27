@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import unicodedata
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
@@ -37,8 +38,13 @@ ARCHIVE_REPLAY_VERSION = 5
 ARCHIVE_IMAGE_OPTIMIZE_THRESHOLD = 96_000
 ARCHIVE_IMAGE_MAX_DIMENSION = 1600
 ARCHIVE_IMAGE_WEBP_QUALITY = 78
-CAPTURE_MAX_ATTEMPTS = 3
-CAPTURE_RETRY_DELAYS_MS = (5_000, 15_000)
+CAPTURE_MAX_ATTEMPTS = 2
+CAPTURE_RETRY_DELAYS_MS = (2_000,)
+CAPTURE_SLOT = threading.BoundedSemaphore(1)
+CAPTURE_MIN_AVAILABLE_MB = int(os.environ.get("MONITOR_CAPTURE_MIN_AVAILABLE_MB", "256"))
+CAPTURE_NAVIGATION_TIMEOUT_MS = 15_000
+CAPTURE_RENDER_WAIT_TIMEOUT_MS = 8_000
+CAPTURE_BROWSER_TIMEOUT_SECONDS = 25
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
 _ARCHIVE_GUARD_MARKER = f'data-monitor-archive-guard="{ARCHIVE_REPLAY_VERSION}"'
 _ARCHIVE_GUARD_TAG_RE = re.compile(
@@ -55,6 +61,32 @@ _FALLBACK_FONT_CACHE: dict[bool, object] = {}
 
 class SnapshotCaptureError(RuntimeError):
     """A rendered page is not a trustworthy visual snapshot and must not be persisted."""
+
+
+class SnapshotCaptureBusy(RuntimeError):
+    """A Chromium capture is already running in this process."""
+
+
+def _available_memory_mb() -> int | None:
+    """Return the memory available to the container when Linux exposes it."""
+    try:
+        current_path = Path("/sys/fs/cgroup/memory.current")
+        limit_path = Path("/sys/fs/cgroup/memory.max")
+        if current_path.is_file() and limit_path.is_file():
+            current = int(current_path.read_text().strip())
+            limit_raw = limit_path.read_text().strip()
+            if limit_raw != "max":
+                limit = int(limit_raw)
+                return max(0, (limit - current) // (1024 * 1024))
+    except (OSError, ValueError):
+        pass
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return max(0, int(line.split()[1]) // 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
 
 
 def _capture_error_reason(status: int | None, page_url: str, body_text: str) -> str:
@@ -885,8 +917,11 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
-                timeout=20000,
-                args=["--disable-dev-shm-usage", "--no-sandbox"],
+                timeout=CAPTURE_NAVIGATION_TIMEOUT_MS,
+                args=[
+                    "--disable-dev-shm-usage", "--no-sandbox", "--disable-extensions",
+                    "--disable-background-networking", "--disable-sync", "--renderer-process-limit=1",
+                ],
             )
             context = browser.new_context(viewport={"width": 1440, "height": 1200})
             loaded: dict[str, tuple[str, bytes]] = {}
@@ -906,7 +941,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 navigation_error = ""
                 response = None
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=CAPTURE_NAVIGATION_TIMEOUT_MS)
                 except PlaywrightTimeoutError as exc:
                     navigation_error = str(exc)[:300]
                 capture_error = _inspect_playwright_page(page, response)
@@ -914,7 +949,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                     try:
                         page.wait_for_function(
                             "() => document.body && document.body.innerText.length > 100 && document.documentElement.scrollHeight > window.innerHeight",
-                            timeout=15000,
+                            timeout=CAPTURE_RENDER_WAIT_TIMEOUT_MS,
                         )
                     except PlaywrightTimeoutError:
                         page.wait_for_timeout(2000)
@@ -943,7 +978,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 response = None
                 navigation_error = ""
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=CAPTURE_NAVIGATION_TIMEOUT_MS)
                 except PlaywrightTimeoutError as exc:
                     navigation_error = str(exc)[:300]
                 capture_error = _inspect_playwright_page(page, response)
@@ -951,7 +986,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                     try:
                         page.wait_for_function(
                             "() => document.body && document.body.innerText.length > 100 && document.documentElement.scrollHeight > window.innerHeight",
-                            timeout=15000,
+                            timeout=CAPTURE_RENDER_WAIT_TIMEOUT_MS,
                         )
                     except PlaywrightTimeoutError:
                         page.wait_for_timeout(2000)
@@ -969,7 +1004,7 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 )
             media = _prepare_page_for_full_capture(page)
             try:
-                page.wait_for_load_state("networkidle", timeout=8000)
+                page.wait_for_load_state("networkidle", timeout=5_000)
             except PlaywrightTimeoutError:
                 page.wait_for_timeout(1000)
             page.screenshot(path=str(png_path), full_page=True, animations="disabled", caret="hide")
@@ -1063,7 +1098,7 @@ def _subprocess_capture(url: str, png_path: Path) -> dict | None:
                 "--no-first-run", "--no-default-browser-check", "--window-size=1440,1200", f"--screenshot={png_path}", url,
             ]
             try:
-                result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=45)
+                result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=CAPTURE_BROWSER_TIMEOUT_SECONDS)
                 if result.returncode == 0 and png_path.exists() and png_path.stat().st_size > 0:
                     return {"method": "headless_browser", "browser": browser}
                 errors.append((result.stderr or result.stdout or f"exit {result.returncode}").strip()[:200])
@@ -1245,7 +1280,7 @@ def upgrade_snapshot_fallback_images(root: Path = SNAPSHOT_DIR) -> dict[str, str
     return migrated
 
 
-def capture_artifacts(
+def _capture_artifacts_unlocked(
     url: str,
     title: str,
     text: str,
@@ -1316,6 +1351,46 @@ def capture_artifacts(
         "error": error,
         "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
     }
+
+
+def capture_artifacts(
+    url: str,
+    title: str,
+    text: str,
+    html: str,
+    base_name: str,
+    *,
+    prefetch_error: str = "",
+) -> tuple[str, str, dict]:
+    """Capture one page while protecting the host from Chromium pile-ups.
+
+    The scheduler and the HTTP request handler share this non-blocking slot.
+    A second request fails immediately so it cannot accumulate waiting worker
+    threads or browser processes while the first capture is stuck.
+    """
+    if not CAPTURE_SLOT.acquire(blocking=False):
+        raise SnapshotCaptureBusy("截图引擎正在处理另一个任务，请稍后重试")
+    try:
+        available_memory_mb = _available_memory_mb()
+        if available_memory_mb is not None and available_memory_mb < CAPTURE_MIN_AVAILABLE_MB:
+            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            png_filename = f"{base_name}.png"
+            html_filename = f"{base_name}.html"
+            error = f"可用内存仅 {available_memory_mb} MB（阈值 {CAPTURE_MIN_AVAILABLE_MB} MB），已跳过 Chromium"
+            logger.warning("Skipping Chromium capture for %s: %s", url, error)
+            _write_raster_fallback(png_filename, url, title, text, error)
+            _write_fallback_archive(html_filename, url, title, html, text, error)
+            return png_filename, html_filename, {
+                "method": "raster_fallback",
+                "resource_guard": "low_memory",
+                "error": error,
+                "archive": {"self_contained": False, "archive_size": (SNAPSHOT_DIR / html_filename).stat().st_size},
+            }
+        return _capture_artifacts_unlocked(
+            url, title, text, html, base_name, prefetch_error=prefetch_error,
+        )
+    finally:
+        CAPTURE_SLOT.release()
 
 
 def capture_image(url: str, title: str, text: str, base_name: str) -> tuple[str, dict]:
