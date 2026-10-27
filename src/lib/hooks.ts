@@ -757,10 +757,10 @@ export function useEmployeeMutations() {
   };
 }
 
-export function useActivities(brandId?: string, profileId?: string) {
+export function useActivities(brandId?: string, profileId?: string, filters?: { profileIds?: string[]; activityType?: string; startDate?: string; endDate?: string; keyword?: string; limit?: number }) {
   return useQuery({
-    queryKey: ["li-activities", brandId, profileId],
-    queryFn: () => api.get<{ activities: import("./api").LinkedInActivity[] }>(`/api/hiring/activities${qs({ brand_id: brandId, profile_id: profileId })}`).then((d) => d.activities),
+    queryKey: ["li-activities", brandId, profileId, filters],
+    queryFn: () => api.get<{ activities: import("./api").LinkedInActivity[] }>(`/api/hiring/activities${qs({ brand_id: brandId, profile_id: profileId, profile_ids: filters?.profileIds?.join(","), activity_type: filters?.activityType, start_date: filters?.startDate, end_date: filters?.endDate, keyword: filters?.keyword, limit: filters?.limit })}`).then((d) => d.activities),
     enabled: !!brandId,
   });
 }

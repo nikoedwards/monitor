@@ -402,7 +402,15 @@ function PostingDetailModal({ postingId, onClose }: { postingId?: string; onClos
 // ------------------------------------------------------------------- people tab
 function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigureSources: () => void }) {
   const { data: employees = [], isLoading } = useEmployees(brandId);
-  const { data: activities = [] } = useActivities(brandId);
+  const [activityProfile, setActivityProfile] = useState("all");
+  const [activityType, setActivityType] = useState("all");
+  const [activityKeyword, setActivityKeyword] = useState("");
+  const { data: activities = [] } = useActivities(brandId, undefined, {
+    profileIds: activityProfile === "all" ? undefined : [activityProfile],
+    activityType,
+    keyword: activityKeyword,
+    limit: 300,
+  });
   const sync = useEmployeesSync();
   const employeeImport = useEmployeeImport();
   const monitorSelection = useEmployeeMonitorSelection();
@@ -534,7 +542,24 @@ function PeopleTab({ brandId, onConfigureSources }: { brandId: string; onConfigu
       </Card>
 
       <Card>
-        <SectionTitle title="重点人员信号 Feed" subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据" />
+        <SectionTitle
+          title="重点人员信号 Feed"
+          subtitle="整合个人页职位/头衔变化与 LinkedIn 公开动态，作为招聘趋势的补充证据"
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={activityProfile} onChange={(event) => setActivityProfile(event.target.value)}>
+                <option value="all">全部人员</option>
+                {focusPeople.map((person) => <option key={person.id} value={person.id}>{person.name || person.external_id || "未识别姓名"}</option>)}
+              </Select>
+              <Select value={activityType} onChange={(event) => setActivityType(event.target.value)}>
+                <option value="all">全部动态</option>
+                <option value="post">公开动态</option>
+                <option value="profile_change">个人页变更</option>
+              </Select>
+              <Input value={activityKeyword} onChange={(event) => setActivityKeyword(event.target.value)} placeholder="搜索动态内容" className="w-[170px]" />
+            </div>
+          }
+        />
         {visibleActivities.length ? (
           <div className="space-y-2 max-h-[480px] overflow-y-auto">
             {visibleActivities.map((a) => (

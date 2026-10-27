@@ -799,7 +799,15 @@ def marketing_ads(brand_id: str | None = None, days: int = 30, start_date: str |
     if source: where.append("source_id = ?"); params.append(source)
     if q: where.append("(page_name LIKE ? OR creative_body LIKE ?)"); params += [f"%{q}%", f"%{q}%"]
     rows = conn.execute(f"SELECT * FROM ad_entities WHERE {' AND '.join(where)} ORDER BY last_seen_at DESC LIMIT ?", (*params, max(1, min(limit, 1000)))).fetchall()
-    return {"ads": [_ad_entity_dict(row) for row in rows], "start_date": start, "end_date": end}
+    ads = [_ad_entity_dict(row) for row in rows]
+    duplicate_counts = Counter(
+        str(item.get("creative_hash"))
+        for item in ads
+        if item.get("creative_hash")
+    )
+    for item in ads:
+        item["duplicate_count"] = duplicate_counts.get(str(item.get("creative_hash")), 1) if item.get("creative_hash") else 1
+    return {"ads": ads, "start_date": start, "end_date": end}
 
 
 @router.get("/marketing/ads/summary")

@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     records.add_argument("--start-date"); records.add_argument("--end-date"); records.add_argument("--limit", type=int, default=50)
     query = sub.add_parser("query", help="query one integration dataset")
     query.add_argument("--json", action="store_true", dest="as_json", help="print JSON")
-    query.add_argument("dataset", choices=("records", "brands", "products", "links", "sources", "sales_metrics", "job_postings", "web_monitors", "web_snapshots"))
+    query.add_argument("dataset", help="dataset name; use `overview` or the manifest endpoint to inspect available datasets")
     query.add_argument("--brand-id"); query.add_argument("--q"); query.add_argument("--start-date"); query.add_argument("--end-date"); query.add_argument("--limit", type=int, default=50)
     args = parser.parse_args(argv)
     try:
