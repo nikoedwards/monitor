@@ -63,7 +63,7 @@ export function TrendChart({ data, keys, valueFormatter, interactive = false }: 
   return (
     <div>
       <ResponsiveContainer width="100%" height={220}>
-        <AreaChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+        <AreaChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
         <defs>
           {keys.map((k) => (
             <linearGradient key={k.key} id={`g-${k.key}`} x1="0" y1="0" x2="0" y2="1">
@@ -74,7 +74,7 @@ export function TrendChart({ data, keys, valueFormatter, interactive = false }: 
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
-        <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 52 : 36} />
+        <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} allowDecimals={false} width={valueFormatter ? 64 : 48} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
         {visibleKeys.map((k) => (
           <Area key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} fill={`url(#g-${k.key})`} strokeWidth={2} />
@@ -89,10 +89,10 @@ export function TrendChart({ data, keys, valueFormatter, interactive = false }: 
 export function MultiLineChart({ data, keys, valueFormatter }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string }) {
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <LineChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+      <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
-        <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} width={valueFormatter ? 52 : 40} />
+        <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} width={valueFormatter ? 64 : 48} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
         {keys.map((k) => (
           <Line key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} strokeWidth={2.25} dot={false} connectNulls />
@@ -105,10 +105,10 @@ export function MultiLineChart({ data, keys, valueFormatter }: { data: any[]; ke
 export function SimpleLine({ data, dataKey, name, color }: { data: any[]; dataKey: string; name: string; color: string }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
-      <LineChart data={data} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+      <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
         <XAxis dataKey="date" tick={AXIS} tickFormatter={(v) => String(v).slice(5)} axisLine={false} tickLine={false} minTickGap={24} />
-        <YAxis tick={AXIS} axisLine={false} tickLine={false} width={44} />
+        <YAxis tick={AXIS} axisLine={false} tickLine={false} width={64} />
         <Tooltip content={<TooltipBox />} />
         <Line type="monotone" dataKey={dataKey} name={name} stroke={color} strokeWidth={2} dot={false} />
       </LineChart>
