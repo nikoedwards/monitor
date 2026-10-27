@@ -55,7 +55,7 @@ REGISTRY: list[ConnectorSpec] = [
     ConnectorSpec(
         id="google_play_reviews", name="Google Play 评分与评论", category="voc", dimension="voc",
         tier=1, vendor="Google", sync_mode="scheduled", cadence="daily",
-        notes="通过 Google Play 公开详情页 JSON-LD 与 PlayStoreUi RPC 抓取 US/JP 累计评分、平均星级和最新评论；未配置链接时按品牌名自动发现应用。",
+        notes="通过 Google Play 公开详情页 JSON-LD 抓取 US/JP 累计评分与平均星级，并从公开 PlayStoreUi RPC 抓取全球最新评论；未配置链接时按品牌名自动发现应用。",
         collect=collectors.collect_google_play,
     ),
     ConnectorSpec(
