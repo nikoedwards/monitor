@@ -22,6 +22,7 @@ from ..snapshot import (
     analyze_change,
     capture_artifacts,
     compare_visuals,
+    SnapshotCaptureBusy,
     text_hash,
     visual_comparison_image,
 )
@@ -428,6 +429,8 @@ def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
     for url in urls:
         try:
             snapshots.append(_capture_one(conn, monitor, url))
+        except SnapshotCaptureBusy:
+            raise
         except FetchError as exc:
             errors.append(str(exc))
         except Exception as exc:
@@ -673,7 +676,10 @@ def create_monitor(payload: WebMonitorIn, conn: sqlite3.Connection = Depends(get
         ),
     )
     monitor = dict(conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone())
-    snapshots = capture_monitor(conn, monitor) if payload.capture_now else []
+    try:
+        snapshots = capture_monitor(conn, monitor) if payload.capture_now else []
+    except SnapshotCaptureBusy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
     result = monitor_to_dict(conn, conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone())
     result["snapshots"] = snapshots
     return result
@@ -747,7 +753,10 @@ def capture(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
     row = conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    snapshots = capture_monitor(conn, dict(row))
+    try:
+        snapshots = capture_monitor(conn, dict(row))
+    except SnapshotCaptureBusy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
     return {"snapshots": snapshots, "captured": len(snapshots)}
 
 

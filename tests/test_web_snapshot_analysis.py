@@ -30,7 +30,9 @@ from server.domains.web import (
 )
 from server.fetchers import FetchError
 from server.snapshot import (
+    CAPTURE_SLOT,
     SnapshotCaptureError,
+    SnapshotCaptureBusy,
     _capture_error_reason,
     _optimize_archive_image,
     _playwright_capture,
@@ -70,6 +72,33 @@ class TextDiffTests(unittest.TestCase):
 
 
 class VisualDiffTests(unittest.TestCase):
+    def test_capture_rejects_when_another_capture_holds_slot(self):
+        self.assertTrue(CAPTURE_SLOT.acquire(blocking=False))
+        try:
+            with self.assertRaises(SnapshotCaptureBusy):
+                capture_artifacts("https://example.com", "Example", "text", "", "busy")
+        finally:
+            CAPTURE_SLOT.release()
+
+    def test_capture_skips_browser_when_memory_is_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch("server.snapshot._available_memory_mb", return_value=64),
+                patch("server.snapshot._playwright_capture") as playwright_capture,
+                patch("server.snapshot._subprocess_capture") as subprocess_capture,
+            ):
+                screenshot, archive, meta = capture_artifacts(
+                    "https://example.com", "Example", "text", "<p>text</p>", "low-memory",
+                )
+            self.assertEqual(meta["resource_guard"], "low_memory")
+            self.assertEqual(meta["method"], "raster_fallback")
+            self.assertTrue((root / screenshot).is_file())
+            self.assertTrue((root / archive).is_file())
+            playwright_capture.assert_not_called()
+            subprocess_capture.assert_not_called()
+
     def test_identical_images_have_no_visual_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -467,7 +496,7 @@ class ArchiveFallbackTests(unittest.TestCase):
                     self.skipTest("Playwright Chromium unavailable")
                 self.assertNotIn("error", result)
                 self.assertTrue(result["source_html_fallback"])
-                self.assertEqual(result["attempts"], 4)
+                self.assertEqual(result["attempts"], 3)
                 self.assertTrue((root / "page.png").stat().st_size > 0)
                 self.assertIn("Recovered real page content", (root / "page.html").read_text(encoding="utf-8"))
         finally:
