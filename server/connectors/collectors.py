@@ -840,7 +840,8 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
 # same newest-review stream used by the web client.  Keep this connector
 # credential-free, but retain the collection method in raw so users can see
 # exactly which public surface supplied each record.
-_GOOGLE_PLAY_REVIEW_COUNTRIES = ("US", "JP")
+_GOOGLE_PLAY_REVIEW_COUNTRIES = ("US",)
+_GOOGLE_PLAY_METRIC_COUNTRIES = ("US", "JP")
 _GOOGLE_PLAY_DISCOVERY_COUNTRIES = ("US", "JP", "GB")
 _GOOGLE_PLAY_MARKET_WORKERS = 4
 _GOOGLE_PLAY_MAX_DISCOVERY_APPS = 8
@@ -1084,7 +1085,7 @@ def _google_play_review_payloads(brand: dict, app_id: str, country: str, *, link
 
 
 def _collect_google_play_markets(brand: dict, app_ids: list[str], rows_by_id: dict[str, sqlite3.Row] | None = None) -> list[dict]:
-    countries = list(_GOOGLE_PLAY_REVIEW_COUNTRIES)
+    countries = list(_GOOGLE_PLAY_METRIC_COUNTRIES)
     workers = min(_GOOGLE_PLAY_MARKET_WORKERS, len(countries))
 
     def collect(country: str) -> list[dict]:
@@ -1097,7 +1098,8 @@ def _collect_google_play_markets(brand: dict, app_ids: list[str], rows_by_id: di
                 metric = _google_play_detail(brand, app_id, country, link_id=link_id, product_id=product_id, discovery="configured_link_jsonld" if row else "brand_search_jsonld")
                 if metric:
                     payloads.append(metric)
-                payloads.extend(_google_play_review_payloads(brand, app_id, country, link_id=link_id, product_id=product_id))
+                if country in _GOOGLE_PLAY_REVIEW_COUNTRIES:
+                    payloads.extend(_google_play_review_payloads(brand, app_id, country, link_id=link_id, product_id=product_id))
             except FetchError:
                 continue
         return payloads

@@ -80,7 +80,7 @@ class GooglePlayCollectorTests(unittest.TestCase):
         self.assertEqual(set(_GOOGLE_PLAY_REVIEW_COUNTRIES), {
             item["region"] for item in payloads if item["data_type"] == "user_voice"
         })
-        self.assertEqual(2, reviews.call_count)
+        self.assertEqual(len(_GOOGLE_PLAY_REVIEW_COUNTRIES), reviews.call_count)
         self.assertEqual(2, detail.call_count)
 
 
