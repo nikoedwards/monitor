@@ -54,8 +54,37 @@ def _generate(cfg: dict, records: list[dict]) -> dict[str, str]:
         if summaries.keys() != expected:
             raise ValueError("Incomplete summaries")
         return summaries
+    except ai.LlmError as exc:
+        # A malformed JSON response is a response-format failure, rather than
+        # a transport/configuration failure.  Keep a stable error message so a
+        # multi-record request can be recovered one record at a time below.
+        raise ai.LlmError("中文摘要格式不正确，请重试。") from exc
     except (ValueError, TypeError, KeyError) as exc:
         raise ai.LlmError("中文摘要格式不正确，请重试。") from exc
+
+
+def _generate_with_recovery(cfg: dict, records: list[dict]) -> dict[str, str]:
+    """Generate a batch, recovering valid records when the batch is malformed.
+
+    LLMs occasionally omit one item or add an extra sentence in a JSON batch.
+    Retrying each item keeps one bad response from hiding otherwise valid
+    summaries. Network and provider errors are still returned immediately.
+    """
+    try:
+        return _generate(cfg, records)
+    except ai.LlmError as exc:
+        if len(records) <= 1 or str(exc) != "中文摘要格式不正确，请重试。":
+            raise
+
+    recovered: dict[str, str] = {}
+    for record in records:
+        try:
+            recovered.update(_generate(cfg, [record]))
+        except ai.LlmError:
+            continue
+    if not recovered:
+        raise ai.LlmError("中文摘要格式不正确，请重试。")
+    return recovered
 
 
 def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str]) -> dict:
@@ -79,7 +108,7 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str])
             if not record or not ((record.get("title") or "").strip() or (record.get("body") or "").strip()):
                 continue
             saved = cached.get(rid)
-            if saved and saved["source_hash"] == source_hash(record) and _is_recent(saved.get("created_at")):
+            if saved and saved["source_hash"] == source_hash(record) and _is_recent(saved["created_at"]):
                 result[rid] = {"status": "ready", "summary": saved["summary"]}
             else:
                 pending.append(record)
@@ -90,13 +119,16 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str])
                     result[record["id"]] = {"status": "unconfigured", "summary": None}
             else:
                 try:
-                    generated = _generate(cfg, pending)
+                    generated = _generate_with_recovery(cfg, pending)
                 except ai.LlmError:
                     for record in pending:
                         result[record["id"]] = {"status": "error", "summary": None}
                 else:
                     for record in pending:
-                        summary = generated[record["id"]]
+                        summary = generated.get(record["id"])
+                        if not summary:
+                            result[record["id"]] = {"status": "error", "summary": None}
+                            continue
                         conn.execute(
                             "INSERT INTO community_post_summaries (record_id, source_hash, summary, created_at) "
                             "VALUES (?, ?, ?, ?) ON CONFLICT(record_id) DO UPDATE SET "

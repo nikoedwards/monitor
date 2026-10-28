@@ -54,6 +54,18 @@ class CommunitySummaryTests(unittest.TestCase):
         self.assertEqual(1, llm.call_count)
         self.assertIn("仍无法停止", result["summaries"]["siri"]["summary"])
 
+    def test_malformed_batch_recovers_valid_records_individually(self):
+        malformed = self.response(siri="用户希望开始录音")
+        with patch(
+            "server.community_summaries.ai.call_llm",
+            side_effect=[malformed, self.response(siri="用户希望通过 Siri 控制录音"), self.response(case="用户反馈磁吸保护壳在折叠手机时会卡住")],
+        ) as llm:
+            result = summarize_community_records(self.conn, ["siri", "case"])
+        self.assertEqual(3, llm.call_count)
+        self.assertEqual("ready", result["summaries"]["siri"]["status"])
+        self.assertEqual("ready", result["summaries"]["case"]["status"])
+        self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM community_post_summaries").fetchone()[0])
+
     def test_missing_empty_and_other_channel_records_are_not_sent_to_model(self):
         self.conn.execute("UPDATE records SET title = '', body = '' WHERE id = 'siri'")
         with patch("server.community_summaries.ai.call_llm") as llm:
@@ -100,6 +112,9 @@ class CommunitySummaryTests(unittest.TestCase):
             result = client.post("/api/records/community-summaries", json={"record_ids": ["siri"]})
             self.assertEqual(200, result.status_code)
             self.assertEqual("ready", result.json()["summaries"]["siri"]["status"])
+            cached = client.post("/api/records/community-summaries", json={"record_ids": ["siri"]})
+            self.assertEqual(200, cached.status_code)
+            self.assertEqual("ready", cached.json()["summaries"]["siri"]["status"])
 
 
 if __name__ == "__main__":
