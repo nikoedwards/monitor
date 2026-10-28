@@ -184,7 +184,7 @@ export default function Marketing() {
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
 
   return (
-    <div className="space-y-6">
+    <div className={`space-y-6${isCommunity ? " break-anywhere" : ""}`}>
       <SectionTitle
         title="营销监控"
         subtitle="媒体公关、广告、红人、社群与社交声量"
