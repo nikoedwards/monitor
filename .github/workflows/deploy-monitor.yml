@@ -52,8 +52,10 @@ jobs:
             -o StrictHostKeyChecking=yes
             -o "UserKnownHostsFile=$tmp/known_hosts"
             -o ConnectTimeout=20
-            -o ServerAliveInterval=20
-            -o ServerAliveCountMax=15
+            -o ConnectionAttempts=1
+            -o TCPKeepAlive=yes
+            -o ServerAliveInterval=10
+            -o ServerAliveCountMax=6
           )
 
           if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
@@ -64,6 +66,25 @@ jobs:
             echo "ALIYUN_MONITOR_HOST must be a hostname or IPv4 address" >&2
             exit 2
           fi
+
+          ssh_retry() {
+            local attempt rc
+            for attempt in $(seq 1 12); do
+              if ssh "${ssh_args[@]}" "$@"; then
+                return 0
+              else
+                rc=$?
+              fi
+              if [[ "$attempt" -eq 12 ]]; then
+                return "$rc"
+              fi
+              echo "SSH preflight attempt $attempt/12 failed; retrying in 10 seconds" >&2
+              sleep 10
+            done
+          }
+
+          echo "Checking Aliyun SSH endpoint before uploading the release" >&2
+          ssh_retry "root@$SSH_HOST" true
 
           unpack_script=$(cat <<'UNPACK'
           set -euo pipefail
@@ -119,6 +140,7 @@ jobs:
           interrupted() {
             if [[ -n "$deploy_pid" ]]; then
               kill -TERM "$deploy_pid" 2>/dev/null || true
+              kill -TERM -- "-$deploy_pid" 2>/dev/null || true
               wait "$deploy_pid" || true
             fi
             exit 130
