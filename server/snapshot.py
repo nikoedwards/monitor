@@ -1135,6 +1135,7 @@ def _fallback_font(*, bold: bool = False):
                 r"C:\Windows\Fonts\segoeui.ttf",
             ]
         candidates += [
+            str(Path(__file__).resolve().parent / "assets" / "fonts" / "NotoSansCJKsc-Regular.otf"),
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
