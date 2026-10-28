@@ -854,6 +854,10 @@ def _repair_legacy_sentiment_false_positives(conn: sqlite3.Connection) -> None:
     negative evidence, so explicitly supplied genuine negative labels remain
     untouched.
     """
+    migration_key = "migration.legacy_sentiment_false_positives.v1"
+    if conn.execute("SELECT 1 FROM settings WHERE key = ?", (migration_key,)).fetchone():
+        return
+
     from .nlp import NEGATIVE_TERMS, _term_matches, analyze_text
 
     rows = conn.execute(
@@ -862,15 +866,24 @@ def _repair_legacy_sentiment_false_positives(conn: sqlite3.Connection) -> None:
     for row in rows:
         text = f"{row['title'] or ''} {row['body'] or ''}".strip()
         lowered = text.lower()
-        analysis = analyze_text(text)
-        explanation = analysis.get("sentiment_explanation") or {}
-        if analysis["sentiment"] == "negative" or explanation.get("negative_terms"):
-            continue
+        # The old implementation ran the full NLP analyzer for every negative
+        # record on every startup.  A deployment with a few thousand long
+        # records could therefore spend minutes before uvicorn answered health
+        # checks.  First do the cheap substring check and only analyze rows
+        # that can actually contain a legacy false-positive match.
         legacy_matches = [
             term for term in NEGATIVE_TERMS
             if term in lowered and not _term_matches(lowered, term)
         ]
         if not legacy_matches:
+            continue
+        try:
+            analysis = analyze_text(text)
+        except Exception:
+            logger.exception("Failed to repair legacy sentiment for record %s", row["id"])
+            continue
+        explanation = analysis.get("sentiment_explanation") or {}
+        if analysis["sentiment"] == "negative" or explanation.get("negative_terms"):
             continue
         conn.execute(
             """
@@ -886,6 +899,11 @@ def _repair_legacy_sentiment_false_positives(conn: sqlite3.Connection) -> None:
                 row["id"],
             ),
         )
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (migration_key, "done", utc_now()),
+    )
 
 
 def _backfill_brand_ids(conn: sqlite3.Connection) -> None:

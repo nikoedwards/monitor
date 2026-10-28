@@ -1,8 +1,9 @@
 """Logged-out Bing discovery for Instagram and TikTok creators.
 
-Search engines are used only to discover public profile URLs.  Actual post
-normalization is delegated to the existing Instagram/TikTok public adapters,
-which do not use credentials or bypass private/login-gated content.
+Search engines and explicitly imported candidates are used only to discover
+public profile URLs. Actual post normalization is delegated to the existing
+Instagram/TikTok public adapters, which do not use credentials or bypass
+private/login-gated content.
 """
 from __future__ import annotations
 
@@ -116,7 +117,6 @@ class PublicSearchCreatorProvider(CreatorProvider):
         self.max_results = max(1, min(max_results, 24))
 
     def collect(self, conn: sqlite3.Connection, brand: dict, queries: list[str]) -> list[CreatorPost]:
-        del conn
         posts: dict[str, CreatorPost] = {}
         candidates: list[tuple[str, str, str]] = []
         seen_profiles: set[str] = set()
@@ -136,6 +136,35 @@ class PublicSearchCreatorProvider(CreatorProvider):
             if profile and handle:
                 candidates.append((profile, handle, "configured_account"))
                 seen_profiles.add(profile)
+        # Manual candidates are an explicit, durable discovery source. This is
+        # useful when a search engine does not index a public Instagram/TikTok
+        # profile even though its page is directly readable.
+        try:
+            candidate_rows = conn.execute(
+                "SELECT url, handle FROM creator_candidates "
+                "WHERE brand_id = ? AND platform = ? AND review_status != 'rejected' "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (brand.get("id") or "", self.platform, _MAX_CANDIDATES),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            candidate_rows = []
+        for row in candidate_rows:
+            candidate_url = row[0] or ""
+            candidate_handle = row[1] or ""
+            profile, handle = _profile_url(self.platform, str(candidate_url))
+            if not profile and candidate_handle:
+                handle = str(candidate_handle).lstrip("@").strip().lower()
+                if re.fullmatch(r"[a-z0-9._-]{2,64}", handle):
+                    profile = (
+                        f"https://www.instagram.com/{handle}/"
+                        if self.platform == "instagram"
+                        else f"https://www.tiktok.com/@{handle}"
+                    )
+            if profile and handle and profile not in seen_profiles:
+                candidates.append((profile, handle, "manual_candidate"))
+                seen_profiles.add(profile)
+                if len(candidates) >= _MAX_CANDIDATES:
+                    break
         for query in [str(q).strip() for q in queries[:_MAX_QUERIES] if str(q).strip()]:
             try:
                 discovered = discover_profile_urls(self.platform, query, cadence=cadence, since=since)

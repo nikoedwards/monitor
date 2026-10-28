@@ -192,7 +192,7 @@ SUMMARY_SYSTEM = (
     "只依据给定数据，不要编造事实或链接。仅返回一个 JSON 对象，不要任何解释或 markdown 围栏。"
 )
 
-SUMMARY_PROMPT_TEMPLATE = """以下是某品牌在 {start} 至 {end} 期间、渠道「{channel}」的 {count} 条真实记录（可能包含帖子、回复与媒体报道）：
+SUMMARY_PROMPT_TEMPLATE = """以下是某品牌在 {start} 至 {end} 期间、渠道「{channel}」的 {count} 条真实记录（可能包含帖子、回复与媒体报道）。当前页面筛选元数据为：{filters}。请只针对这组筛选后的记录进行总结：
 
 {records}
 
@@ -230,6 +230,7 @@ def summarize_records(conn: sqlite3.Connection, records: list[dict], context: di
         start=context.get("start") or "",
         end=context.get("end") or "",
         channel=context.get("channel") or "全部",
+        filters=json.dumps(context.get("filters") or {}, ensure_ascii=False, sort_keys=True),
         count=len(items),
         records=json.dumps(items, ensure_ascii=False),
     )
@@ -518,7 +519,7 @@ JD_SYSTEM = (
     "只依据给定数据，不要编造事实。仅返回一个 JSON 对象，不要任何解释或 markdown 围栏。"
 )
 
-JD_PROMPT_TEMPLATE = """以下是目标公司「{brand}」在 {start} 至 {end} 期间的 {count} 条真实招聘职位（含 JD 摘要）：
+JD_PROMPT_TEMPLATE = """以下是目标公司「{brand}」在 {start} 至 {end} 期间、符合当前页面筛选条件 {filters} 的 {count} 条真实招聘职位（含 JD 摘要）：
 
 {postings}
 
@@ -557,6 +558,7 @@ def analyze_jd(conn: sqlite3.Connection, postings: list[dict], context: dict) ->
         brand=context.get("brand") or "目标公司",
         start=context.get("start") or "",
         end=context.get("end") or "",
+        filters=json.dumps(context.get("filters") or {}, ensure_ascii=False, sort_keys=True),
         count=len(items),
         postings=json.dumps(items, ensure_ascii=False),
     )

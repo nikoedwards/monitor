@@ -110,6 +110,12 @@ body {
 
 /* Utility shorthands mapped to design tokens */
 @layer components {
+  /* Keep long URLs and unbroken source text from widening the page. */
+  .break-anywhere {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
   .panel {
     background: var(--panel);
     border: 1px solid var(--hairline);

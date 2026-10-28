@@ -101,8 +101,10 @@ REGISTRY: list[ConnectorSpec] = [
     ),
     ConnectorSpec(
         id="x_search", name="X 红人关键词发现", category="creators", dimension="marketing",
-        tier=3, vendor="Public Web", sync_mode="manual", cadence="daily",
-        notes="X 对未登录访问和自动化采集限制严格；暂无稳定免费关键词发现接口。",
+        tier=2, vendor="X API v2", sync_mode="scheduled", cadence="daily",
+        credential_key="x_bearer_token",
+        notes="使用 X API v2 recent search 获取最近 7 天公开帖子，需要 X Bearer Token。",
+        collect=creator_runner.collect_x,
     ),
     ConnectorSpec(
         id="discord_community", name="Discord 社群", category="community", dimension="marketing",

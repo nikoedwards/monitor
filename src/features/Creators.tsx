@@ -18,6 +18,7 @@ const PLATFORMS = [
   { value: "youtube", label: "YouTube" },
   { value: "instagram", label: "Instagram" },
   { value: "tiktok", label: "TikTok" },
+  { value: "x", label: "X" },
 ];
 
 const COLLAB_LABEL: Record<string, string> = {
@@ -238,7 +239,7 @@ export default function Creators() {
       {empty ? (
         <EmptyState
           title={selectedProduct ? `${selectedProduct.name} 暂无红人数据` : "红人达人板块暂无数据"}
-          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "无需 API key；系统每天按品牌关键词搜索 YouTube、TikTok 和 Instagram 的公开内容，并只保留最近一天发布的结果。"}
+          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "YouTube、Instagram 和 TikTok 使用公开内容采集；X 需要在系统设置中配置 X Bearer Token。结果只保留当前采集窗口内的公开内容。"}
           action={<Button variant="primary" onClick={runSync} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即同步"}</Button>}
         />
       ) : (

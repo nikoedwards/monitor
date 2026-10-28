@@ -202,7 +202,7 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
         </Card>
       </div>
 
-      <BusinessAnalysisCard brandId={brandId} range={range} />
+      <BusinessAnalysisCard brandId={brandId} range={range} platform={platform} status={status} />
 
       <Card>
         <SectionTitle
@@ -223,9 +223,9 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
   );
 }
 
-function BusinessAnalysisCard({ brandId, range }: { brandId: string; range: any }) {
+function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: string; range: any; platform: string; status: string }) {
   const { data: settings } = useSettings();
-  const analyze = useAnalyzeJd(brandId, range);
+  const analyze = useAnalyzeJd(brandId, range, { platform, status });
   const [manualResult, setManualResult] = useState<any>(null);
   const [error, setError] = useState("");
 

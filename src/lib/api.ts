@@ -644,6 +644,10 @@ export interface LlmSettings {
   sellersprite_key_hint?: string;
   youtube_configured?: boolean;
   youtube_key_hint?: string;
+  x_configured?: boolean;
+  x_key_hint?: string;
+  ensembledata_configured?: boolean;
+  ensembledata_key_hint?: string;
   meta_configured?: boolean;
   meta_key_hint?: string;
   boss_configured?: boolean;
@@ -698,7 +702,7 @@ export type CreatorRelationshipStatus = "potential" | "contacted" | "collaborati
 export interface CreatorCandidate {
   id: string;
   brand_id: string;
-  platform: "youtube" | "instagram" | "tiktok";
+  platform: "youtube" | "instagram" | "tiktok" | "x";
   identity_key: string;
   handle?: string;
   name?: string;

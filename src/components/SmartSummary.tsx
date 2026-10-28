@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw, Sparkles } from "lucide-react";
-import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary } from "../lib/hooks";
+import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary, type SummaryFilters } from "../lib/hooks";
 import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
 import { dailyPersistentTaskKey, persistTaskValue, PERSISTENT_TASK_EVENT, readPersistentTask } from "../lib/persistentTask";
@@ -209,8 +209,8 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
   );
 }
 
-export function SmartSummary({ brandId, dimension, channel, range, label = "智能总结" }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; label?: string }) {
-  const summarize = useInsightsSummary(brandId, dimension, channel, range);
+export function SmartSummary({ brandId, dimension, channel, range, filters, label = "智能总结" }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; filters?: SummaryFilters; label?: string }) {
+  const summarize = useInsightsSummary(brandId, dimension, channel, range, filters);
   const data = summarize.data;
 
   const run = () => {
@@ -226,7 +226,7 @@ export function SmartSummary({ brandId, dimension, channel, range, label = "智�
           </Button>
           <AsyncProgress active={summarize.generate.isPending} label="正在生成智能总结" />
         </div>
-        <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)}{channel ? ` · ${channel}` : ""}</span>
+        <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)}{channel ? ` · ${channel}` : ""}{filters?.sentiment ? ` · ${filters.sentiment}` : ""}</span>
       </div>
 
       {(summarize.isError || summarize.generate.isError) && (

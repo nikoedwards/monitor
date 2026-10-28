@@ -170,7 +170,7 @@ export default function Voice() {
 
       <Card>
         <SectionTitle title="用户之声智能总结" subtitle="结合当前时间范围与数据来源，提炼主要话题、情绪和需要关注的舆情" />
-        <SmartSummary brandId={brandId} dimension="voc" range={range} />
+        <SmartSummary brandId={brandId} dimension="voc" range={range} filters={{ sources: selectedSources, sentiment: sentimentFilter === "all" ? undefined : sentimentFilter }} />
       </Card>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

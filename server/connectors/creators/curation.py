@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlparse
 
 from ...util import clean_text, new_id, utc_now
 
-CURATION_PLATFORMS = ("youtube", "instagram", "tiktok")
+CURATION_PLATFORMS = ("youtube", "instagram", "tiktok", "x")
 REVIEW_STATUSES = ("pending", "approved", "priority", "rejected")
 RELATIONSHIP_STATUSES = ("potential", "contacted", "collaborating", "past")
 
@@ -36,7 +36,7 @@ def _num(value) -> int:
 
 def detect_platform(url: str | None, platform: str | None = None) -> str:
     value = clean_text(platform).lower()
-    aliases = {"yt": "youtube", "youtube.com": "youtube", "ig": "instagram", "tt": "tiktok"}
+    aliases = {"yt": "youtube", "youtube.com": "youtube", "ig": "instagram", "tt": "tiktok", "twitter": "x", "twitter.com": "x"}
     value = aliases.get(value, value)
     if value in CURATION_PLATFORMS:
         return value
@@ -47,6 +47,8 @@ def detect_platform(url: str | None, platform: str | None = None) -> str:
         return "instagram"
     if host == "tiktok.com" or host.endswith(".tiktok.com"):
         return "tiktok"
+    if host == "x.com" or host.endswith(".x.com") or host == "twitter.com" or host.endswith(".twitter.com"):
+        return "x"
     return ""
 
 

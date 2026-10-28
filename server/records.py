@@ -305,7 +305,15 @@ def build_record(payload: dict) -> dict:
         "url": clean_text(payload.get("url")),
         "region": clean_text(payload.get("region")),
         "language": clean_text(payload.get("language")),
-        "occurred_at": payload.get("occurred_at") or utc_now(),
+        # A social collector may legitimately lack a publication timestamp
+        # when a platform omits it. Keep that field unknown rather than
+        # turning the crawl time into a false event time.
+        "occurred_at": (
+            payload.get("occurred_at")
+            if payload.get("occurred_at")
+            or (payload.get("channel") == "social" and payload.get("data_type") == "social_post")
+            else utc_now()
+        ),
         "sentiment": payload.get("sentiment") or analysis["sentiment"],
         "sentiment_score": payload.get("sentiment_score")
         if payload.get("sentiment_score") is not None

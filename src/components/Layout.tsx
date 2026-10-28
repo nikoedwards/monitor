@@ -95,7 +95,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState("");
   useEffect(() => {
     if (open && data) {
-      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", linkedin_cookie: "" });
+      setForm({ base_url: data.base_url, model: data.model, app_title: data.app_title, max_tokens: Number(data.max_tokens) || 4096, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", x_bearer_token: "", ensembledata_token: "", meta_access_token: "", linkedin_cookie: "" });
       setSaved(false);
       setError("");
     }
@@ -125,6 +125,23 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           </div>
           <Field label={data?.sellersprite_configured ? "secret-key（已保存，留空表示不修改）" : "secret-key（可选，付费 OpenAPI）"}>
             <Input type="password" value={form.sellersprite_secret_key || ""} onChange={(e) => set("sellersprite_secret_key", e.target.value)} placeholder="配置后 Amazon 销量/排名优先使用卖家精灵" />
+          </Field>
+        </div>
+
+        <div className="pt-2 space-y-3" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <div className="flex items-center gap-2 text-[13px] mb-1" style={{ color: "var(--mute)" }}>
+            X API：{data?.x_configured ? <Badge tone="positive">已配置</Badge> : <Badge tone="warning">未配置（X 红人搜索不可用）</Badge>}
+            {data?.x_configured && data?.x_key_hint && <span>当前：{data.x_key_hint}</span>}
+          </div>
+          <Field label={data?.x_configured ? "Bearer Token（已保存，留空表示不修改）" : "Bearer Token（X 红人搜索必填）"} hint="使用 X API v2 recent search；当前只支持最近 7 天窗口。">
+            <Input type="password" value={form.x_bearer_token || ""} onChange={(e) => set("x_bearer_token", e.target.value)} placeholder="X API Bearer Token" />
+          </Field>
+          <div className="flex items-center gap-2 text-[13px] mb-1" style={{ color: "var(--mute)" }}>
+            Instagram / TikTok 聚合器：{data?.ensembledata_configured ? <Badge tone="positive">已配置（优先使用）</Badge> : <Badge tone="neutral">未配置（使用公开主页采集）</Badge>}
+            {data?.ensembledata_configured && data?.ensembledata_key_hint && <span>当前：{data.ensembledata_key_hint}</span>}
+          </div>
+          <Field label={data?.ensembledata_configured ? "Token（已保存，留空表示不修改）" : "Token（可选，提升 IG / TikTok 关键词覆盖）"} hint="配置后 Instagram / TikTok 优先使用聚合器关键词结果；不配置时仍使用公开主页发现。">
+            <Input type="password" value={form.ensembledata_token || ""} onChange={(e) => set("ensembledata_token", e.target.value)} placeholder="Ensemble Data Token" />
           </Field>
         </div>
 
@@ -179,11 +196,13 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               if (!payload.api_key) delete payload.api_key;
               if (!payload.sellersprite_secret_key) delete payload.sellersprite_secret_key;
               if (!payload.youtube_api_key) delete payload.youtube_api_key;
+              if (!payload.x_bearer_token) delete payload.x_bearer_token;
+              if (!payload.ensembledata_token) delete payload.ensembledata_token;
               if (!payload.meta_access_token) delete payload.meta_access_token;
               if (!payload.linkedin_cookie) delete payload.linkedin_cookie;
               try {
                 await save.mutateAsync(payload);
-                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", meta_access_token: "", linkedin_cookie: "" }));
+                setForm((f: any) => ({ ...f, api_key: "", sellersprite_secret_key: "", youtube_api_key: "", x_bearer_token: "", ensembledata_token: "", meta_access_token: "", linkedin_cookie: "" }));
                 setSaved(true);
               } catch (e: any) {
                 setError(e?.message || "保存失败");

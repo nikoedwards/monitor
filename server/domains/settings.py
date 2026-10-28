@@ -22,13 +22,15 @@ FIELD_TO_KEY = {
     "max_tokens": "llm_max_tokens",
     "sellersprite_secret_key": "sellersprite_secret_key",
     "youtube_api_key": "youtube_api_key",
+    "x_bearer_token": "x_bearer_token",
+    "ensembledata_token": "ensembledata_token",
     "meta_access_token": "meta_access_token",
     "boss_cookie": "boss_cookie",
     "linkedin_cookie": "linkedin_cookie",
 }
 
 # Secret fields: empty value on update means "leave unchanged".
-SECRET_FIELDS = {"api_key", "sellersprite_secret_key", "youtube_api_key", "meta_access_token", "boss_cookie", "linkedin_cookie"}
+SECRET_FIELDS = {"api_key", "sellersprite_secret_key", "youtube_api_key", "x_bearer_token", "ensembledata_token", "meta_access_token", "boss_cookie", "linkedin_cookie"}
 
 
 def _set(conn: sqlite3.Connection, key: str, value: str) -> None:
@@ -65,6 +67,8 @@ def get_settings(conn: sqlite3.Connection = Depends(get_conn)):
     key = cfg.get("llm_api_key") or ""
     ss_key = _stored_sellersprite_key(conn)
     yt_key = _stored_credential(conn, "youtube_api_key")
+    x_token = _stored_credential(conn, "x_bearer_token")
+    ensemble_token = _stored_credential(conn, "ensembledata_token")
     meta_key = _stored_credential(conn, "meta_access_token") or _stored_credential(conn, "facebook_access_token")
     boss_cookie = _stored_credential(conn, "boss_cookie")
     linkedin_cookie = _stored_credential(conn, "linkedin_cookie")
@@ -79,6 +83,10 @@ def get_settings(conn: sqlite3.Connection = Depends(get_conn)):
         "sellersprite_key_hint": _mask(ss_key),
         "youtube_configured": bool(yt_key),
         "youtube_key_hint": _mask(yt_key),
+        "x_configured": bool(x_token),
+        "x_key_hint": _mask(x_token),
+        "ensembledata_configured": bool(ensemble_token),
+        "ensembledata_key_hint": _mask(ensemble_token),
         "meta_configured": bool(meta_key),
         "meta_key_hint": _mask(meta_key),
         "boss_configured": bool(boss_cookie),

@@ -37,6 +37,17 @@ const PLATFORMS = [
     ],
     note: "当前没有独立抓取 TikTok hashtag 页；#标签可以作为发现关键词，但不会承诺完整 hashtag 流。",
   },
+  {
+    name: "X",
+    color: "#111827",
+    summary: "通过官方 X API v2 搜索公开帖子",
+    steps: [
+      "在系统设置中配置 X Bearer Token；X 的未登录网页没有稳定的免费搜索接口。",
+      "按品牌名、监控关键词、产品名和别名调用 recent search，读取正文、发布时间、作者和公开互动指标。",
+      "X recent search 最多覆盖最近 7 天，系统仍按当前任务窗口做二次过滤。",
+    ],
+    note: "需要 X API 权限；无 Token 时 X 连接器会显示需配置，不会把网页失败误报成 0 条数据。",
+  },
 ] as const;
 
 function Rule({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
@@ -60,13 +71,13 @@ export function CreatorCollectionLogic({ compact = false }: Props) {
         <span className="flex min-w-0 items-center gap-2">
           <Search size={14} style={{ color: "var(--accent)" }} />
           <span className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>平台采集逻辑</span>
-          <span className="truncate text-[11px]" style={{ color: "var(--mute)" }}>公开搜索 · 每日窗口 · 不需要 API Key</span>
+          <span className="truncate text-[11px]" style={{ color: "var(--mute)" }}>公开内容 · 每日窗口 · X 需 Bearer Token</span>
         </span>
         <ChevronDown size={15} className="shrink-0" style={{ color: "var(--mute)" }} />
       </summary>
 
       <div className={`${compact ? "px-3 pb-3" : "px-4 pb-4"} space-y-3`}>
-        <div className="grid grid-cols-1 gap-2.5 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-2.5 md:grid-cols-4">
           {PLATFORMS.map((platform) => (
             <div key={platform.name} className="rounded-md p-3" style={{ background: "var(--panel)", border: "1px solid var(--hairline)" }}>
               <div className="flex items-center gap-2">
@@ -92,7 +103,7 @@ export function CreatorCollectionLogic({ compact = false }: Props) {
             搜索词来自品牌名、监控关键词、产品名和别名。#标签可以参与搜索，但当前不承诺完整抓取平台 hashtag 流。
           </Rule>
           <Rule icon={<ShieldCheck size={13} />} title="公开范围与去重">
-            只抓公开页面，不处理登录、验证码和私密账号；官方账号归入社交媒体，手动导入主页先进入候选池。
+            只抓公开页面，不处理登录、验证码和私密账号；手动导入的 IG / TikTok 主页会在下次同步时直接读取并补充内容证据。
           </Rule>
         </div>
       </div>

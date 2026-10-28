@@ -116,7 +116,7 @@ function CandidateImportModal({
     }
   };
   return (
-    <Modal open={open} onClose={onClose} title="导入 YT / IG / TikTok 红人" width={720}>
+    <Modal open={open} onClose={onClose} title="导入 YT / IG / TikTok / X 红人" width={720}>
       <div className="space-y-3">
         <p className="text-[13px]" style={{ color: "var(--body)" }}>
           最简单的方式是每行粘贴一个主页 URL。也支持 CSV：<code>platform,url,name,handle,notes</code>。
@@ -125,7 +125,7 @@ function CandidateImportModal({
           rows={10}
           value={text}
           onChange={(event) => { setText(event.target.value); setMessage(""); }}
-          placeholder={"https://www.youtube.com/@creator\nhttps://www.instagram.com/creator/\nhttps://www.tiktok.com/@creator"}
+          placeholder={"https://www.youtube.com/@creator\nhttps://www.instagram.com/creator/\nhttps://www.tiktok.com/@creator\nhttps://x.com/creator"}
           className="font-mono"
         />
         {message && <div className="text-[13px]" style={{ color: message.startsWith("已新增") ? "var(--accent)" : "var(--danger)" }}>{message}</div>}
@@ -328,7 +328,7 @@ export function CreatorCuration({
             <option value="rejected">已排除</option>
           </Select>
           <Input className="w-60" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索红人 / 备注…" />
-          <div className="text-[12px] self-center" style={{ color: "var(--mute)" }}>YT 可自动发现；IG / TikTok 可先导入主页，后续自动补证据。</div>
+          <div className="text-[12px] self-center" style={{ color: "var(--mute)" }}>YT / X 可按关键词采集；IG / TikTok 可先导入主页，后续自动补证据。</div>
         </div>
         {isLoading ? <Spinner /> : candidates.length ? (
           <div className="space-y-2">
@@ -345,7 +345,7 @@ export function CreatorCuration({
         ) : (
           <EmptyState
             title="候选池还是空的"
-            hint="配置 YouTube API 后同步，或先导入 IG / TikTok / YouTube 红人主页。手动候选也可以先审核和进入观察池。"
+            hint="配置 X Bearer Token 后可同步 X；IG / TikTok / YouTube 支持公开内容采集或先导入主页。手动候选也可以先审核和进入观察池。"
             action={<Button variant="primary" onClick={() => setImportOpen(true)}><Upload size={14} /> 导入第一批红人</Button>}
           />
         )}

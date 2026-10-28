@@ -208,15 +208,23 @@ def _compact_count(label: str) -> int | None:
         return None
 
 
-def _relative_timestamp(label: str) -> str:
-    normalized = clean_text(label).lower()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+def _relative_timestamp(label: str, *, now: datetime | None = None) -> str | None:
+    """Normalize a platform publication label to an ISO timestamp.
+
+    YouTube sometimes combines the view count and publication age in one
+    metadata part (for example ``34.9K views · 2 weeks ago``). Search within
+    the complete label instead of requiring the label to contain only the age.
+    Returning ``None`` for an unknown label is intentional: a crawl timestamp
+    must not be stored as if it were the publication time.
+    """
+    normalized = clean_text(label).strip().lower()
+    reference = (now or datetime.now(timezone.utc)).replace(microsecond=0)
     if not normalized:
-        return now.isoformat()
-    if normalized in {"today", "just now", "今天", "刚刚", "剛剛"}:
-        return now.isoformat()
-    if normalized in {"yesterday", "昨天"}:
-        return (now - timedelta(days=1)).isoformat()
+        return None
+    if re.search(r"\b(?:today|just now)\b|今天|刚刚|剛剛", normalized):
+        return reference.isoformat()
+    if re.search(r"\b(?:yesterday)\b|昨天", normalized):
+        return (reference - timedelta(days=1)).isoformat()
 
     match = re.search(
         r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s+ago",
@@ -239,8 +247,34 @@ def _relative_timestamp(label: str) -> str:
             delta = timedelta(days=amount * 30)
         else:
             delta = timedelta(days=amount * 365)
-        return (now - delta).isoformat()
-    return now.isoformat()
+        return (reference - delta).isoformat()
+
+    iso_match = re.search(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b", normalized)
+    if iso_match:
+        try:
+            value = iso_match.group(0).replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        except ValueError:
+            pass
+
+    date_match = re.search(r"\b([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})\b", normalized)
+    if date_match:
+        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+            try:
+                return datetime.strptime(date_match.group(1), fmt).replace(tzinfo=timezone.utc, hour=12).isoformat()
+            except ValueError:
+                continue
+    chinese_date = re.search(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", normalized)
+    if chinese_date:
+        try:
+            year, month, day = (int(value) for value in chinese_date.groups())
+            return datetime(year, month, day, 12, tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            return None
+    return None
 
 
 def _youtube_web_config(html: str) -> dict | None:
@@ -413,7 +447,10 @@ def _youtube_page_posts(channel_id: str, account_url: str, feed_error: Exception
             ),
             "",
         )
-        published_label = next((label for label in labels if label != view_label), "")
+        # A metadata part can contain both views and publication age. Pick the
+        # first label from which a publication timestamp can be parsed,
+        # including that combined form.
+        published_label = next((label for label in labels if _relative_timestamp(label)), "")
         sources = (((lockup.get("contentImage") or {}).get("thumbnailViewModel") or {}).get("image") or {}).get(
             "sources", []
         )
@@ -526,7 +563,9 @@ def _youtube_posts(account_url: str, cached_channel_id: str = "") -> tuple[list[
             author_handle=channel_id,
             author_url=author_url or account_url,
             avatar_url=(thumbnail.get("url") if thumbnail is not None else "") or "",
-            occurred_at=entry.findtext("a:published", default="", namespaces=ns) or utc_now(),
+            # Do not substitute the crawl time when a provider omits the event
+            # timestamp; the record layer keeps the event time unknown.
+            occurred_at=entry.findtext("a:published", default="", namespaces=ns) or None,
             views=_int(statistics.get("views") if statistics is not None else None),
             raw={
                 "account_url": account_url,
@@ -623,7 +662,7 @@ def _refresh_existing_social_records(conn: sqlite3.Connection, payloads: list[di
     new_payloads: list[dict] = []
     for payload in payloads:
         existing = conn.execute(
-            "SELECT id, metrics_json, raw_json FROM records WHERE source_id = ? AND external_id = ?",
+            "SELECT id, metrics_json, raw_json, occurred_at FROM records WHERE source_id = ? AND external_id = ?",
             (payload.get("source_id"), payload.get("external_id")),
         ).fetchone()
         if not existing:
@@ -633,10 +672,12 @@ def _refresh_existing_social_records(conn: sqlite3.Connection, payloads: list[di
         metrics = _json_object(existing["metrics_json"])
         metrics.update({key: value for key, value in (payload.get("metrics") or {}).items() if value is not None})
         raw = {**_json_object(existing["raw_json"]), **(payload.get("raw") or {})}
+        occurred_at = payload.get("occurred_at") or existing["occurred_at"]
         conn.execute(
             """
             UPDATE records
-            SET title = ?, author = ?, body = ?, url = ?, metrics_json = ?, raw_json = ?
+            SET title = ?, author = ?, body = ?, url = ?, occurred_at = ?,
+                metrics_json = ?, raw_json = ?
             WHERE id = ?
             """,
             (
@@ -644,6 +685,7 @@ def _refresh_existing_social_records(conn: sqlite3.Connection, payloads: list[di
                 payload.get("author") or "",
                 payload.get("body") or "",
                 payload.get("url") or "",
+                occurred_at,
                 json.dumps(metrics, ensure_ascii=False),
                 json.dumps(raw, ensure_ascii=False),
                 existing["id"],

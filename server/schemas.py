@@ -244,6 +244,8 @@ class SettingsIn(BaseModel):
     max_tokens: Optional[int] = None
     sellersprite_secret_key: Optional[str] = None
     youtube_api_key: Optional[str] = None
+    x_bearer_token: Optional[str] = None
+    ensembledata_token: Optional[str] = None
     meta_access_token: Optional[str] = None
     boss_cookie: Optional[str] = None
     linkedin_cookie: Optional[str] = None

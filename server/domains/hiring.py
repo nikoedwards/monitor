@@ -673,25 +673,30 @@ def analyze_hiring(
     days: int = 90,
     start_date: str | None = None,
     end_date: str | None = None,
+    platform: str | None = None,
+    status: str | None = None,
     refresh: bool = False,
     cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     brand = fetch_brand(conn, brand_id)
     start, end = resolve_window(days, start_date, end_date)
+    clauses = ["brand_id = ?", "substr(first_seen, 1, 10) >= ?", "substr(first_seen, 1, 10) <= ?"]
+    params: list[str] = [brand_id, start, end]
+    if platform and platform != "all":
+        clauses.append("platform = ?")
+        params.append(platform)
+    if status and status != "all":
+        clauses.append("status = ?")
+        params.append(status)
     rows = conn.execute(
-        """
-        SELECT title, department, city, platform, status, first_seen, jd_text
-        FROM job_postings
-        WHERE brand_id = ? AND substr(first_seen, 1, 10) >= ? AND substr(first_seen, 1, 10) <= ?
-        ORDER BY first_seen DESC LIMIT 80
-        """,
-        (brand_id, start, end),
+        f"SELECT title, department, city, platform, status, first_seen, jd_text FROM job_postings WHERE {' AND '.join(clauses)} ORDER BY first_seen DESC LIMIT 80",
+        params,
     ).fetchall()
     postings = [dict(r) for r in rows]
     if not postings:
         raise HTTPException(status_code=400, detail="该时间窗内暂无职位数据，请先采集。")
-    cache_key = (brand_id, start, end)
+    cache_key = (brand_id, start, end, platform or "", status or "")
     cached = _HIRING_ANALYSIS_CACHE.get(cache_key)
     now = __import__("time").monotonic()
     persistent_key = "hiring-analysis:" + "|".join(cache_key)
@@ -707,10 +712,10 @@ def analyze_hiring(
     if not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     try:
-        result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end})
+        result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end, "filters": {"platform": platform, "status": status}})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    result = {**result, "cached": False, "range": {"start": start, "end": end}}
+    result = {**result, "cached": False, "range": {"start": start, "end": end}, "filters": {"platform": platform, "status": status}}
     _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
     ai.put_cached_summary(conn, persistent_key, result)
     return result

@@ -1,10 +1,12 @@
 import json
 import sqlite3
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from server.connectors.social import (
     _compact_count,
+    _relative_timestamp,
     _refresh_existing_social_records,
     _youtube_web_video_metrics,
     collect_social_accounts,
@@ -93,7 +95,8 @@ class SocialAccountCollectorTests(unittest.TestCase):
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
             CREATE TABLE records (
               id TEXT PRIMARY KEY, source_id TEXT, external_id TEXT, title TEXT,
-              author TEXT, body TEXT, url TEXT, metrics_json TEXT, raw_json TEXT
+              author TEXT, body TEXT, url TEXT, occurred_at TEXT,
+              metrics_json TEXT, raw_json TEXT
             );
             """
         )
@@ -232,6 +235,13 @@ class SocialAccountCollectorTests(unittest.TestCase):
     def test_localized_youtube_view_count_is_parsed(self):
         self.assertEqual(_compact_count("收看次數：3.5K 次"), 3500)
 
+    def test_youtube_combined_metadata_label_uses_publication_age(self):
+        now = datetime(2026, 10, 28, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            _relative_timestamp("34.9K views · 2 weeks ago", now=now),
+            "2026-10-14T00:00:00+00:00",
+        )
+
     @patch("server.connectors.social.fetch_json_post")
     def test_youtube_web_metrics_include_views_likes_and_comments(self, fetch_json_post):
         fetch_json_post.side_effect = [
@@ -272,10 +282,10 @@ class SocialAccountCollectorTests(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO records
-            (id, source_id, external_id, title, author, body, url, metrics_json, raw_json)
+            (id, source_id, external_id, title, author, body, url, occurred_at, metrics_json, raw_json)
             VALUES ('record-1', 'social_accounts', 'brand-1:link-youtube:youtube:video-1',
                     'Old', 'Brand', 'Old', 'https://youtube.com/watch?v=video-1',
-                    '{"views": 100}', '{"collection_method": "youtube_channel_page"}')
+                    '2026-10-27T08:59:00+00:00', '{"views": 100}', '{"collection_method": "youtube_channel_page"}')
             """
         )
         payload = {
@@ -285,6 +295,7 @@ class SocialAccountCollectorTests(unittest.TestCase):
             "author": "Brand",
             "body": "Updated",
             "url": "https://youtube.com/watch?v=video-1",
+            "occurred_at": "2026-10-14T00:00:00+00:00",
             "metrics": {"views": 3538, "likes": 27, "comments": 3, "engagement": 30},
             "raw": {"metrics_collection_method": "youtube_web_next"},
         }
@@ -292,8 +303,9 @@ class SocialAccountCollectorTests(unittest.TestCase):
         remaining = _refresh_existing_social_records(self.conn, [payload])
 
         self.assertEqual(remaining, [])
-        row = self.conn.execute("SELECT title, metrics_json, raw_json FROM records WHERE id = 'record-1'").fetchone()
+        row = self.conn.execute("SELECT title, occurred_at, metrics_json, raw_json FROM records WHERE id = 'record-1'").fetchone()
         self.assertEqual(row["title"], "Updated")
+        self.assertEqual(row["occurred_at"], "2026-10-14T00:00:00+00:00")
         metrics = json.loads(row["metrics_json"])
         self.assertEqual(metrics["views"], 3538)
         self.assertEqual(metrics["likes"], 27)

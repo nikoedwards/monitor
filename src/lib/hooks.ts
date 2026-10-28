@@ -376,21 +376,37 @@ export function useAds(brandId?: string, range?: TimeRange, filters?: Record<str
 }
 
 // ---------------------------------------------------------------- insights summary (LLM)
-export function useInsightsSummary(brandId?: string, dimension?: string, channel?: string, range?: TimeRange) {
+export type SummaryFilters = {
+  sources?: string[];
+  sentiment?: string;
+  platform?: string;
+  platforms?: string[];
+  publication_domain?: string;
+  publication_name?: string;
+  q?: string;
+  product_id?: string;
+  matched_product_id?: string;
+  intent?: string;
+  region?: string;
+  data_type?: string;
+};
+
+export function useInsightsSummary(brandId?: string, dimension?: string, channel?: string, range?: TimeRange, filters: SummaryFilters = {}) {
   const rp = rangeParams(range);
+  const filterParams = { ...filters, sources: filters.sources?.join(","), platforms: filters.platforms?.join(",") };
   const queryClient = useQueryClient();
-  const queryKey = ["insights-summary", brandId, dimension, channel, rp];
-  const storageKey = persistentTaskKey("insights-summary", [brandId, dimension, channel, rp.start_date, rp.end_date]);
+  const queryKey = ["insights-summary", brandId, dimension, channel, rp, filterParams];
+  const storageKey = persistentTaskKey("insights-summary", [brandId, dimension, channel, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
   const query = useQuery({
     queryKey,
-    queryFn: () => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, cached_only: true, ...rp })}`),
+    queryFn: () => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, cached_only: true, ...filterParams, ...rp })}`),
     enabled: !!brandId,
     staleTime: 24 * 60 * 60 * 1000,
     retry: false,
   });
   const generate = usePersistentTaskMutation<any, { refresh?: boolean }>(
     storageKey,
-    ({ refresh = false }) => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...rp })}`),
+    ({ refresh = false }) => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...filterParams, ...rp })}`),
     (data) => queryClient.setQueryData(queryKey, data),
   );
   return { ...query, data: generate.data || (query.data?.cache_miss ? undefined : query.data), generate };
@@ -765,21 +781,22 @@ export function useActivities(brandId?: string, profileId?: string, filters?: { 
   });
 }
 
-export function useAnalyzeJd(brandId?: string, range?: TimeRange) {
+export function useAnalyzeJd(brandId?: string, range?: TimeRange, filters: { platform?: string; status?: string } = {}) {
   const qc = useQueryClient();
   const rp = rangeParams(range);
-  const queryKey = ["hiring-analysis", brandId, rp];
-  const storageKey = persistentTaskKey("hiring-analysis", [brandId, rp.start_date, rp.end_date]);
+  const filterParams = { platform: filters.platform && filters.platform !== "all" ? filters.platform : undefined, status: filters.status && filters.status !== "all" ? filters.status : undefined };
+  const queryKey = ["hiring-analysis", brandId, rp, filterParams];
+  const storageKey = persistentTaskKey("hiring-analysis", [brandId, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
   const query = useQuery({
     queryKey,
-    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, ...rp })}`),
+    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, ...filterParams, ...rp })}`),
     enabled: !!brandId,
     staleTime: 24 * 60 * 60 * 1000,
     retry: false,
   });
   const generate = usePersistentTaskMutation<any, { refresh?: boolean }>(
     storageKey,
-    ({ refresh = false }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...rp })}`),
+    ({ refresh = false }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...filterParams, ...rp })}`),
     (data) => qc.setQueryData(queryKey, data),
   );
   return { ...query, data: generate.data || (query.data?.cache_miss ? undefined : query.data), generate };

@@ -11,7 +11,11 @@ from fastapi import HTTPException
 
 from ..db import db as _db
 from ..records import record_to_dict
-from ..relevance import google_news_record_is_relevant, reddit_search_record_is_relevant
+from ..relevance import (
+    google_news_record_is_relevant,
+    marketing_payload_relevance,
+    reddit_search_record_is_relevant,
+)
 from ..connectors.creators.evidence import enrich_creator_record_evidence
 from ..connectors.creators.products import creator_product_queries, load_product_signals, match_record_to_products
 from ..connectors.creators.runner import _creator_record_is_relevant
@@ -119,27 +123,41 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
     )
     records: list[dict] = []
     brand_names: dict[str, str] = {}
+    brand_configs: dict[str, dict] = {}
     creator_brands: dict[str, dict] = {}
     creator_products: dict[str, list[dict]] = {}
     creator_product_queries_cache: dict[str, list[str]] = {}
     for row in rows:
-        if row["source_id"] in {"google_news", "reddit_search"}:
+        if (
+            row["source_id"] in {"google_news", "reddit_search"}
+            or (row["dimension"] == "marketing" and row["channel"] in {"media", "social", "creators", "community"})
+        ):
             try:
                 raw = json.loads(row["raw_json"] or "{}")
             except (TypeError, ValueError):
                 raw = {}
             brand_id = row["brand_id"] or ""
-            if brand_id and brand_id not in brand_names:
-                brand_row = conn.execute("SELECT name FROM brands WHERE id = ?", (brand_id,)).fetchone()
-                brand_names[brand_id] = brand_row["name"] if brand_row else ""
+            if brand_id and brand_id not in brand_configs:
+                brand_row = conn.execute("SELECT * FROM brands WHERE id = ?", (brand_id,)).fetchone()
+                brand_configs[brand_id] = dict(brand_row) if brand_row else {}
+                brand_names[brand_id] = brand_configs[brand_id].get("name") or ""
             relevance_record = {
                 "source_id": row["source_id"],
+                "dimension": row["dimension"],
+                "channel": row["channel"],
                 "raw": raw,
                 "url": row["url"],
                 "title": row["title"],
                 "body": row["body"],
             }
             brand_name = brand_names.get(brand_id) or None
+            if row["dimension"] == "marketing" and row["channel"] in {"media", "social", "creators", "community"}:
+                allowed, _reason = marketing_payload_relevance(
+                    {**relevance_record, "brand_id": brand_id},
+                    brand_configs.get(brand_id) or {"name": brand_name or ""},
+                )
+                if not allowed:
+                    continue
             if row["source_id"] == "google_news" and not google_news_record_is_relevant(
                 relevance_record, brand_name
             ):

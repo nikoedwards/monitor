@@ -377,7 +377,7 @@ def creators_candidates_import(
         [row.model_dump() for row in payload.rows],
     )
     if not result["ids"]:
-        raise HTTPException(status_code=400, detail="未识别到有效的 YouTube、Instagram 或 TikTok 红人。")
+        raise HTTPException(status_code=400, detail="未识别到有效的 YouTube、Instagram、TikTok 或 X 红人。")
     return result
 
 

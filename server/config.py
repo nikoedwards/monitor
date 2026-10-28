@@ -24,6 +24,8 @@ USER_AGENT = "MonitorIntelligenceHub/1.0 (+brand intelligence monitor)"
 # Optional credentials for tier-2/3 connectors (filled in later by the user).
 CREDENTIALS = {
     "youtube_api_key": os.environ.get("YOUTUBE_API_KEY", ""),
+    "x_bearer_token": os.environ.get("X_BEARER_TOKEN", ""),
+    "ensembledata_token": os.environ.get("ENSEMBLEDATA_TOKEN", ""),
     "reddit_bearer_token": os.environ.get("REDDIT_BEARER_TOKEN", ""),
     "reddit_user_agent": os.environ.get("REDDIT_USER_AGENT", USER_AGENT),
     "discord_bot_token": os.environ.get("DISCORD_BOT_TOKEN", ""),

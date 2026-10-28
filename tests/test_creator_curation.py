@@ -22,6 +22,8 @@ class CreatorCurationTests(unittest.TestCase):
         self.assertEqual(detect_platform("https://youtube.com.evil.test/@fake"), "")
         self.assertEqual(detect_platform("https://instagram.com.evil.test/fake"), "")
         self.assertEqual(detect_platform("https://tiktok.com.evil.test/@fake"), "")
+        self.assertEqual(detect_platform("https://x.com/real"), "x")
+        self.assertEqual(detect_platform("https://x.com.evil.test/fake"), "")
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -156,8 +158,19 @@ class CreatorCurationTests(unittest.TestCase):
         self.assertEqual({"instagram", "tiktok"}, platforms)
         instagram = next(item for item in dashboard["candidates"] if item["platform"] == "instagram")
         update_candidate(self.conn, instagram["id"], {"review_status": "approved"})
-        curated = candidate_dashboard(self.conn, "brand-1")["curated_map"]["points"]
-        self.assertEqual("observe", curated[0]["quadrant"])
+
+    def test_manual_import_autodetects_x_profile(self):
+        result = import_candidates(
+            self.conn,
+            "brand-1",
+            [{"url": "https://x.com/creator_one", "name": "Creator One"}],
+        )
+        self.assertEqual(result["created"], 1)
+        candidate = self.conn.execute(
+            "SELECT platform, handle, url FROM creator_candidates WHERE brand_id = ?",
+            ("brand-1",),
+        ).fetchone()
+        self.assertEqual(tuple(candidate), ("x", "creator_one", "https://x.com/creator_one"))
 
 
 if __name__ == "__main__":

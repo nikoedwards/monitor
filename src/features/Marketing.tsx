@@ -28,6 +28,9 @@ const SOURCE_LABEL: Record<string, string> = {
   google_web_search: "Google 网页搜索补漏",
   meta_ads: "Meta 广告库",
   youtube_search: "YouTube",
+  instagram_listening: "Instagram",
+  tiktok_listening: "TikTok",
+  x_search: "X",
   discord_community: "Discord",
   facebook_groups: "Facebook 群组",
   social_accounts: "官方社媒账号",
@@ -184,7 +187,7 @@ export default function Marketing() {
   const shownRecords = isCommunity ? records.filter((r) => !hidden.has(r.platform || "")) : records;
 
   return (
-    <div className="space-y-6">
+    <div className={`space-y-6${isCommunity ? " break-anywhere" : ""}`}>
       <SectionTitle
         title="营销监控"
         subtitle="媒体公关、广告、红人、社群与社交声量"
@@ -305,7 +308,7 @@ export default function Marketing() {
         <Card>
           <SectionTitle
             title={isSocial || isCreators ? "平台采集明细" : view === "channel" ? "来源渠道明细" : "平台分布"}
-            subtitle={isSocial || isCreators ? "按 YouTube、Instagram、TikTok 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
+            subtitle={isSocial || isCreators ? "按 YouTube、Instagram、TikTok、X 等平台拆分采集量" : view === "channel" ? "该渠道下各数据源的采集量" : undefined}
           />
           {view === "channel" ? (
             <SourceBreakdown
@@ -333,7 +336,7 @@ export default function Marketing() {
 
       <Card>
         <SectionTitle title="智能总结" subtitle="基于所选时间范围与渠道的记录，由大模型生成要点 / 情绪 / 代表内容" />
-        <SmartSummary brandId={brandId} dimension="marketing" channel={activeChannel} range={range} />
+        <SmartSummary brandId={brandId} dimension="marketing" channel={activeChannel} range={range} filters={{ platform: activeChannel === "social" && socialPlatform !== "all" ? socialPlatform : undefined, platforms: isCommunity ? (() => { const visible = (summary?.by_platform || []).map((item: any) => item.platform).filter((item: string) => item && !hidden.has(item)); return visible.length ? visible : ["__none__"]; })() : undefined, publication_domain: selectedPublication?.domain, publication_name: selectedPublication?.name }} />
       </Card>
 
       <Card>

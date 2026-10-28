@@ -5,6 +5,7 @@ const LABELS: Record<string, string> = {
   youtube_search: "YouTube",
   tiktok_listening: "TikTok",
   instagram_listening: "Instagram",
+  x_search: "X",
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -18,6 +19,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   youtube_search: "YouTube",
   tiktok_listening: "TikTok",
   instagram_listening: "Instagram",
+  x_search: "X",
 };
 
 export function CreatorSourceStatus({ brandId }: { brandId?: string }) {

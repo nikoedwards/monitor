@@ -30,7 +30,18 @@ def pick_provider(platform: str, conn: sqlite3.Connection) -> CreatorProvider | 
         key = creator_credential(conn, "youtube_api_key")
         return YouTubeProvider(key) if key else YouTubePublicProvider()
     if platform in {"instagram", "tiktok"}:
+        ensemble_token = creator_credential(conn, "ensembledata_token")
+        if ensemble_token:
+            from .thirdparty import ThirdPartyCreatorProvider
+
+            return ThirdPartyCreatorProvider(platform, ensemble_token)
         from .public_search import PublicSearchCreatorProvider
 
         return PublicSearchCreatorProvider(platform)
+    if platform == "x":
+        bearer_token = creator_credential(conn, "x_bearer_token")
+        if bearer_token:
+            from .x_api import XApiCreatorProvider
+
+            return XApiCreatorProvider(bearer_token)
     return None

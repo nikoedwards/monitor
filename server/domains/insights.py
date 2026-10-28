@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import time
 from collections import Counter
 from datetime import date, timedelta
@@ -61,6 +62,7 @@ def _summary_records(
     channel: str | None,
     start: str,
     end: str,
+    filters: dict | None = None,
 ) -> list[dict]:
     """Load the same record universe that each summary surface represents."""
     if dimension == "voc":
@@ -69,11 +71,17 @@ def _summary_records(
         # sync with /api/voc/summary and /api/voc/records.
         from .content import _load_voice_records
 
-        records = _load_voice_records(conn, brand_id, start, end)
+        filters = filters or {}
+        records = _load_voice_records(conn, brand_id, start, end, filters.get("q"))
+        selected_sources = filters.get("sources")
+        if selected_sources:
+            selected = {part.strip() for part in str(selected_sources).split(",") if part.strip()}
+            records = [record for record in records if record.get("voice_source") in selected]
         if channel:
             records = [record for record in records if record.get("channel") == channel]
-        return records[:150]
-    return query_records(
+        return _filter_summary_records(records, filters)[:150]
+    filters = filters or {}
+    records = query_records(
         conn,
         {
             "brand_id": brand_id,
@@ -81,9 +89,31 @@ def _summary_records(
             "channel": channel,
             "start_date": start,
             "end_date": end,
+            **filters,
         },
-        limit=150,
+        limit=1000,
     )
+    return _filter_summary_records(records, filters)[:150]
+
+
+def _filter_summary_records(records: list[dict], filters: dict) -> list[dict]:
+    platforms = {part.strip() for part in str(filters.get("platforms") or "").split(",") if part.strip()}
+    if filters.get("platform"):
+        records = [record for record in records if record.get("platform") == filters["platform"]]
+    if platforms:
+        records = [record for record in records if record.get("platform") in platforms]
+    for key in ("sentiment", "intent", "region", "data_type", "product_id"):
+        if filters.get(key):
+            records = [record for record in records if record.get(key) == filters[key]]
+    if filters.get("matched_product_id"):
+        target = filters["matched_product_id"]
+        records = [record for record in records if record.get("matched_product_id") == target or record.get("product_id") == target]
+    if filters.get("publication_domain"):
+        records = [record for record in records if (record.get("metrics") or {}).get("publication_domain") == filters["publication_domain"]]
+    if filters.get("publication_name"):
+        name = filters["publication_name"]
+        records = [record for record in records if record.get("platform") == name or (record.get("metrics") or {}).get("publication_name") == name]
+    return records
 
 
 def _brand_snapshot(conn: sqlite3.Connection, brand_id: str | None, start: str, end: str) -> dict:
@@ -341,9 +371,16 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
 
 
 @router.get("/insights/summary")
-def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, cached_only: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, sources: str | None = None, sentiment: str | None = None, platform: str | None = None, platforms: str | None = None, publication_domain: str | None = None, publication_name: str | None = None, q: str | None = None, product_id: str | None = None, matched_product_id: str | None = None, intent: str | None = None, region: str | None = None, data_type: str | None = None, refresh: bool = False, cached_only: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(None, start_date, end_date)
-    cache_key = "insights:" + "|".join((brand_id or "", dimension or "", channel or "", start, end))
+    filters = {key: value for key, value in {
+        "sources": sources, "sentiment": sentiment, "platform": platform, "platforms": platforms,
+        "publication_domain": publication_domain, "publication_name": publication_name, "q": q,
+        "product_id": product_id, "matched_product_id": matched_product_id, "intent": intent,
+        "region": region, "data_type": data_type,
+    }.items() if value not in (None, "")}
+    filter_key = json.dumps(filters, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    cache_key = "insights:" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
     if not refresh:
         cached = ai.get_cached_summary(conn, cache_key)
         if cached is not None:
@@ -352,15 +389,16 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
     if not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
-    records = _summary_records(conn, brand_id, dimension, channel, start, end)
+    records = _summary_records(conn, brand_id, dimension, channel, start, end, filters)
     if not records:
-        return {"summary": "所选时间范围与渠道下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}}
+        return {"summary": "所选时间范围与筛选条件下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}, "filters": filters}
     try:
-        result = ai.summarize_records(conn, records, {"start": start, "end": end, "channel": channel, "dimension": dimension})
+        result = ai.summarize_records(conn, records, {"start": start, "end": end, "channel": channel, "dimension": dimension, "filters": filters})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     result["record_count"] = len(records)
     result["range"] = {"start": start, "end": end}
+    result["filters"] = filters
     result["cached"] = False
     ai.put_cached_summary(conn, cache_key, result)
     return result

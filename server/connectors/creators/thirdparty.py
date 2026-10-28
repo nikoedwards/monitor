@@ -14,6 +14,7 @@ crashing the collection run.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
 from ...fetchers import FetchError, fetch_json
@@ -54,6 +55,23 @@ def _url(value) -> str:
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()
     return ""
+
+
+def _occurred(value) -> str:
+    if value in (None, ""):
+        return utc_now()
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc).replace(microsecond=0).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return utc_now()
+    text = str(value).strip()
+    if text.isdigit():
+        try:
+            return datetime.fromtimestamp(float(text), timezone.utc).replace(microsecond=0).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return utc_now()
+    return text or utc_now()
 
 
 def _thumbnail(item: dict, _depth: int = 0) -> str:
@@ -181,7 +199,7 @@ class ThirdPartyCreatorProvider(CreatorProvider):
             author_handle=clean_text(str(_first(item, "username", "screen_name", "unique_id") or "")).lower(),
             avatar_url=avatar_url,
             thumbnail_url=thumbnail_url,
-            occurred_at=_first(item, "created_at", "create_time", "taken_at") or utc_now(),
+            occurred_at=_occurred(_first(item, "created_at", "create_time", "taken_at")),
             views=_to_int(_first(item, "play_count", "view_count", "views")),
             likes=_to_int(_first(item, "like_count", "digg_count", "likes", "favorite_count")),
             comments=_to_int(_first(item, "comment_count", "comments", "reply_count")),

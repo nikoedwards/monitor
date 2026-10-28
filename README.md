@@ -26,13 +26,15 @@
 | 档位 | 含义 | 连接器 |
 | --- | --- | --- |
 | 第 1 档 | 免费、无需凭证、可直接采真实数据 | Google News、Reddit 搜索、YouTube/Instagram/TikTok 官方账号、App Store / Google Play 评论、品牌站点分析、网页快照 |
-| 第 2 档 | 需配置凭证后启用 | Meta 广告库、YouTube、Discord、Facebook 群组 |
-| 第 3 档 | 难获取，预留接缝 + 手动录入 | Amazon 竞品销量、Instagram / TikTok / X 全站关键词发现、线下销售 |
+| 第 2 档 | 需配置凭证后启用 | X 红人 recent search、Meta 广告库、YouTube、Discord、Facebook 群组 |
+| 第 3 档 | 难获取，预留接缝 + 手动录入 | Amazon 竞品销量、Instagram / TikTok 全站关键词发现、线下销售 |
 
 第 2 档凭证通过环境变量提供（可选）：
 
 ```
 YOUTUBE_API_KEY=...
+X_BEARER_TOKEN=...         # X API v2 recent search（最近 7 天）
+ENSEMBLEDATA_TOKEN=...     # 可选：IG / TikTok 关键词聚合
 REDDIT_BEARER_TOKEN=...
 DISCORD_BOT_TOKEN=...
 FACEBOOK_ACCESS_TOKEN=...   # 同时用于 Meta 广告库
@@ -77,8 +79,9 @@ BOSS 与 LinkedIn 采用不同采集方式。LinkedIn 保持后台 Cookie 采集
 - YouTube：公开 Atom feed + 频道页结构化数据 + 网页互动指标。
 - Instagram：无登录 Chromium 会话读取公开主页接口，采集最近帖子、粉丝、点赞、评论及公开视频播放量（平台返回时）。
 - TikTok：公开主页资料 + `yt-dlp` 网页提取，采集最近视频、播放、点赞、评论、转发和粉丝数。
+- X：配置 X API v2 Bearer Token 后调用 `recent search`，采集最近 7 天公开帖子、作者和互动指标。
 
-以上路径不需要 Ensemble Data 或其他付费聚合 Token，也不会绕过登录、验证码、私密账号或平台访问控制。公开网页结构和风控可能变化，失败会保留在对应账号链接的采集状态中。X、Facebook、LinkedIn 官方账号免费适配器仍待后续开发；红人板块的“全站关键词发现”也不等同于已知官方账号自采。
+Instagram / TikTok 的公开主页采集不需要 Token，但关键词发现依赖搜索引擎，不能当作完整 hashtag 全量流；配置 `ENSEMBLEDATA_TOKEN` 后会优先使用聚合器关键词接口。X 的官方 recent search 需要 X API Bearer Token，且最多覆盖最近 7 天；没有 Token 时会明确标记为“需配置”。所有路径都只处理公开内容，不绕过登录、验证码、私密账号或平台访问控制。
 
 ## 本地运行
 
