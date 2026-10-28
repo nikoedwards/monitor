@@ -16,6 +16,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY requirements.txt /tmp/monitor-requirements.txt
 RUN set -eux; \
+    apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*; \
+    set -eux; \
     if [ "$REUSE_RUNTIME" = "1" ] \
       && python -m pip install --no-index --no-deps -r /tmp/monitor-requirements.txt \
       && python -c 'import playwright' \
