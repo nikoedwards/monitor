@@ -34,7 +34,7 @@
 ```
 YOUTUBE_API_KEY=...
 X_BEARER_TOKEN=...         # X API v2 recent search（最近 7 天）
-ENSEMBLEDATA_TOKEN=...     # 可选：IG / TikTok 关键词聚合
+ENSEMBLEDATA_TOKEN=...     # IG / TikTok 关键词与 Hashtag 搜索
 REDDIT_BEARER_TOKEN=...
 DISCORD_BOT_TOKEN=...
 FACEBOOK_ACCESS_TOKEN=...   # 同时用于 Meta 广告库
@@ -81,7 +81,7 @@ BOSS 与 LinkedIn 采用不同采集方式。LinkedIn 保持后台 Cookie 采集
 - TikTok：公开主页资料 + `yt-dlp` 网页提取，采集最近视频、播放、点赞、评论、转发和粉丝数。
 - X：配置 X API v2 Bearer Token 后调用 `recent search`，采集最近 7 天公开帖子、作者和互动指标。
 
-Instagram / TikTok 的公开主页采集不需要 Token，但关键词发现依赖搜索引擎，不能当作完整 hashtag 全量流；配置 `ENSEMBLEDATA_TOKEN` 后会优先使用聚合器关键词接口。X 的官方 recent search 需要 X API Bearer Token，且最多覆盖最近 7 天；没有 Token 时会明确标记为“需配置”。所有路径都只处理公开内容，不绕过登录、验证码、私密账号或平台访问控制。
+Instagram / TikTok 的完整关键词与 Hashtag 发现需要配置 `ENSEMBLEDATA_TOKEN`，系统会按品牌词、产品词和 Hashtag 调用聚合器；没有 Token 时只保留有限的公开主页 fallback，不能视为全站监控。X 的官方 recent search 需要 X API Bearer Token，且最多覆盖最近 7 天；没有 Token 时会明确标记为“需配置”。所有路径都只处理公开内容，不绕过登录、验证码、私密账号或平台访问控制。
 
 ## 本地运行
 

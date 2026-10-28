@@ -137,10 +137,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
             <Input type="password" value={form.x_bearer_token || ""} onChange={(e) => set("x_bearer_token", e.target.value)} placeholder="X API Bearer Token" />
           </Field>
           <div className="flex items-center gap-2 text-[13px] mb-1" style={{ color: "var(--mute)" }}>
-            Instagram / TikTok 聚合器：{data?.ensembledata_configured ? <Badge tone="positive">已配置（优先使用）</Badge> : <Badge tone="neutral">未配置（使用公开主页采集）</Badge>}
+            Instagram / TikTok 关键词聚合器：{data?.ensembledata_configured ? <Badge tone="positive">已配置（关键词/标签搜索）</Badge> : <Badge tone="warning">未配置（只有有限公开主页发现）</Badge>}
             {data?.ensembledata_configured && data?.ensembledata_key_hint && <span>当前：{data.ensembledata_key_hint}</span>}
           </div>
-          <Field label={data?.ensembledata_configured ? "Token（已保存，留空表示不修改）" : "Token（可选，提升 IG / TikTok 关键词覆盖）"} hint="配置后 Instagram / TikTok 优先使用聚合器关键词结果；不配置时仍使用公开主页发现。">
+          <Field label={data?.ensembledata_configured ? "Token（已保存，留空表示不修改）" : "Token（关键词/标签自动发现必填）"} hint="配置后 Instagram / TikTok 按品牌词、产品词和 Hashtag 自动搜索；不配置时仅能做有限的公开主页发现，不能视为完整关键词监控。">
             <Input type="password" value={form.ensembledata_token || ""} onChange={(e) => set("ensembledata_token", e.target.value)} placeholder="Ensemble Data Token" />
           </Field>
         </div>

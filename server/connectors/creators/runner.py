@@ -8,6 +8,7 @@ table so the dashboard and the LLM report can read a per-creator view.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 from ...util import clean_text, new_id, utc_now
@@ -67,7 +68,15 @@ def _has_trusted_creator_search_hit(raw: dict | None, brand: dict, product_queri
     if isinstance(values, str):
         values = [values]
     trusted = _creator_search_terms(brand, product_queries)
-    return any(str(value).strip().casefold() in trusted for value in values if str(value).strip())
+    trusted_variants = trusted | {
+        re.sub(r"\s+", "", item.lstrip("#"))
+        for item in trusted
+    }
+    return any(
+        re.sub(r"\s+", "", str(value).strip().casefold().lstrip("#")) in trusted_variants
+        for value in values
+        if str(value).strip()
+    )
 
 
 def _creator_record_is_relevant(
@@ -138,15 +147,34 @@ def _collect_platform(conn: sqlite3.Connection, brand: dict, platform: str) -> l
         return []
     # YouTube search is quota-expensive. Reserve half the small query budget for
     # catalog products instead of letting a long brand-keyword list crowd them out.
-    queries = brand_queries(brand)[:4]
+    base_queries = brand_queries(brand)[:4]
     product_queries = creator_product_queries(conn, brand.get("id") or "", limit=4)
-    seen = {query.strip().lower() for query in queries}
-    for query in product_queries:
-        key = query.strip().lower()
-        if key and key not in seen:
+    base_queries.extend(query for query in product_queries if query.strip().lower() not in {item.strip().lower() for item in base_queries})
+    queries: list[str] = []
+    seen: set[str] = set()
+    for query in base_queries:
+        value = str(query).strip()
+        if not value:
+            continue
+        variants = [value]
+        # Instagram and TikTok keyword endpoints usually treat a hashtag as a
+        # separate search mode. Query both the literal phrase and its compact
+        # hashtag form so a brand keyword such as "NotePin" also finds
+        # #NotePin posts. The provider still applies the platform's own result
+        # and time-window limits.
+        if platform in {"instagram", "tiktok"} and not value.startswith("#"):
+            tag = re.sub(r"\s+", "", value)
+            if tag and len(tag) >= 2:
+                variants.append(f"#{tag}")
+        for variant in variants:
+            key = variant.casefold()
+            if key in seen:
+                continue
             seen.add(key)
-            queries.append(query)
-        if len(queries) >= 8:
+            queries.append(variant)
+            if len(queries) >= 12:
+                break
+        if len(queries) >= 12:
             break
     if not queries:
         return []

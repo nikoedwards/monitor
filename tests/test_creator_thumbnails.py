@@ -61,6 +61,16 @@ class CreatorThumbnailTests(unittest.TestCase):
         self.assertIsNotNone(post)
         self.assertEqual(post.thumbnail_url, "https://cdn.example/wrapped.jpg")
 
+    def test_keyword_result_keeps_search_evidence_and_builds_public_url(self):
+        post = self.provider._normalize(
+            {"shortcode": "abc123", "username": "creator", "taken_at": 1793149440, "caption": "review"},
+            "#PLAUD",
+        )
+        self.assertIsNotNone(post)
+        self.assertEqual(post.url, "https://www.instagram.com/p/abc123/")
+        self.assertTrue(post.raw["search_query_evidence"])
+        self.assertEqual(post.raw["matched_queries"], ["#PLAUD"])
+
     def test_payload_persists_thumbnail_for_cards(self):
         payload = _payload(
             {"id": "brand-1"},

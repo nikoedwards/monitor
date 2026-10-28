@@ -214,6 +214,11 @@ class CreatorPublicSearchTests(unittest.TestCase):
                 {"matched_queries": ["Comulytic"], "search_query_evidence": True}, brand, []
             )
         )
+        self.assertTrue(
+            _has_trusted_creator_search_hit(
+                {"matched_queries": ["#Comulytic"], "search_query_evidence": True}, brand, []
+            )
+        )
 
     def test_short_brand_name_is_not_broad_search_evidence(self):
         brand = {"name": "Comu", "monitoring_keywords": ["Comulytic"]}

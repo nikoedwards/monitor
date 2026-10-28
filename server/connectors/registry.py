@@ -90,13 +90,13 @@ REGISTRY: list[ConnectorSpec] = [
     ConnectorSpec(
         id="instagram_listening", name="Instagram 红人关键词发现", category="creators", dimension="marketing",
         tier=1, vendor="Bing / Public Web", sync_mode="scheduled", cadence="daily",
-        notes="通过 Bing 公开搜索发现 Instagram 公开达人主页，再采集公开内容；不需要 API key。",
+        notes="配置 Ensemble Data Token 后按品牌词、产品词和 Hashtag 搜索公开内容；未配置时仅运行有限的 Bing 公开主页 fallback。",
         collect=creator_runner.collect_instagram,
     ),
     ConnectorSpec(
         id="tiktok_listening", name="TikTok 红人关键词发现", category="creators", dimension="marketing",
         tier=1, vendor="Bing / yt-dlp", sync_mode="scheduled", cadence="daily",
-        notes="通过 Bing 公开搜索发现 TikTok 公开达人主页，再用 yt-dlp 采集公开内容；不需要 API key。",
+        notes="配置 Ensemble Data Token 后按品牌词、产品词和 Hashtag 搜索公开内容；未配置时仅运行有限的 Bing 公开主页 fallback。",
         collect=creator_runner.collect_tiktok,
     ),
     ConnectorSpec(

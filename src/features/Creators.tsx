@@ -239,7 +239,7 @@ export default function Creators() {
       {empty ? (
         <EmptyState
           title={selectedProduct ? `${selectedProduct.name} 暂无红人数据` : "红人达人板块暂无数据"}
-          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "YouTube、Instagram 和 TikTok 使用公开内容采集；X 需要在系统设置中配置 X Bearer Token。结果只保留当前采集窗口内的公开内容。"}
+          hint={selectedProduct ? "先同步品牌数据；若已有内容仍未命中，请在产品备注中补充别名、型号或常用 Hashtag。" : "Instagram / TikTok 的完整关键词和 Hashtag 自动发现需要配置聚合器 Token；X 需要 X Bearer Token。未配置时只会运行有限的公开主页 fallback。"}
           action={<Button variant="primary" onClick={runSync} disabled={sync.isPending}>{sync.isPending ? "采集中…" : "立即同步"}</Button>}
         />
       ) : (

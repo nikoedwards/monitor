@@ -2,9 +2,10 @@
 
 These platforms expose no free, commercial keyword-search API, so real data
 requires a paid aggregator (e.g. Ensemble Data, which offers unit-priced
-``Search Keyword`` endpoints across IG/TikTok/X). This provider is the seam:
-it only activates when an ``ensembledata_token`` is configured and otherwise
-returns nothing, leaving the connector in a ``needs_credential`` state.
+``Search Keyword`` endpoints across IG/TikTok/X). This provider is the
+keyword-search seam: it activates when an ``ensembledata_token`` is configured.
+Without that token, Instagram/TikTok use the limited public-profile fallback
+and X remains credential-gated by its official API connector.
 
 The endpoint paths/field names below follow Ensemble Data's documented shape but
 MUST be verified against the live API before relying on them in production; all
@@ -72,6 +73,27 @@ def _occurred(value) -> str:
         except (TypeError, ValueError, OSError, OverflowError):
             return utc_now()
     return text or utc_now()
+
+
+def _items(data: dict | list, list_key: str) -> list[dict]:
+    """Accept the common list wrappers used by aggregator API versions."""
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    direct = data.get(list_key)
+    if isinstance(direct, list):
+        return [item for item in direct if isinstance(item, dict)]
+    if isinstance(direct, dict):
+        for key in ("items", "results", "posts", "data"):
+            nested = direct.get(key)
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+    for key in ("items", "results", "posts", "medias", "tweets"):
+        nested = data.get(key)
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+    return []
 
 
 def _thumbnail(item: dict, _depth: int = 0) -> str:
@@ -164,6 +186,8 @@ class ThirdPartyCreatorProvider(CreatorProvider):
             return []
         path, list_key = endpoint
         posts: dict[str, CreatorPost] = {}
+        failures: list[str] = []
+        successful_queries = 0
         for query in queries:
             url = (
                 f"{_BASE}{path}?token={quote_plus(self.token)}"
@@ -171,13 +195,23 @@ class ThirdPartyCreatorProvider(CreatorProvider):
             )
             try:
                 data = fetch_json(url, timeout=20)
-            except FetchError:
+                successful_queries += 1
+            except FetchError as exc:
+                failures.append(str(exc)[:240])
                 continue
-            items = (data.get(list_key) if isinstance(data, dict) else None) or []
+            items = _items(data, list_key)
             for item in items[: self.max_results]:
                 post = self._normalize(item, query)
                 if post:
-                    posts.setdefault(post.external_id, post)
+                    existing = posts.get(post.external_id)
+                    if existing is None:
+                        posts[post.external_id] = post
+                    else:
+                        matched = existing.raw.setdefault("matched_queries", [])
+                        if query not in matched:
+                            matched.append(query)
+        if successful_queries == 0 and failures:
+            raise FetchError(f"{self.platform} 聚合器关键词搜索失败：{failures[0]}")
         return list(posts.values())
 
     def _normalize(self, item: dict, query: str) -> CreatorPost | None:
@@ -189,10 +223,19 @@ class ThirdPartyCreatorProvider(CreatorProvider):
         author = clean_text(str(_first(item, "username", "nickname", "author_name", "screen_name") or ""))
         thumbnail_url = _thumbnail(item)
         avatar_url = _url(_first(item, "avatar_url", "avatarUrl", "profile_pic_url", "profilePicUrl", "author_avatar"))
+        url = str(_first(item, "url", "permalink", "share_url") or "").strip()
+        if not url:
+            if self.platform == "instagram":
+                url = f"https://www.instagram.com/p/{external_id}/"
+            elif self.platform == "tiktok":
+                handle = clean_text(str(_first(item, "username", "unique_id") or "")).lstrip("@")
+                url = f"https://www.tiktok.com/@{handle}/video/{external_id}" if handle else ""
+            elif self.platform == "x":
+                url = f"https://x.com/i/web/status/{external_id}"
         return CreatorPost(
             platform=self.platform,
             external_id=external_id,
-            url=str(_first(item, "url", "permalink", "share_url") or ""),
+            url=url,
             title=clean_text(str(_first(item, "title", "caption", "desc", "text") or ""))[:200],
             body=clean_text(str(_first(item, "caption", "desc", "text", "title") or "")),
             author=author,
@@ -207,5 +250,11 @@ class ThirdPartyCreatorProvider(CreatorProvider):
             follower_count=_to_int(_first(item, "follower_count", "followers")),
             # Keep the normalized provider payload so a later API shape change
             # can still recover a cover URL at read time without losing data.
-            raw={"query": query, "provider": self.name, **item},
+            raw={
+                "query": query,
+                "matched_queries": [query],
+                "search_query_evidence": True,
+                "provider": self.name,
+                **item,
+            },
         )
