@@ -8,6 +8,7 @@ from typing import Callable, Optional
 
 from ..config import has_credential
 from ..records import insert_record_if_new, upsert_ad_observation
+from ..relevance import marketing_payload_relevance
 from ..util import utc_now
 
 # A collector takes a db connection + a brand dict and returns record payloads.
@@ -45,7 +46,7 @@ class ConnectorSpec:
 
 def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) -> dict:
     """Execute a connector for a brand, persist new records, update source stats."""
-    result = {"source_id": spec.id, "created": 0, "status": "ok", "error": ""}
+    result = {"source_id": spec.id, "created": 0, "filtered": 0, "status": "ok", "error": ""}
     if spec.collect is None:
         result["status"] = "skipped"
         result["error"] = "Connector has no automated collector"
@@ -79,6 +80,13 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
         created = 0
         for payload in payloads:
             payload.setdefault("source_id", spec.id)
+            relevant, _reason = marketing_payload_relevance(payload, collector_brand)
+            if not relevant:
+                # Only explicit search/discovery rows without visible evidence
+                # are rejected. Configured scopes and creator-specific gates
+                # remain untouched to protect recall.
+                result["filtered"] += 1
+                continue
             # Ad records are de-duplicated in the unified stream, so retain a
             # daily lifecycle snapshot before the normal insert-if-new path.
             upsert_ad_observation(conn, payload)

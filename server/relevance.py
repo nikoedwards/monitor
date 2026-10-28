@@ -1,6 +1,7 @@
 """Source-specific relevance checks shared by collectors and record queries."""
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -107,3 +108,77 @@ def reddit_search_record_is_relevant(record: dict[str, Any], brand_name: str | N
     return query_match_evidence(
         query.strip(), str(record.get("title") or ""), str(record.get("body") or "")
     ) is not None
+
+
+_CONFIGURED_MARKETING_SOURCES = {"social_accounts", "community_site"}
+_MARKETING_CHANNELS = {"media", "social", "creators", "community"}
+
+
+def _payload_raw(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("raw")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def marketing_payload_relevance(payload: dict[str, Any], brand: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """Conservative and explainable gate for marketing ingestion.
+
+    Only explicit search/discovery rows without visible query evidence are
+    rejected. Configured account/link streams and creator-specific evidence
+    checks remain trusted to avoid deleting valid content.
+    """
+    if str(payload.get("dimension") or "") != "marketing":
+        return True, "non_marketing"
+    channel = str(payload.get("channel") or "").strip().lower()
+    if channel not in _MARKETING_CHANNELS:
+        return True, "non_content_channel"
+
+    source_id = str(payload.get("source_id") or "")
+    raw = _payload_raw(payload)
+    if source_id == "google_news":
+        brand_name = str((brand or {}).get("name") or "") if isinstance(brand, dict) else ""
+        return (
+            google_news_match_evidence(
+                str(raw.get("query") or ""), brand_name,
+                str(payload.get("title") or ""), str(payload.get("body") or ""),
+            ) is not None,
+            "google_news_visible_evidence",
+        )
+    if source_id == "reddit_search":
+        brand_name = str((brand or {}).get("name") or "") if isinstance(brand, dict) else ""
+        return (
+            reddit_search_record_is_relevant({
+                "source_id": source_id, "raw": raw, "url": payload.get("url"),
+                "title": payload.get("title"), "body": payload.get("body"),
+            }, brand_name),
+            "reddit_search_visible_evidence",
+        )
+    if source_id in _CONFIGURED_MARKETING_SOURCES:
+        return True, "configured_scope"
+    if channel == "creators":
+        evidence = raw.get("collection_evidence")
+        if isinstance(evidence, dict) and (
+            evidence.get("matched_text")
+            or evidence.get("matched_queries")
+            or evidence.get("transcript_matches")
+            or evidence.get("product_matches")
+        ):
+            return True, "creator_collection_evidence"
+        return True, "creator_runner_gate"
+
+    queries: list[str] = []
+    for key in ("query", "discovery_query"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            queries.append(value.strip())
+    if not queries:
+        return True, "no_discovery_query"
+    title, body = str(payload.get("title") or ""), str(payload.get("body") or "")
+    for query in queries:
+        if query_match_evidence(query, title, body):
+            return True, "discovery_query_visible_evidence"
+    return False, "discovery_query_without_visible_evidence"
