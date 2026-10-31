@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -172,6 +173,17 @@ class SourceDeploymentTests(unittest.TestCase):
             {"DOCKER_BUILDKIT": "1"},
         )
         self.assertTrue(build_call.kwargs["stream_output"])
+
+    def test_run_timeout_terminates_the_command_process_group(self):
+        with self.assertRaises(module.CommandTimedOut):
+            self.deployer.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(30)",
+                ],
+                timeout=0.1,
+            )
 
     def test_pre_stop_validation_failure_discards_candidate(self):
         self.validate_live_data_mount.side_effect = RuntimeError("mount mismatch")

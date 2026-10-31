@@ -30,6 +30,14 @@ class ReleaseFailed(RuntimeError):
     """Raised when a candidate cannot become healthy without intervention."""
 
 
+class CommandFailed(RuntimeError):
+    """Raised when a deployment command exits unsuccessfully."""
+
+
+class CommandTimedOut(RuntimeError):
+    """Raised when a deployment command exceeds its deadline."""
+
+
 MIN_RESTART_HEADROOM = 3 * 1024**3
 IMAGE_BUILD_TIMEOUT = 35 * 60
 SQLITE_HEADER = b"SQLite format 3\x00"
@@ -101,28 +109,65 @@ class SourceDeployer:
         self.rolling_back = False
         self.committed = False
 
+    @staticmethod
+    def _terminate_process(process):
+        if process.poll() is not None:
+            return
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    return
+            else:
+                process.kill()
+            process.wait(timeout=10)
+
     def run(self, args, *, timeout=900, env=None, stream_output=False):
         command_env = os.environ.copy()
         if env:
             command_env.update(env)
-        result = subprocess.run(
+        process = subprocess.Popen(
             args,
             text=True,
             stdout=None if stream_output else subprocess.PIPE,
             stderr=None if stream_output else subprocess.PIPE,
-            check=False,
-            timeout=timeout,
             env=command_env,
+            start_new_session=(os.name == "posix"),
         )
-        if result.returncode != 0:
-            detail = ((result.stdout or "") + (result.stderr or "")).strip()
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_process(process)
+            detail = ((exc.stdout or "") + (exc.stderr or "")).strip()
             if len(detail) > 8000:
                 detail = detail[-8000:]
-            raise RuntimeError(
-                f"Command failed ({result.returncode}): {' '.join(args)}"
+            raise CommandTimedOut(
+                f"Command timed out after {timeout}s: {' '.join(args)}"
+                + (f"\n{detail}" if detail else "")
+            ) from exc
+        except BaseException:
+            self._terminate_process(process)
+            raise
+
+        if process.returncode != 0:
+            detail = ((stdout or "") + (stderr or "")).strip()
+            if len(detail) > 8000:
+                detail = detail[-8000:]
+            raise CommandFailed(
+                f"Command failed ({process.returncode}): {' '.join(args)}"
                 + (f"\n{detail}" if detail else "")
             )
-        return (result.stdout or "").strip()
+        return (stdout or "").strip()
 
     def compose(self, base_file, *args):
         command = [
@@ -175,7 +220,7 @@ class SourceDeployer:
         ]
         try:
             self.run(["docker", "image", "inspect", self.stable_image], timeout=30)
-        except RuntimeError:
+        except CommandFailed:
             pass
         else:
             # The stable image already contains Playwright, Chromium, and the
