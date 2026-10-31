@@ -43,7 +43,7 @@ CAPTURE_RETRY_DELAYS_MS = (2_000,)
 CAPTURE_SLOT = threading.BoundedSemaphore(1)
 # Chromium routinely needs several hundred MB at startup. Keep a large safety
 # margin on small VPS hosts so a screenshot cannot take down SSH/Docker itself.
-CAPTURE_MIN_AVAILABLE_MB = int(os.environ.get("MONITOR_CAPTURE_MIN_AVAILABLE_MB", "768"))
+CAPTURE_MIN_AVAILABLE_MB = int(os.environ.get("MONITOR_CAPTURE_MIN_AVAILABLE_MB", "512"))
 CAPTURE_NAVIGATION_TIMEOUT_MS = 15_000
 CAPTURE_RENDER_WAIT_TIMEOUT_MS = 8_000
 CAPTURE_BROWSER_TIMEOUT_SECONDS = 25
