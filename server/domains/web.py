@@ -287,7 +287,7 @@ def _reuse_recent_shared_capture(
     """Clone a very recent capture of the same URL from another monitor.
 
     Duplicate monitors commonly run together and otherwise make the same site
-    receive several expensive browser visits from one Railway egress address.
+    receive several expensive browser visits from one production egress address.
     Copying the files keeps snapshot deletion independent while coalescing the
     external request that can trigger per-IP rate limits.
     """
