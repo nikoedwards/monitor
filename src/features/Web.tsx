@@ -611,7 +611,7 @@ function SnapshotTimeline({ snapshots, loading, brandId, monitorId, rangeText }:
               >
                 <div className="aspect-[4/3] overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
                   {!active && !historyOpen && snapshot.screenshot_url && (
-                    <img src={snapshot.screenshot_url} alt={snapshot.title} loading="lazy" fetchPriority="low" decoding="async" className="w-full h-full object-cover object-top" />
+                    <img src={snapshot.screenshot_url} alt={snapshot.title} loading="lazy" fetchPriority="low" decoding="async" className="w-full h-full object-contain object-top" />
                   )}
                 </div>
                 <div className="p-2.5">
