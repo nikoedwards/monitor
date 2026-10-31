@@ -1,0 +1,12 @@
+services:
+  monitor:
+    image: monitor-intelligence-hub:isolated-20261027
+    build: null
+    env_file:
+      - ./deploy/aliyun/env/monitor.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8790
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
