@@ -917,14 +917,25 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
     page = None
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                timeout=CAPTURE_NAVIGATION_TIMEOUT_MS,
-                args=[
+            browser_options = {
+                "headless": True,
+                "timeout": CAPTURE_NAVIGATION_TIMEOUT_MS,
+                "args": [
                     "--disable-dev-shm-usage", "--no-sandbox", "--disable-extensions",
                     "--disable-background-networking", "--disable-sync", "--renderer-process-limit=1",
                 ],
-            )
+            }
+            try:
+                # Production Docker images install Playwright's pinned
+                # Chromium under PLAYWRIGHT_BROWSERS_PATH.
+                browser = pw.chromium.launch(**browser_options)
+            except Exception:
+                # Desktop installs may only have Edge/Chrome available.
+                candidates = _browser_candidates()
+                if not candidates:
+                    raise
+                browser_options["executable_path"] = candidates[0]
+                browser = pw.chromium.launch(**browser_options)
             context = browser.new_context(viewport={"width": 1440, "height": 1200})
             loaded: dict[str, tuple[str, bytes]] = {}
             navigation_error = ""
