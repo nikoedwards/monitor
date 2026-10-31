@@ -80,10 +80,25 @@ export default function Voice() {
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
   const [collectMessage, setCollectMessage] = useState("");
   const { collect } = useSourceMutations();
-  const { data: summary, isLoading } = useVocSummary(brandId, range, selectedSources);
-  const { data: records = [], isLoading: recordsLoading } = useVocRecords(brandId, range, selectedSources, 40, sentimentFilter === "all" ? undefined : sentimentFilter);
+  const summaryQuery = useVocSummary(brandId, range, selectedSources);
+  const recordsQuery = useVocRecords(brandId, range, selectedSources, 40, sentimentFilter === "all" ? undefined : sentimentFilter);
+  const { data: summary, isLoading, isError, error, refetch } = summaryQuery;
+  const { data: records = [], isLoading: recordsLoading, isError: recordsError, refetch: refetchRecords } = recordsQuery;
 
-  if (isLoading || !summary) return <Spinner />;
+  if (isLoading && !summary) return <Spinner />;
+  if (isError && !summary) {
+    const message = error instanceof Error ? error.message : "用户之声接口暂时不可用";
+    return (
+      <Card>
+        <EmptyState
+          title="用户之声暂时加载失败"
+          hint={`${message}。请确认数据服务正常后重试。`}
+          action={<Button onClick={() => { void refetch(); void refetchRecords(); }}>重新加载</Button>}
+        />
+      </Card>
+    );
+  }
+  if (!summary) return <Spinner />;
   const totals = summary.totals;
   const p0 = summary.p0 || { total: 0, issue_count: 0, issues: [] };
   const sourceCatalog = summary.source_catalog || [];
@@ -236,7 +251,9 @@ export default function Voice() {
           ))}
           {sentimentFilter !== "all" && <span className="text-[12px]" style={{ color: "var(--mute)" }}>当前显示 {filteredRecords.length} 条</span>}
         </div>
-        {recordsLoading ? <Spinner /> : <RecordList records={filteredRecords} emptyHint="当前时间和来源范围内暂无反馈，请调整数据来源或补充导入。" />}
+        {recordsLoading ? <Spinner /> : recordsError ? (
+          <EmptyState title="反馈明细加载失败" hint="汇总数据已加载，但明细接口暂时不可用。" action={<Button size="sm" onClick={() => void refetchRecords()}>重试明细</Button>} />
+        ) : <RecordList records={filteredRecords} emptyHint="当前时间和来源范围内暂无反馈，请调整数据来源或补充导入。" />}
       </Card>
 
       <DataSourceModal

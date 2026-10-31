@@ -211,6 +211,8 @@ export function useVocSummary(brandId?: string, range?: TimeRange, sources?: str
     queryKey: ["voc-summary", brandId, rp, sources],
     queryFn: () => api.get<any>(`/api/voc/summary${qs({ brand_id: brandId, sources: sources?.join(","), ...rp })}`),
     enabled: !!brandId,
+    staleTime: 30_000,
+    retry: 1,
   });
 }
 
@@ -223,6 +225,8 @@ export function useVocRecords(brandId?: string, range?: TimeRange, sources?: str
         .get<{ records: RecordItem[] }>(`/api/voc/records${qs({ brand_id: brandId, sources: sources?.join(","), sentiment, limit, ...rp })}`)
         .then((data) => data.records),
     enabled: !!brandId,
+    staleTime: 30_000,
+    retry: 1,
   });
 }
 
