@@ -10,6 +10,14 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8790
+      # Chromium runs in a disposable worker. Low-memory workers stitch a
+      # full-page PNG from bounded viewport tiles and skip media archiving.
+      MONITOR_CAPTURE_ISOLATED: "1"
+      MONITOR_CAPTURE_MIN_AVAILABLE_MB: "320"
+      MONITOR_CAPTURE_SAFE_MEMORY_MB: "768"
+      MONITOR_CAPTURE_CHUNK_MAX_HEIGHT: "900"
+      MONITOR_CAPTURE_MAX_STITCH_HEIGHT: "16000"
+      MONITOR_CAPTURE_JOB_TIMEOUT_SECONDS: "90"
     # Keep the application private when Caddy is enabled. Set
     # APP_BIND_ADDRESS=0.0.0.0 if direct access is required instead.
     ports:
