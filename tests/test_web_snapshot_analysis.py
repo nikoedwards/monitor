@@ -34,6 +34,7 @@ from server.snapshot import (
     SnapshotCaptureError,
     SnapshotCaptureBusy,
     _capture_error_reason,
+    _capture_chunked_screenshot,
     _optimize_archive_image,
     _playwright_capture,
     analyze_change,
@@ -98,6 +99,57 @@ class VisualDiffTests(unittest.TestCase):
             self.assertTrue((root / archive).is_file())
             playwright_capture.assert_not_called()
             subprocess_capture.assert_not_called()
+
+    def test_capture_uses_safe_mode_before_raster_fallback(self):
+        with patch("server.snapshot._available_memory_mb", return_value=600), patch(
+            "server.snapshot._capture_artifacts_unlocked",
+            return_value=("safe.png", "safe.html", {"method": "playwright"}),
+        ) as capture:
+            result = capture_artifacts("https://example.com", "Example", "text", "", "safe")
+        self.assertEqual(result[0], "safe.png")
+        self.assertTrue(capture.call_args.kwargs["safe_mode"])
+
+    def test_isolated_worker_error_does_not_retry_browser_in_api_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch("server.snapshot.CAPTURE_ISOLATED", True),
+                patch("server.snapshot._isolated_playwright_capture", return_value={"error": "worker timeout"}),
+                patch("server.snapshot._subprocess_capture") as subprocess_capture,
+            ):
+                screenshot, archive, meta = capture_artifacts(
+                    "https://example.com", "Example", "text", "<p>text</p>", "isolated-error",
+                )
+            self.assertEqual(meta["resource_guard"], "isolated_worker_error")
+            self.assertTrue((root / screenshot).is_file())
+            self.assertTrue((root / archive).is_file())
+            subprocess_capture.assert_not_called()
+
+    def test_chunked_screenshot_stitches_a_long_page(self):
+        class FakePage:
+            def __init__(self):
+                self.scroll_y = 0
+
+            def evaluate(self, expression, *args):
+                if "scrollHeight" in expression:
+                    return {"width": 1440, "height": 1700, "viewport": 600}
+                if "scrollTo" in expression:
+                    self.scroll_y = int(args[0]) if args else 0
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+            def screenshot(self, path, **_kwargs):
+                Image.new("RGB", (1440, 600), (self.scroll_y % 255, 0, 0)).save(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "stitched.png"
+            result = _capture_chunked_screenshot(FakePage(), output, 600)
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (1440, 1700))
+            self.assertEqual(result["chunks"], 3)
+            self.assertFalse(result["scaled"])
 
     def test_identical_images_have_no_visual_change(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,12 +10,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import logging
 import mimetypes
 import os
 import re
+import signal
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -43,10 +47,19 @@ CAPTURE_RETRY_DELAYS_MS = (2_000,)
 CAPTURE_SLOT = threading.BoundedSemaphore(1)
 # Chromium routinely needs several hundred MB at startup. Keep a large safety
 # margin on small VPS hosts so a screenshot cannot take down SSH/Docker itself.
-CAPTURE_MIN_AVAILABLE_MB = int(os.environ.get("MONITOR_CAPTURE_MIN_AVAILABLE_MB", "768"))
+# The production container is capped at 700 MB. The 320 MB floor reserves
+# roughly 160 MB for the API, 120 MB for Chromium startup, and 40 MB for one
+# screenshot tile and its temporary PNG. Larger pages are stitched tile by
+# tile, so their height does not multiply the browser raster allocation.
+CAPTURE_MIN_AVAILABLE_MB = int(os.environ.get("MONITOR_CAPTURE_MIN_AVAILABLE_MB", "320"))
+CAPTURE_SAFE_MEMORY_MB = int(os.environ.get("MONITOR_CAPTURE_SAFE_MEMORY_MB", "768"))
+CAPTURE_CHUNK_MAX_HEIGHT = int(os.environ.get("MONITOR_CAPTURE_CHUNK_MAX_HEIGHT", "900"))
+CAPTURE_MAX_STITCH_HEIGHT = int(os.environ.get("MONITOR_CAPTURE_MAX_STITCH_HEIGHT", "16000"))
 CAPTURE_NAVIGATION_TIMEOUT_MS = 15_000
 CAPTURE_RENDER_WAIT_TIMEOUT_MS = 8_000
 CAPTURE_BROWSER_TIMEOUT_SECONDS = 25
+CAPTURE_JOB_TIMEOUT_SECONDS = int(os.environ.get("MONITOR_CAPTURE_JOB_TIMEOUT_SECONDS", "90"))
+CAPTURE_ISOLATED = os.environ.get("MONITOR_CAPTURE_ISOLATED", "0").strip().lower() in {"1", "true", "yes"}
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
 _ARCHIVE_GUARD_MARKER = f'data-monitor-archive-guard="{ARCHIVE_REPLAY_VERSION}"'
 _ARCHIVE_GUARD_TAG_RE = re.compile(
@@ -645,6 +658,74 @@ def _prepare_page_for_full_capture(page) -> dict:
     return media
 
 
+def _capture_chunk_height(available_memory_mb: int | None) -> int:
+    """Choose a viewport tile height that leaves room for the API process."""
+    if available_memory_mb is None:
+        return min(CAPTURE_CHUNK_MAX_HEIGHT, 800)
+    if available_memory_mb < 420:
+        return min(CAPTURE_CHUNK_MAX_HEIGHT, 520)
+    if available_memory_mb < 600:
+        return min(CAPTURE_CHUNK_MAX_HEIGHT, 700)
+    return CAPTURE_CHUNK_MAX_HEIGHT
+
+
+def _capture_chunked_screenshot(page, png_path: Path, chunk_height: int) -> dict:
+    """Capture a long page one viewport at a time and stitch it on disk."""
+    from PIL import Image
+
+    dimensions = page.evaluate(
+        """() => ({
+          width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0, window.innerWidth),
+          height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, window.innerHeight),
+          viewport: window.innerHeight
+        })"""
+    )
+    width = max(1, min(int(dimensions.get("width") or 1440), 1440))
+    document_height = max(1, int(dimensions.get("height") or chunk_height))
+    max_height = max(1, CAPTURE_MAX_STITCH_HEIGHT)
+    scale = min(1.0, max_height / document_height)
+    output_width = max(1, int(round(width * scale)))
+    output_height = max(1, int(round(document_height * scale)))
+    viewport_height = max(1, min(chunk_height, int(dimensions.get("viewport") or chunk_height)))
+    positions = list(range(0, max(1, document_height - viewport_height + 1), viewport_height))
+    bottom = max(0, document_height - viewport_height)
+    if not positions or positions[-1] != bottom:
+        positions.append(bottom)
+
+    with tempfile.TemporaryDirectory(prefix=f".{png_path.stem}.", dir=str(png_path.parent)) as temp_dir:
+        canvas = Image.new("RGB", (output_width, output_height), (255, 255, 255))
+        previous_end = 0
+        for index, y in enumerate(dict.fromkeys(positions)):
+            page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
+            page.wait_for_timeout(80)
+            chunk_path = Path(temp_dir) / f"chunk-{index}.png"
+            page.screenshot(path=str(chunk_path), full_page=False, animations="disabled", caret="hide")
+            source_top = max(0, previous_end - y)
+            visible_height = min(viewport_height - source_top, document_height - y)
+            with Image.open(chunk_path) as chunk:
+                piece = chunk.convert("RGB").crop((0, source_top, width, source_top + visible_height))
+                if scale < 1.0:
+                    piece = piece.resize(
+                        (output_width, max(1, int(round(visible_height * scale)))),
+                        Image.Resampling.LANCZOS,
+                    )
+                canvas.paste(piece, (0, int(round((y + source_top) * scale))))
+            previous_end = max(previous_end, y + viewport_height)
+        page.evaluate("window.scrollTo(0, 0)")
+        canvas.save(png_path, format="PNG", optimize=False)
+        canvas.close()
+    return {
+        "width": width,
+        "output_width": output_width,
+        "height": output_height,
+        "document_height": document_height,
+        "chunk_height": viewport_height,
+        "chunks": len(dict.fromkeys(positions)),
+        "scaled": scale < 1.0,
+        "scale": round(scale, 4),
+    }
+
+
 def _resource_url_allowed(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and not _is_blocked_host(parsed.hostname or "")
@@ -887,10 +968,20 @@ def _serialize_archive(page, resources: dict[str, str], original_url: str) -> st
     )
 
 
-def _write_fallback_archive(filename: str, url: str, title: str, html: str, text: str, error: str = "") -> str:
+def _write_fallback_archive(
+    filename: str,
+    url: str,
+    title: str,
+    html: str,
+    text: str,
+    error: str = "",
+    *,
+    root: Path | None = None,
+) -> str:
     """Write a limited offline HTML artifact when Playwright archiving is unavailable."""
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    path = SNAPSHOT_DIR / filename
+    output_root = root or SNAPSHOT_DIR
+    output_root.mkdir(parents=True, exist_ok=True)
+    path = output_root / filename
     excerpt = "\n".join(clean_text(line) for line in (text or "").splitlines() if clean_text(line))[:30000]
     original = (html or "")[:3_000_000]
     page = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -902,7 +993,14 @@ def _write_fallback_archive(filename: str, url: str, title: str, html: str, text
     return filename
 
 
-def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: str = "") -> dict | None:
+def _playwright_capture(
+    url: str,
+    png_path: Path,
+    html_path: Path,
+    source_html: str = "",
+    *,
+    safe_mode: bool = False,
+) -> dict | None:
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is False:
         return None
@@ -936,7 +1034,9 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                     raise
                 browser_options["executable_path"] = candidates[0]
                 browser = pw.chromium.launch(**browser_options)
-            context = browser.new_context(viewport={"width": 1440, "height": 1200})
+            capture_memory_mb = _available_memory_mb() if safe_mode else None
+            chunk_height = _capture_chunk_height(capture_memory_mb) if safe_mode else 1200
+            context = browser.new_context(viewport={"width": 1440, "height": chunk_height})
             loaded: dict[str, tuple[str, bytes]] = {}
             navigation_error = ""
             archive_error = ""
@@ -950,7 +1050,8 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                     page.close()
                 page = context.new_page()
                 loaded.clear()
-                page.on("response", lambda response: _capture_loaded_resource(loaded, response))
+                if not safe_mode:
+                    page.on("response", lambda response: _capture_loaded_resource(loaded, response))
                 navigation_error = ""
                 response = None
                 try:
@@ -976,7 +1077,8 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                     page.close()
                 page = context.new_page()
                 loaded.clear()
-                page.on("response", lambda response: _capture_loaded_resource(loaded, response))
+                if not safe_mode:
+                    page.on("response", lambda response: _capture_loaded_resource(loaded, response))
                 source_served = False
 
                 def serve_fetched_document(route):
@@ -1015,26 +1117,58 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
                 raise SnapshotCaptureError(
                     f"截图连续 {attempt_count} 次返回无效错误页：{capture_error}"
                 )
-            media = _prepare_page_for_full_capture(page)
-            try:
-                page.wait_for_load_state("networkidle", timeout=5_000)
-            except PlaywrightTimeoutError:
-                page.wait_for_timeout(1000)
-            page.screenshot(path=str(png_path), full_page=True, animations="disabled", caret="hide")
-            try:
-                manifest = _archive_manifest(page)
-                resources, archive_meta = _build_archive_resource_map(context, manifest, loaded)
+            if safe_mode:
+                # On the small production host, avoid the expensive full-page
+                # lazy-media pass and the in-memory resource archive. The
+                # page is captured as bounded viewport tiles, so Chromium
+                # never allocates one giant full-page raster.
+                chunk_meta = _capture_chunked_screenshot(page, png_path, chunk_height)
+                media = {
+                    "safe_mode": True,
+                    "available_memory_mb": capture_memory_mb,
+                    "chunked_screenshot": chunk_meta,
+                }
                 archive_url = url if source_html_fallback else (page.url or url)
-                html_path.write_text(_serialize_archive(page, resources, archive_url), encoding="utf-8")
-                archive_meta["archive_size"] = html_path.stat().st_size
-            except Exception as exc:
-                archive_error = str(exc)[:300]
+                try:
+                    safe_text = page.locator("body").inner_text(timeout=2_000)[:30_000]
+                except Exception:
+                    safe_text = ""
+                _write_fallback_archive(
+                    html_path.name,
+                    archive_url,
+                    page.title() or "",
+                    source_html[:1_000_000],
+                    safe_text,
+                    "低内存安全模式：已生成分块整页截图，未生成自包含资源归档",
+                    root=html_path.parent,
+                )
+                archive_meta = {
+                    "self_contained": False,
+                    "safe_mode": True,
+                    "chunked_screenshot": chunk_meta,
+                    "archive_size": html_path.stat().st_size if html_path.exists() else 0,
+                }
+            else:
+                media = _prepare_page_for_full_capture(page)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5_000)
+                except PlaywrightTimeoutError:
+                    page.wait_for_timeout(1000)
+                page.screenshot(path=str(png_path), full_page=True, animations="disabled", caret="hide")
+                try:
+                    manifest = _archive_manifest(page)
+                    resources, archive_meta = _build_archive_resource_map(context, manifest, loaded)
+                    archive_url = url if source_html_fallback else (page.url or url)
+                    html_path.write_text(_serialize_archive(page, resources, archive_url), encoding="utf-8")
+                    archive_meta["archive_size"] = html_path.stat().st_size
+                except Exception as exc:
+                    archive_error = str(exc)[:300]
             try:
                 page_data = {
                     "final_url": page.url or url,
                     "title": page.title(),
                     "text": page.locator("body").inner_text(timeout=5_000)[:200_000],
-                    "html": page.content()[:3_000_000],
+                    "html": source_html[:3_000_000] if safe_mode else page.content()[:3_000_000],
                 }
             except Exception:
                 page_data = {"final_url": page.url or url, "title": "", "text": "", "html": ""}
@@ -1071,6 +1205,83 @@ def _playwright_capture(url: str, png_path: Path, html_path: Path, source_html: 
             except Exception:
                 pass
     return None
+
+
+def _kill_capture_process(process: subprocess.Popen) -> None:
+    """Terminate an isolated browser worker and every Chromium child it owns."""
+    try:
+        if os.name == "nt":
+            # ``Popen.kill`` only terminates the Python worker on Windows;
+            # Chromium is a separate child process.  Kill the process tree so
+            # a timed-out capture cannot leave a headless browser behind.
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _isolated_playwright_capture(
+    url: str,
+    png_path: Path,
+    html_path: Path,
+    source_html: str = "",
+    *,
+    safe_mode: bool = False,
+) -> dict | None:
+    """Run Chromium outside the API process so a stuck browser is disposable."""
+    source_limit = 1_000_000 if safe_mode else 3_000_000
+    request = json.dumps(
+        {
+            "url": url,
+            "png_path": str(png_path),
+            "html_path": str(html_path),
+            "source_html": source_html[:source_limit],
+            "safe_mode": safe_mode,
+        },
+        ensure_ascii=False,
+    )
+    env = os.environ.copy()
+    env["MONITOR_CAPTURE_ISOLATED"] = "0"
+    process = subprocess.Popen(
+        [sys.executable, "-m", "server.snapshot_worker"],
+        cwd=str(ROOT),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        start_new_session=(os.name != "nt"),
+        env=env,
+    )
+    try:
+        stdout, stderr = process.communicate(request, timeout=CAPTURE_JOB_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _kill_capture_process(process)
+        process.communicate()
+        return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止"}
+    if os.name != "nt":
+        # The worker normally closes Chromium itself. Kill any process-group
+        # stragglers before parsing the result so they cannot accumulate.
+        _kill_capture_process(process)
+    if process.returncode != 0:
+        detail = (stderr or stdout or f"worker exit {process.returncode}").strip()
+        return {"error": detail[-500:]}
+    try:
+        result = json.loads((stdout or "").strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"error": (stdout or stderr or "截图进程未返回有效结果")[-500:]}
+    if result.get("error_type") == "snapshot_capture":
+        raise SnapshotCaptureError(result.get("error") or "隔离截图失败")
+    return result
 
 
 def _browser_candidates() -> list[str]:
@@ -1302,6 +1513,7 @@ def _capture_artifacts_unlocked(
     base_name: str,
     *,
     prefetch_error: str = "",
+    safe_mode: bool = False,
 ) -> tuple[str, str, dict]:
     """Return ``(screenshot filename, archive filename, metadata)``."""
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1311,7 +1523,13 @@ def _capture_artifacts_unlocked(
     html_path = SNAPSHOT_DIR / html_filename
 
     try:
-        pw_result = _playwright_capture(url, png_path, html_path, html)
+        capture_function = _isolated_playwright_capture if CAPTURE_ISOLATED else _playwright_capture
+        if safe_mode:
+            pw_result = capture_function(url, png_path, html_path, html, safe_mode=True)
+        else:
+            # Keep the legacy call shape for tests and integrations that
+            # provide a lightweight four-argument capture function.
+            pw_result = capture_function(url, png_path, html_path, html)
     except SnapshotCaptureError as exc:
         png_path.unlink(missing_ok=True)
         html_path.unlink(missing_ok=True)
@@ -1340,6 +1558,23 @@ def _capture_artifacts_unlocked(
             pw_result["prefetch_error"] = prefetch_error
             pw_result["browser_prefetch_fallback"] = True
         return png_filename, html_filename, pw_result
+
+    # When isolation is enabled, never retry browser work in the API process.
+    # A failed or timed-out worker is already evidence that this capture is
+    # unsafe for the current host; return a cheap artifact instead.
+    if CAPTURE_ISOLATED:
+        png_path.unlink(missing_ok=True)
+        html_path.unlink(missing_ok=True)
+        error = (pw_result or {}).get("error", "") or "隔离截图进程不可用"
+        logger.warning("Using isolated raster fallback for %s: %s", url, error)
+        _write_raster_fallback(png_filename, url, title, text, error)
+        _write_fallback_archive(html_filename, url, title, html, text, error)
+        return png_filename, html_filename, {
+            "method": "raster_fallback",
+            "resource_guard": "isolated_worker_error",
+            "error": error,
+            "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
+        }
 
     if prefetch_error:
         png_path.unlink(missing_ok=True)
@@ -1400,8 +1635,11 @@ def capture_artifacts(
                 "error": error,
                 "archive": {"self_contained": False, "archive_size": (SNAPSHOT_DIR / html_filename).stat().st_size},
             }
+        safe_mode = available_memory_mb is not None and available_memory_mb < CAPTURE_SAFE_MEMORY_MB
         return _capture_artifacts_unlocked(
-            url, title, text, html, base_name, prefetch_error=prefetch_error,
+            url, title, text, html, base_name,
+            prefetch_error=prefetch_error,
+            safe_mode=safe_mode,
         )
     finally:
         CAPTURE_SLOT.release()
