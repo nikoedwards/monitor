@@ -884,7 +884,14 @@ export function useWebMutations() {
   };
   return {
     create: useMutation({ mutationFn: (m: Record<string, unknown>) => api.post("/api/web/monitors", m), onSuccess: invalidate }),
-    capture: useMutation({ mutationFn: (id: string) => api.post(`/api/web/monitors/${id}/capture`), onSuccess: invalidate }),
+    capture: useMutation({
+      mutationFn: (id: string) => api.post(`/api/web/monitors/${id}/capture`),
+      onSuccess: () => {
+        invalidate();
+        window.setTimeout(invalidate, 5_000);
+        window.setTimeout(invalidate, 20_000);
+      },
+    }),
     update: useMutation({
       mutationFn: ({ id, ...m }: Record<string, unknown> & { id: string }) => api.put(`/api/web/monitors/${id}`, m),
       onSuccess: invalidate,
