@@ -93,6 +93,7 @@ class SnapshotCaptureBusy(RuntimeError):
 
 def _available_memory_mb() -> int | None:
     """Return the memory available to the container when Linux exposes it."""
+    limits: list[int] = []
     try:
         current_path = Path("/sys/fs/cgroup/memory.current")
         limit_path = Path("/sys/fs/cgroup/memory.max")
@@ -101,16 +102,17 @@ def _available_memory_mb() -> int | None:
             limit_raw = limit_path.read_text().strip()
             if limit_raw != "max":
                 limit = int(limit_raw)
-                return max(0, (limit - current) // (1024 * 1024))
+                limits.append(max(0, (limit - current) // (1024 * 1024)))
     except (OSError, ValueError):
         pass
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemAvailable:"):
-                return max(0, int(line.split()[1]) // 1024)
+                limits.append(max(0, int(line.split()[1]) // 1024))
+                break
     except (OSError, ValueError, IndexError):
         pass
-    return None
+    return min(limits) if limits else None
 
 
 def _capture_error_reason(status: int | None, page_url: str, body_text: str) -> str:
@@ -680,7 +682,9 @@ def _capture_chunk_height(available_memory_mb: int | None) -> int:
     return CAPTURE_CHUNK_MAX_HEIGHT
 
 
-def _capture_chunked_screenshot(page, png_path: Path, chunk_height: int) -> dict:
+def _capture_chunked_screenshot(
+    page, png_path: Path, chunk_height: int, *, max_height: int | None = None,
+) -> dict:
     """Capture a long page one viewport at a time and stitch it on disk."""
     from PIL import Image
 
@@ -693,7 +697,7 @@ def _capture_chunked_screenshot(page, png_path: Path, chunk_height: int) -> dict
     )
     width = max(1, min(int(dimensions.get("width") or 1440), 1440))
     document_height = max(1, int(dimensions.get("height") or chunk_height))
-    max_height = max(1, CAPTURE_MAX_STITCH_HEIGHT)
+    max_height = max(1, max_height if max_height is not None else CAPTURE_MAX_STITCH_HEIGHT)
     scale = min(1.0, max_height / document_height)
     output_width = max(1, int(round(width * scale)))
     output_height = max(1, int(round(document_height * scale)))
@@ -1140,20 +1144,13 @@ def _playwright_capture(
                 # lazy-media pass and the in-memory resource archive. The
                 # page is captured as bounded viewport tiles, so Chromium
                 # never allocates one giant full-page raster.
-                if capture_memory_mb is not None and capture_memory_mb < CAPTURE_MIN_AVAILABLE_MB:
-                    previous_max_stitch_height = CAPTURE_MAX_STITCH_HEIGHT
-                    try:
-                        # Keep the emergency worker bounded even when a page
-                        # reports an extremely tall document.
-                        globals()["CAPTURE_MAX_STITCH_HEIGHT"] = min(
-                            CAPTURE_MAX_STITCH_HEIGHT,
-                            CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT,
-                        )
-                        chunk_meta = _capture_chunked_screenshot(page, png_path, chunk_height)
-                    finally:
-                        globals()["CAPTURE_MAX_STITCH_HEIGHT"] = previous_max_stitch_height
-                else:
-                    chunk_meta = _capture_chunked_screenshot(page, png_path, chunk_height)
+                chunk_meta = _capture_chunked_screenshot(
+                    page, png_path, chunk_height,
+                    max_height=(CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT
+                                if capture_memory_mb is not None
+                                and capture_memory_mb < CAPTURE_MIN_AVAILABLE_MB
+                                else CAPTURE_MAX_STITCH_HEIGHT),
+                )
                 media = {
                     "safe_mode": True,
                     "available_memory_mb": capture_memory_mb,

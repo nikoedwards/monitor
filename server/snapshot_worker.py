@@ -83,7 +83,14 @@ def main() -> int:
     _prefer_worker_oom_kill()
     request = json.loads(sys.stdin.read())
     try:
-        result = _playwright_capture(
+        capture = _playwright_capture
+        if os.name == "posix" and request.get("safe_mode"):
+            # Chromium's DevTools protocol avoids loading Playwright's Node
+            # driver alongside the browser on the small production VPS.
+            from .snapshot_cdp import capture as capture_cdp
+
+            capture = capture_cdp
+        result = capture(
             request["url"],
             Path(request["png_path"]),
             Path(request["html_path"]),
