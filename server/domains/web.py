@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import sqlite3
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
@@ -38,6 +39,7 @@ from ..util import (
     utc_now,
 )
 from .common import get_conn
+from ..db import db
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 
@@ -466,6 +468,32 @@ def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
     return snapshots
 
 
+def _capture_monitor_background(monitor: dict) -> None:
+    """Run a manual capture outside the HTTP request lifetime."""
+    try:
+        with db() as conn:
+            capture_monitor(conn, monitor)
+    except Exception:
+        # capture_monitor records expected page failures on the monitor. Keep
+        # the worker exception out of the request server and log it through
+        # the application's standard exception hook when available.
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Background web snapshot failed for %s", monitor.get("id")
+        )
+
+
+def _queue_capture(monitor: dict) -> None:
+    thread = threading.Thread(
+        target=_capture_monitor_background,
+        args=(dict(monitor),),
+        name=f"web-snapshot-{monitor.get('id', 'unknown')[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
 def check_monitor(conn: sqlite3.Connection, monitor: dict) -> dict:
     urls = (
         _discover_pages(monitor["url"], monitor.get("crawl_limit") or DEFAULT_CRAWL_LIMIT)
@@ -753,11 +781,12 @@ def capture(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
     row = conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    try:
-        snapshots = capture_monitor(conn, dict(row))
-    except SnapshotCaptureBusy as exc:
-        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
-    return {"snapshots": snapshots, "captured": len(snapshots)}
+    _queue_capture(dict(row))
+    return {
+        "queued": True,
+        "monitor_id": monitor_id,
+        "message": "截图任务已开始，完成后会出现在时间线中",
+    }
 
 
 @router.get("/snapshots/{snapshot_id}/comparison")

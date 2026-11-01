@@ -45,6 +45,7 @@ from server.snapshot import (
     upgrade_snapshot_archives,
     upgrade_snapshot_fallback_images,
 )
+from server.domains import web as web_domain
 
 
 class TextDiffTests(unittest.TestCase):
@@ -95,6 +96,17 @@ class VisualDiffTests(unittest.TestCase):
 
     def test_emergency_memory_uses_small_chunks(self):
         self.assertEqual(_capture_chunk_height(64), 420)
+
+    def test_manual_capture_is_queued_without_waiting_for_browser(self):
+        row = {"id": "monitor-1", "name": "Example", "url": "https://example.com"}
+        with patch.object(web_domain, "_queue_capture") as queue:
+            result = web_domain.capture("monitor-1", conn=type("Conn", (), {
+                "execute": lambda self, *_args: type("Result", (), {
+                    "fetchone": lambda _self: row,
+                })(),
+            })())
+        self.assertTrue(result["queued"])
+        queue.assert_called_once_with(row)
 
     def test_capture_uses_safe_mode_before_raster_fallback(self):
         with patch("server.snapshot._available_memory_mb", return_value=600), patch(
