@@ -13,9 +13,12 @@ services:
       # Chromium runs in a disposable worker. Low-memory workers stitch a
       # full-page PNG from bounded viewport tiles and skip media archiving.
       MONITOR_CAPTURE_ISOLATED: "1"
+      MONITOR_CAPTURE_OOM_SCORE_ADJ: "800"
       MONITOR_CAPTURE_MIN_AVAILABLE_MB: "320"
       MONITOR_CAPTURE_SAFE_MEMORY_MB: "768"
       MONITOR_CAPTURE_CHUNK_MAX_HEIGHT: "900"
+      MONITOR_CAPTURE_EMERGENCY_VIEWPORT_WIDTH: "1024"
+      MONITOR_CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT: "420"
       MONITOR_CAPTURE_MAX_STITCH_HEIGHT: "16000"
       MONITOR_CAPTURE_JOB_TIMEOUT_SECONDS: "90"
     # Keep the application private when Caddy is enabled. Set
