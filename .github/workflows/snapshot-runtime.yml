@@ -1,0 +1,37 @@
+name: Screenshot runtime
+
+on:
+  pull_request:
+    paths:
+      - server/snapshot*.py
+      - tests/*snapshot*.py
+      - requirements.txt
+      - Dockerfile
+      - .github/workflows/snapshot-runtime.yml
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-chromium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production runtime
+        run: docker build -t monitor-snapshot-test .
+      - name: Verify CDP in a bounded Linux container
+        timeout-minutes: 4
+        run: |
+          docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
+            --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
+            --network=none monitor-snapshot-test python -m unittest tests.test_snapshot_cdp
+      - name: Verify API health, timeout cleanup and live Plaud PNG
+        timeout-minutes: 4
+        run: |
+          docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
+            --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
+            -e MONITOR_TEST_SNAPSHOT_URL=https://www.plaud.ai/ \
+            -e MONITOR_CAPTURE_MIN_AVAILABLE_MB=320 \
+            -e MONITOR_CAPTURE_SAFE_MEMORY_MB=768 \
+            monitor-snapshot-test python -m tests.snapshot_runtime_probe
