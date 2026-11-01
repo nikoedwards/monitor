@@ -146,11 +146,20 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
 
     memory = _available_memory_mb()
     emergency = memory is None or memory < CAPTURE_MIN_AVAILABLE_MB
+    constrained = memory is None or memory < int(
+        os.environ.get("MONITOR_CAPTURE_SAFE_MEMORY_MB", "768")
+    )
     width = max(
         320,
-        min(CAPTURE_EMERGENCY_VIEWPORT_WIDTH if emergency else 1440, 1440),
+        min(CAPTURE_EMERGENCY_VIEWPORT_WIDTH if constrained else 1440, 1440),
     )
-    height = max(240, _capture_chunk_height(0 if memory is None else memory))
+    height = max(
+        240,
+        min(
+            _capture_chunk_height(0 if memory is None else memory),
+            420 if constrained else 900,
+        ),
+    )
     browser = None
     socket = None
     # The outer isolated worker owns a process group. Keep Chromium in it so
@@ -171,12 +180,12 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                     _browser_binary(), "--headless", "--no-sandbox", "--disable-gpu",
                     "--disable-dev-shm-usage", "--disable-background-networking",
                     "--disable-extensions", "--disable-sync", "--no-first-run", "--mute-audio",
-                    "--renderer-process-limit=1", "--js-flags=--max-old-space-size=96",
+                    "--renderer-process-limit=1",
                     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
                     f"--user-data-dir={profile}", f"--window-size={width},{height}", "about:blank",
                 ]
-                if not emergency:
-                    browser_args.remove("--js-flags=--max-old-space-size=96")
+                if constrained:
+                    browser_args.append("--js-flags=--max-old-space-size=128")
                 browser = subprocess.Popen(
                     browser_args, stdout=subprocess.DEVNULL, stderr=browser_log,
                     start_new_session=owns_browser_group,
@@ -207,7 +216,9 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                     page.call("Emulation.setDeviceMetricsOverride", {
                         "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
                     })
-                    page.call("Network.setBlockedURLs", {"urls": ["*.mp4", "*.webm", "*.m3u8"]})
+                    page.call("Network.setBlockedURLs", {
+                        "urls": ["*.mp4", "*.webm", "*.m3u8", "*.gif"],
+                    })
                     source_fallback = False
                     try:
                         data = page.navigate(url)
@@ -238,8 +249,11 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                         # which low-memory engine produced the image.
                         "method": "playwright", "engine": "chromium_cdp",
                         "source_html_fallback": source_fallback,
-                        "page": data, "media": {"safe_mode": True, "emergency_mode": emergency,
-                            "available_memory_mb": memory, "viewport_width": width, "chunked_screenshot": tiles},
+                        "page": data, "media": {
+                            "safe_mode": True, "constrained_mode": constrained,
+                            "emergency_mode": emergency, "available_memory_mb": memory,
+                            "viewport_width": width, "chunked_screenshot": tiles,
+                        },
                         "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
                     }
                 finally:
