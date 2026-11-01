@@ -31,6 +31,7 @@ jobs:
           python3 -m compileall -q server deploy/aliyun/autodeploy
           python3 -m unittest tests/test_aliyun_deploy.py tests/test_aliyun_source_deploy.py
       - name: Transfer source and deploy Monitor
+        timeout-minutes: 20
         env:
           SSH_HOST: ${{ secrets.ALIYUN_MONITOR_HOST }}
           SSH_KEY: ${{ secrets.ALIYUN_MONITOR_SSH_KEY }}
