@@ -47,7 +47,7 @@ CAPTURE_RETRY_DELAYS_MS = (2_000,)
 CAPTURE_SLOT = threading.BoundedSemaphore(1)
 # Chromium routinely needs several hundred MB at startup. Keep a large safety
 # margin on small VPS hosts so a screenshot cannot take down SSH/Docker itself.
-# The production container is capped at 700 MB. The 320 MB floor reserves
+# The production container is capped at 640 MB. The 320 MB floor reserves
 # roughly 160 MB for the API, 120 MB for Chromium startup, and 40 MB for one
 # screenshot tile and its temporary PNG. Larger pages are stitched tile by
 # tile, so their height does not multiply the browser raster allocation.
