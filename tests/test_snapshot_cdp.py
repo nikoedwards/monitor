@@ -45,3 +45,18 @@ class SnapshotCdpIntegrationTests(unittest.TestCase):
                 self.assertGreater(image.height, 1200)
             self.assertTrue(html_path.is_file())
 
+    def test_cdp_scriptless_mode_still_renders_real_html(self):
+        source = "<html><body><main style='height:900px;background:#123456'>Static HTML</main><script>while (true) {}</script></body></html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = capture(
+                "data:text/html;charset=utf-8," + quote(source),
+                root / "capture.png", root / "capture.html", source,
+                safe_mode=True, scriptless=True,
+            )
+            self.assertEqual(result["engine"], "chromium_cdp")
+            self.assertTrue(result["script_execution_disabled"])
+            with Image.open(root / "capture.png") as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertGreater(image.height, 800)
+

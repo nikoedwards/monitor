@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import time
@@ -141,7 +142,10 @@ class _Page:
         return data
 
 
-def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_mode=True):
+def capture(
+    url: str, png_path: Path, html_path: Path, source_html="", *,
+    safe_mode=True, scriptless=False,
+):
     import websocket
 
     memory = _available_memory_mb()
@@ -162,6 +166,7 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
     )
     browser = None
     socket = None
+    stage = "launch"
     # The outer isolated worker owns a process group. Keep Chromium in it so
     # the supervisor's timeout/SIGKILL reaches every browser child as well.
     # Standalone diagnostics need their own browser group for the same reason.
@@ -219,6 +224,9 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                     page.call("Network.setBlockedURLs", {
                         "urls": ["*.mp4", "*.webm", "*.m3u8", "*.gif"],
                     })
+                    if scriptless:
+                        page.call("Emulation.setScriptExecutionDisabled", {"value": True})
+                    stage = "navigation"
                     source_fallback = False
                     try:
                         data = page.navigate(url)
@@ -235,6 +243,7 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                       s.textContent='*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
                       document.head.appendChild(s);
                     }""")
+                    stage = "screenshot"
                     tiles = _capture_chunked_screenshot(
                         page, png_path, height,
                         max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
@@ -248,6 +257,7 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                         # Preserve the public method contract while exposing
                         # which low-memory engine produced the image.
                         "method": "playwright", "engine": "chromium_cdp",
+                        "script_execution_disabled": scriptless,
                         "source_html_fallback": source_fallback,
                         "page": data, "media": {
                             "safe_mode": True, "constrained_mode": constrained,
@@ -269,7 +279,21 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
                     else:
                         # The outer supervisor kills remaining group members
                         # after reading our result (including success).
-                        browser.kill()
+                        try:
+                            browser.kill()
+                        except (OSError, ProcessLookupError):
+                            pass
+                        # Reap the failed attempt before any scriptless
+                        # retry. All of these processes belong to this
+                        # disposable worker's own group, never the API.
+                        for entry in Path("/proc").iterdir():
+                            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                                continue
+                            try:
+                                if os.getpgid(int(entry.name)) == os.getpgrp():
+                                    os.kill(int(entry.name), signal.SIGKILL)
+                            except (OSError, ProcessLookupError):
+                                pass
                     try:
                         browser.wait(timeout=3)
                     except subprocess.TimeoutExpired:
@@ -277,4 +301,4 @@ def capture(url: str, png_path: Path, html_path: Path, source_html="", *, safe_m
     except SnapshotCaptureError:
         raise
     except Exception as exc:
-        return {"error": str(exc)[:500]}
+        return {"error": f"{stage}: {str(exc)}"[:500]}
