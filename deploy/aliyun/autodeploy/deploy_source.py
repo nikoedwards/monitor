@@ -40,6 +40,7 @@ class CommandTimedOut(RuntimeError):
 
 MIN_RESTART_HEADROOM = 3 * 1024**3
 IMAGE_BUILD_TIMEOUT = 35 * 60
+MONITOR_MEMORY_LIMIT = "640m"
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_HEADER_BYTES = 100
 
@@ -309,22 +310,32 @@ class SourceDeployer:
         # Compose configuration can drift from an already-created container.
         # Make the runtime policy explicit so a later process exit self-heals.
         self.run(
-            ["docker", "update", "--restart=unless-stopped", container],
+            [
+                "docker",
+                "update",
+                "--restart=unless-stopped",
+                "--memory",
+                MONITOR_MEMORY_LIMIT,
+                "--memory-swap",
+                MONITOR_MEMORY_LIMIT,
+                container,
+            ],
             timeout=30,
         )
-        policy = self.run(
+        runtime = self.run(
             [
                 "docker",
                 "inspect",
                 container,
                 "--format",
-                "{{.HostConfig.RestartPolicy.Name}}",
+                "{{.HostConfig.RestartPolicy.Name}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}",
             ],
             timeout=30,
         )
-        if policy != "unless-stopped":
+        expected_runtime = f"unless-stopped {640 * 1024 * 1024} {640 * 1024 * 1024}"
+        if runtime != expected_runtime:
             raise RuntimeError(
-                f"Monitor restart policy is {policy!r}, expected 'unless-stopped'"
+                f"Monitor runtime limits are {runtime!r}, expected {expected_runtime!r}"
             )
 
     def install_base(self, contents):

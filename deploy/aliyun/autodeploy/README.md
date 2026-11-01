@@ -30,6 +30,10 @@ from Git. Runtime data remains in `/opt/monitor/data`. Deployment reports and th
 five newest pre-release database backups are kept in
 `/opt/monitor/.deploy-state`.
 
+The release deployer enforces a 640 MiB memory limit and a matching 640 MiB
+memory-plus-swap limit on the Monitor container after every recreate. This
+protects the 1 GiB host even if the host-only Compose override drifts.
+
 GitHub repository secrets:
 
 - `ALIYUN_MONITOR_HOST`: the SSH hostname or IPv4 address.

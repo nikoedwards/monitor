@@ -114,7 +114,7 @@ class SourceDeploymentTests(unittest.TestCase):
         ), patch.object(
             self.deployer,
             "run",
-            side_effect=["", "unless-stopped"],
+            side_effect=["", "unless-stopped 671088640 671088640"],
         ) as run:
             module.SourceDeployer.start(
                 self.deployer, self.project / "docker-compose.yml"
@@ -131,11 +131,20 @@ class SourceDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(
             run.call_args_list[0].args[0],
-            ["docker", "update", "--restart=unless-stopped", "container-id"],
+            [
+                "docker",
+                "update",
+                "--restart=unless-stopped",
+                "--memory",
+                "640m",
+                "--memory-swap",
+                "640m",
+                "container-id",
+            ],
         )
         self.assertEqual(
             run.call_args_list[1].args[0][-1],
-            "{{.HostConfig.RestartPolicy.Name}}",
+            "{{.HostConfig.RestartPolicy.Name}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}",
         )
 
     def test_build_failure_never_stops_the_live_service(self):
