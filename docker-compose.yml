@@ -32,7 +32,10 @@ services:
     # Keep a runaway Chromium process inside the container. The production
     # host has 1 GiB RAM; leaving headroom keeps SSH, Docker and the watchdog
     # responsive even if a browser process misbehaves.
-    mem_limit: "700m"
+    mem_limit: "640m"
+    # Equal memory and memory+swap limits disable container swap thrashing.
+    memswap_limit: "640m"
+    pids_limit: 128
     # Chromium is more reliable with a larger shared-memory mount.
     shm_size: "1gb"
     init: true
