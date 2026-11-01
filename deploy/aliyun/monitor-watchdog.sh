@@ -2,10 +2,9 @@
 set -Eeuo pipefail
 
 project_dir=/opt/monitor
-compose=(docker compose -f "$project_dir/docker-compose.yml")
-if [[ -f "$project_dir/deploy/aliyun/docker-compose.monitor-ljei.yml" ]]; then
-  compose+=( -f "$project_dir/deploy/aliyun/docker-compose.monitor-ljei.yml" )
-fi
+compose=(docker compose
+  -f "$project_dir/docker-compose.yml"
+  -f "$project_dir/deploy/aliyun/docker-compose.monitor-ljei.yml")
 container=monitor-monitor-1
 state_file=/run/monitor-watchdog.failures
 deploy_lock=/run/lock/monitor-source-deploy.lock
