@@ -34,6 +34,7 @@ from server.snapshot import (
     SnapshotCaptureError,
     SnapshotCaptureBusy,
     _capture_error_reason,
+    _capture_chunk_height,
     _capture_chunked_screenshot,
     _optimize_archive_image,
     _playwright_capture,
@@ -81,24 +82,19 @@ class VisualDiffTests(unittest.TestCase):
         finally:
             CAPTURE_SLOT.release()
 
-    def test_capture_skips_browser_when_memory_is_low(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with (
-                patch("server.snapshot.SNAPSHOT_DIR", root),
-                patch("server.snapshot._available_memory_mb", return_value=64),
-                patch("server.snapshot._playwright_capture") as playwright_capture,
-                patch("server.snapshot._subprocess_capture") as subprocess_capture,
-            ):
-                screenshot, archive, meta = capture_artifacts(
-                    "https://example.com", "Example", "text", "<p>text</p>", "low-memory",
-                )
-            self.assertEqual(meta["resource_guard"], "low_memory")
-            self.assertEqual(meta["method"], "raster_fallback")
-            self.assertTrue((root / screenshot).is_file())
-            self.assertTrue((root / archive).is_file())
-            playwright_capture.assert_not_called()
-            subprocess_capture.assert_not_called()
+    def test_capture_attempts_browser_when_memory_is_low(self):
+        with patch("server.snapshot._available_memory_mb", return_value=64), patch(
+            "server.snapshot._capture_artifacts_unlocked",
+            return_value=("low-memory.png", "low-memory.html", {"method": "playwright"}),
+        ) as capture:
+            result = capture_artifacts(
+                "https://example.com", "Example", "text", "<p>text</p>", "low-memory",
+            )
+        self.assertEqual(result[2]["method"], "playwright")
+        self.assertTrue(capture.call_args.kwargs["safe_mode"])
+
+    def test_emergency_memory_uses_small_chunks(self):
+        self.assertEqual(_capture_chunk_height(64), 420)
 
     def test_capture_uses_safe_mode_before_raster_fallback(self):
         with patch("server.snapshot._available_memory_mb", return_value=600), patch(

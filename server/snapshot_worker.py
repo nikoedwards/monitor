@@ -70,7 +70,9 @@ def _attach_windows_job() -> None:
 def _prefer_worker_oom_kill() -> None:
     """Make Linux cgroup OOM handling prefer this disposable worker."""
     try:
-        Path("/proc/self/oom_score_adj").write_text("500", encoding="ascii")
+        raw_score = os.environ.get("MONITOR_CAPTURE_OOM_SCORE_ADJ", "800")
+        score = max(-1000, min(1000, int(raw_score)))
+        Path("/proc/self/oom_score_adj").write_text(str(score), encoding="ascii")
     except (OSError, ValueError):
         # Windows and restricted containers do not expose this control.
         pass

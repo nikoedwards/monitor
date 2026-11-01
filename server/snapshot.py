@@ -54,6 +54,12 @@ CAPTURE_SLOT = threading.BoundedSemaphore(1)
 CAPTURE_MIN_AVAILABLE_MB = int(os.environ.get("MONITOR_CAPTURE_MIN_AVAILABLE_MB", "320"))
 CAPTURE_SAFE_MEMORY_MB = int(os.environ.get("MONITOR_CAPTURE_SAFE_MEMORY_MB", "768"))
 CAPTURE_CHUNK_MAX_HEIGHT = int(os.environ.get("MONITOR_CAPTURE_CHUNK_MAX_HEIGHT", "900"))
+CAPTURE_EMERGENCY_VIEWPORT_WIDTH = int(
+    os.environ.get("MONITOR_CAPTURE_EMERGENCY_VIEWPORT_WIDTH", "1024")
+)
+CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT = int(
+    os.environ.get("MONITOR_CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT", "420")
+)
 CAPTURE_MAX_STITCH_HEIGHT = int(os.environ.get("MONITOR_CAPTURE_MAX_STITCH_HEIGHT", "16000"))
 CAPTURE_NAVIGATION_TIMEOUT_MS = 15_000
 CAPTURE_RENDER_WAIT_TIMEOUT_MS = 8_000
@@ -662,6 +668,8 @@ def _capture_chunk_height(available_memory_mb: int | None) -> int:
     """Choose a viewport tile height that leaves room for the API process."""
     if available_memory_mb is None:
         return min(CAPTURE_CHUNK_MAX_HEIGHT, 800)
+    if available_memory_mb < CAPTURE_MIN_AVAILABLE_MB:
+        return min(CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT, 420)
     if available_memory_mb < 420:
         return min(CAPTURE_CHUNK_MAX_HEIGHT, 520)
     if available_memory_mb < 600:
@@ -1021,6 +1029,7 @@ def _playwright_capture(
                 "args": [
                     "--disable-dev-shm-usage", "--no-sandbox", "--disable-extensions",
                     "--disable-background-networking", "--disable-sync", "--renderer-process-limit=1",
+                    "--disable-gpu",
                 ],
             }
             try:
@@ -1036,7 +1045,13 @@ def _playwright_capture(
                 browser = pw.chromium.launch(**browser_options)
             capture_memory_mb = _available_memory_mb() if safe_mode else None
             chunk_height = _capture_chunk_height(capture_memory_mb) if safe_mode else 1200
-            context = browser.new_context(viewport={"width": 1440, "height": chunk_height})
+            viewport_width = (
+                min(CAPTURE_EMERGENCY_VIEWPORT_WIDTH, 1440)
+                if capture_memory_mb is not None
+                and capture_memory_mb < CAPTURE_MIN_AVAILABLE_MB
+                else 1440
+            )
+            context = browser.new_context(viewport={"width": viewport_width, "height": chunk_height})
             loaded: dict[str, tuple[str, bytes]] = {}
             navigation_error = ""
             archive_error = ""
@@ -1126,6 +1141,11 @@ def _playwright_capture(
                 media = {
                     "safe_mode": True,
                     "available_memory_mb": capture_memory_mb,
+                    "emergency_mode": bool(
+                        capture_memory_mb is not None
+                        and capture_memory_mb < CAPTURE_MIN_AVAILABLE_MB
+                    ),
+                    "viewport_width": viewport_width,
                     "chunked_screenshot": chunk_meta,
                 }
                 archive_url = url if source_html_fallback else (page.url or url)
@@ -1621,20 +1641,6 @@ def capture_artifacts(
         raise SnapshotCaptureBusy("截图引擎正在处理另一个任务，请稍后重试")
     try:
         available_memory_mb = _available_memory_mb()
-        if available_memory_mb is not None and available_memory_mb < CAPTURE_MIN_AVAILABLE_MB:
-            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-            png_filename = f"{base_name}.png"
-            html_filename = f"{base_name}.html"
-            error = f"可用内存仅 {available_memory_mb} MB（阈值 {CAPTURE_MIN_AVAILABLE_MB} MB），已跳过 Chromium"
-            logger.warning("Skipping Chromium capture for %s: %s", url, error)
-            _write_raster_fallback(png_filename, url, title, text, error)
-            _write_fallback_archive(html_filename, url, title, html, text, error)
-            return png_filename, html_filename, {
-                "method": "raster_fallback",
-                "resource_guard": "low_memory",
-                "error": error,
-                "archive": {"self_contained": False, "archive_size": (SNAPSHOT_DIR / html_filename).stat().st_size},
-            }
         safe_mode = available_memory_mb is not None and available_memory_mb < CAPTURE_SAFE_MEMORY_MB
         return _capture_artifacts_unlocked(
             url, title, text, html, base_name,
