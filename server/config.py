@@ -17,6 +17,11 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 SCHEDULER_SECONDS = int(os.environ.get("MONITOR_SCHEDULER_SECONDS", "3600"))
 WEB_SCHEDULER_SECONDS = int(os.environ.get("MONITOR_WEB_SCHEDULER_SECONDS", "60"))
 SCHEDULER_ENABLED = os.environ.get("MONITOR_SCHEDULER", "1") != "0"
+# After a reboot, let the API and healthcheck settle before replaying due work.
+# This prevents every overdue browser task from starting during boot recovery.
+SCHEDULER_STARTUP_DELAY_SECONDS = int(
+    os.environ.get("MONITOR_SCHEDULER_STARTUP_DELAY_SECONDS", "300")
+)
 DEFAULT_CRAWL_LIMIT = int(os.environ.get("MONITOR_CRAWL_LIMIT", "20"))
 
 USER_AGENT = "MonitorIntelligenceHub/1.0 (+brand intelligence monitor)"

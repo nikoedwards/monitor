@@ -6,7 +6,12 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from .config import SCHEDULER_ENABLED, SCHEDULER_SECONDS, WEB_SCHEDULER_SECONDS
+from .config import (
+    SCHEDULER_ENABLED,
+    SCHEDULER_SECONDS,
+    SCHEDULER_STARTUP_DELAY_SECONDS,
+    WEB_SCHEDULER_SECONDS,
+)
 from .connectors.base import run_collector
 from .connectors.registry import REGISTRY
 from .db import db
@@ -15,6 +20,9 @@ from .util import today
 
 _started = False
 logger = logging.getLogger(__name__)
+# All scheduler-owned work shares one slot. This covers browser-backed
+# collectors as well as web snapshots on a 1 GiB host.
+SCHEDULER_WORK_SLOT = threading.BoundedSemaphore(1)
 
 
 def _cadence_delta(cadence: str) -> timedelta:
@@ -55,7 +63,12 @@ def _run_due_collections() -> None:
                 with db() as conn:
                     if not _collector_is_due(conn, spec.id, brand["id"], spec.cadence, datetime.now(timezone.utc)):
                         continue
-                    run_collector(conn, spec, brand)
+                    if not SCHEDULER_WORK_SLOT.acquire(blocking=False):
+                        continue
+                    try:
+                        run_collector(conn, spec, brand)
+                    finally:
+                        SCHEDULER_WORK_SLOT.release()
             except Exception:
                 # run_collector already records errors per source; keep loop alive.
                 logger.exception("Collector failed for %s / %s", spec.id, brand.get("id"))
@@ -84,8 +97,13 @@ def _run_due_sales() -> None:
         if not due:
             continue
         try:
+            if not SCHEDULER_WORK_SLOT.acquire(blocking=False):
+                continue
             with db() as conn:
-                run_sales_collection(conn, brand)
+                try:
+                    run_sales_collection(conn, brand)
+                finally:
+                    SCHEDULER_WORK_SLOT.release()
         except Exception:
             logger.exception("Sales collection failed for %s", brand.get("id"))
             continue
@@ -123,14 +141,24 @@ def _run_due_hiring() -> None:
         platforms = {row["platform"] for row in due_links}
         if platforms - {"linkedin_people"}:
             try:
+                if not SCHEDULER_WORK_SLOT.acquire(blocking=False):
+                    continue
                 with db() as conn:
-                    run_hiring_collection(conn, brand)
+                    try:
+                        run_hiring_collection(conn, brand)
+                    finally:
+                        SCHEDULER_WORK_SLOT.release()
             except Exception:
                 logger.exception("Hiring collection failed for %s", brand.get("id"))
         if "linkedin_people" in platforms or due_profile:
             try:
+                if not SCHEDULER_WORK_SLOT.acquire(blocking=False):
+                    continue
                 with db() as conn:
-                    run_linkedin_people_collection(conn, brand)
+                    try:
+                        run_linkedin_people_collection(conn, brand)
+                    finally:
+                        SCHEDULER_WORK_SLOT.release()
             except Exception:
                 logger.exception("LinkedIn people collection failed for %s", brand.get("id"))
 
@@ -163,7 +191,15 @@ def _run_due_web_snapshots() -> None:
         try:
             with db() as conn:
                 if monitor_is_due(monitor, "snapshot", now):
-                    capture_monitor(conn, monitor)
+                    if not SCHEDULER_WORK_SLOT.acquire(blocking=False):
+                        continue
+                    try:
+                        capture_monitor(conn, monitor)
+                    finally:
+                        SCHEDULER_WORK_SLOT.release()
+                    # Drain at most one overdue browser job per cycle. The
+                    # next poll gives the API and host time to recover.
+                    break
                 elif monitor_is_due(monitor, "check", now):
                     check_monitor(conn, monitor)
         except SnapshotCaptureBusy:
@@ -201,8 +237,20 @@ def start_scheduler() -> None:
     if _started or not SCHEDULER_ENABLED:
         return
     _started = True
+    def delayed_target(target, name):
+        if SCHEDULER_STARTUP_DELAY_SECONDS > 0:
+            logger.warning(
+                "Scheduler %s held for %ss after startup",
+                name,
+                SCHEDULER_STARTUP_DELAY_SECONDS,
+            )
+            time.sleep(SCHEDULER_STARTUP_DELAY_SECONDS)
+        target()
+
     for target, name in (
         (_collection_loop, "monitor-collections"),
         (_web_snapshot_loop, "monitor-web-snapshots"),
     ):
-        threading.Thread(target=target, name=name, daemon=True).start()
+        threading.Thread(
+            target=delayed_target, args=(target, name), name=name, daemon=True,
+        ).start()
