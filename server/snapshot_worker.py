@@ -91,9 +91,9 @@ def main() -> int:
             safe_mode=bool(request.get("safe_mode")),
         )
     except Exception as exc:
-        print(json.dumps({"error_type": "snapshot_capture", "error": str(exc)}, ensure_ascii=False))
+        print(json.dumps({"error_type": "snapshot_capture", "error": str(exc)}, ensure_ascii=True))
         return 0
-    print(json.dumps(result or {"error": "Playwright 未返回结果"}, ensure_ascii=False))
+    print(json.dumps(result or {"error": "Playwright 未返回结果"}, ensure_ascii=True))
     return 0
 
 

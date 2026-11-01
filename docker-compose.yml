@@ -21,6 +21,7 @@ services:
       MONITOR_CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT: "420"
       MONITOR_CAPTURE_MAX_STITCH_HEIGHT: "16000"
       MONITOR_CAPTURE_JOB_TIMEOUT_SECONDS: "90"
+      MONITOR_CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT: "8000"
     # Keep the application private when Caddy is enabled. Set
     # APP_BIND_ADDRESS=0.0.0.0 if direct access is required instead.
     ports:

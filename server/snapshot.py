@@ -60,6 +60,9 @@ CAPTURE_EMERGENCY_VIEWPORT_WIDTH = int(
 CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT = int(
     os.environ.get("MONITOR_CAPTURE_EMERGENCY_CHUNK_MAX_HEIGHT", "420")
 )
+CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT = int(
+    os.environ.get("MONITOR_CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT", "8000")
+)
 CAPTURE_MAX_STITCH_HEIGHT = int(os.environ.get("MONITOR_CAPTURE_MAX_STITCH_HEIGHT", "16000"))
 CAPTURE_NAVIGATION_TIMEOUT_MS = 15_000
 CAPTURE_RENDER_WAIT_TIMEOUT_MS = 8_000
@@ -1137,7 +1140,20 @@ def _playwright_capture(
                 # lazy-media pass and the in-memory resource archive. The
                 # page is captured as bounded viewport tiles, so Chromium
                 # never allocates one giant full-page raster.
-                chunk_meta = _capture_chunked_screenshot(page, png_path, chunk_height)
+                if capture_memory_mb is not None and capture_memory_mb < CAPTURE_MIN_AVAILABLE_MB:
+                    previous_max_stitch_height = CAPTURE_MAX_STITCH_HEIGHT
+                    try:
+                        # Keep the emergency worker bounded even when a page
+                        # reports an extremely tall document.
+                        globals()["CAPTURE_MAX_STITCH_HEIGHT"] = min(
+                            CAPTURE_MAX_STITCH_HEIGHT,
+                            CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT,
+                        )
+                        chunk_meta = _capture_chunked_screenshot(page, png_path, chunk_height)
+                    finally:
+                        globals()["CAPTURE_MAX_STITCH_HEIGHT"] = previous_max_stitch_height
+                else:
+                    chunk_meta = _capture_chunked_screenshot(page, png_path, chunk_height)
                 media = {
                     "safe_mode": True,
                     "available_memory_mb": capture_memory_mb,
@@ -1277,13 +1293,13 @@ def _isolated_playwright_capture(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
         start_new_session=(os.name != "nt"),
         env=env,
     )
     try:
-        stdout, stderr = process.communicate(request, timeout=CAPTURE_JOB_TIMEOUT_SECONDS)
+        stdout, stderr = process.communicate(
+            request.encode("utf-8"), timeout=CAPTURE_JOB_TIMEOUT_SECONDS
+        )
     except subprocess.TimeoutExpired:
         _kill_capture_process(process)
         process.communicate()
@@ -1293,12 +1309,16 @@ def _isolated_playwright_capture(
         # stragglers before parsing the result so they cannot accumulate.
         _kill_capture_process(process)
     if process.returncode != 0:
-        detail = (stderr or stdout or f"worker exit {process.returncode}").strip()
+        detail = (
+            stderr or stdout or f"worker exit {process.returncode}".encode("utf-8")
+        ).decode("utf-8", errors="replace").strip()
         return {"error": detail[-500:]}
     try:
-        result = json.loads((stdout or "").strip().splitlines()[-1])
+        output = (stdout or b"").decode("utf-8", errors="replace")
+        result = json.loads(output.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
-        return {"error": (stdout or stderr or "截图进程未返回有效结果")[-500:]}
+        detail = (stdout or stderr or "截图进程未返回有效结果".encode("utf-8"))
+        return {"error": detail.decode("utf-8", errors="replace")[-500:]}
     if result.get("error_type") == "snapshot_capture":
         raise SnapshotCaptureError(result.get("error") or "隔离截图失败")
     return result
