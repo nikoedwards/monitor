@@ -341,6 +341,51 @@ class SourceDeployer:
     def install_base(self, contents):
         atomic_write(self.stable_base, contents)
 
+    def enable_scheduler_override(self):
+        """Ensure the host-only production override cannot disable collection."""
+        contents = self.server_override.read_text()
+        disabled = re.compile(
+            r'(?m)^(?P<indent>\s*)MONITOR_SCHEDULER:\s*["\']?0["\']?\s*$'
+        )
+        updated, replaced = disabled.subn(
+            lambda match: f'{match.group("indent")}MONITOR_SCHEDULER: "1"',
+            contents,
+            count=1,
+        )
+        if not replaced and not re.search(
+            r'(?m)^\s*MONITOR_SCHEDULER:\s*["\']?1["\']?\s*$', contents
+        ):
+            environment = re.search(r'(?m)^(?P<indent>\s*)environment:\s*$', contents)
+            if not environment:
+                service = re.search(r'(?m)^(?P<indent>\s*)monitor:\s*$', contents)
+                if not service:
+                    raise RuntimeError(
+                        f"Production override has no monitor service: {self.server_override}"
+                    )
+                environment = service
+                line_end = environment.end()
+                indent = environment.group("indent") + "  "
+                updated = (
+                    contents[:line_end]
+                    + f'\n{indent}environment:'
+                    + contents[line_end:]
+                )
+                environment = re.search(
+                    r'(?m)^(?P<indent>\s*)environment:\s*$', updated
+                )
+            line_end = environment.end()
+            indent = environment.group("indent") + "  "
+            updated = (
+                updated[:line_end]
+                + f'\n{indent}MONITOR_SCHEDULER: "1"'
+                + updated[line_end:]
+            )
+        if updated != contents:
+            atomic_write(self.server_override, updated.encode())
+
+    def restore_override(self, contents):
+        atomic_write(self.server_override, contents)
+
     def deployment_storage_is_shared(self):
         return self.state_dir.stat().st_dev == self.data_dir.stat().st_dev
 
@@ -444,7 +489,9 @@ class SourceDeployer:
                 time.sleep(3)
         raise RuntimeError(f"Release health check timed out: {last_error}")
 
-    def _rollback(self, previous_base, previous_image, backup, backup_ready):
+    def _rollback(
+        self, previous_base, previous_image, previous_override, backup, backup_ready
+    ):
         errors = []
         stopped = False
         try:
@@ -470,6 +517,10 @@ class SourceDeployer:
             self.install_base(previous_base)
         except BaseException as exc:
             errors.append(f"Compose restore failed: {exc}")
+        try:
+            self.restore_override(previous_override)
+        except BaseException as exc:
+            errors.append(f"Production override restore failed: {exc}")
         try:
             self.tag(previous_image, self.stable_image)
         except BaseException as exc:
@@ -597,6 +648,7 @@ class SourceDeployer:
             previous_image = self.current_image_id(self.stable_base)
             self.validate_live_data_mount(self.stable_base)
             previous_base = self.stable_base.read_bytes()
+            previous_override = self.server_override.read_bytes()
             self.tag(previous_image, self.rollback_image)
 
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -623,6 +675,7 @@ class SourceDeployer:
             backup_database(self.database, backup)
             backup_ready = True
             self.install_base(self.source_base.read_bytes())
+            self.enable_scheduler_override()
             self.tag(self.image, self.stable_image)
             self.start(self.stable_base)
             self.validate_live_data_mount(self.stable_base)
@@ -639,7 +692,11 @@ class SourceDeployer:
                 self.rolling_back = True
                 try:
                     self._rollback(
-                        previous_base, previous_image, backup, backup_ready
+                        previous_base,
+                        previous_image,
+                        previous_override,
+                        backup,
+                        backup_ready,
                     )
                 except BaseException as rollback_error:
                     raise RuntimeError(

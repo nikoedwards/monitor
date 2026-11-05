@@ -108,6 +108,33 @@ class SourceDeploymentTests(unittest.TestCase):
         state = json.loads((self.state / "current.json").read_text())
         self.assertEqual(state["revision"], REVISION)
 
+    def test_enable_scheduler_override_replaces_incident_pause(self):
+        self.override.write_text(
+            "services:\n"
+            "  monitor:\n"
+            "    environment:\n"
+            "      HOST: 0.0.0.0\n"
+            "      MONITOR_SCHEDULER: \"0\"\n"
+        )
+
+        self.deployer.enable_scheduler_override()
+
+        contents = self.override.read_text()
+        self.assertIn('MONITOR_SCHEDULER: "1"', contents)
+        self.assertNotIn('MONITOR_SCHEDULER: "0"', contents)
+
+    def test_enable_scheduler_override_adds_missing_setting(self):
+        self.override.write_text(
+            "services:\n"
+            "  monitor:\n"
+            "    environment:\n"
+            "      HOST: 0.0.0.0\n"
+        )
+
+        self.deployer.enable_scheduler_override()
+
+        self.assertIn('MONITOR_SCHEDULER: "1"', self.override.read_text())
+
     def test_start_enforces_restart_policy_on_created_container(self):
         with patch.object(self.deployer, "compose") as compose, patch.object(
             self.deployer, "container_id", return_value="container-id"
