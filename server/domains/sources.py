@@ -61,14 +61,24 @@ def list_sources(conn: sqlite3.Connection = Depends(get_conn)):
 
 
 @router.post("/{source_id}/collect")
-def collect_source(source_id: str, brand_id: str, conn: sqlite3.Connection = Depends(get_conn)):
+def collect_source(
+    source_id: str,
+    brand_id: str,
+    lookback_days: int | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
     spec = get_spec(source_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Source not found")
     brand = fetch_brand(conn, brand_id)
+    collector_brand = dict(brand)
     if source_id == "social_accounts":
-        brand = {**brand, "_force_collect": True}
-    result = run_collector(conn, spec, brand)
+        collector_brand["_force_collect"] = True
+    if lookback_days is not None:
+        collector_brand["_collection_lookback_days"] = max(1, min(int(lookback_days), 30))
+    result = run_collector(conn, spec, collector_brand)
+    if lookback_days is not None:
+        result["lookback_days"] = collector_brand["_collection_lookback_days"]
     return result
 
 
@@ -147,10 +157,19 @@ def monitoring_status(
 def monitoring_refresh(
     brand_id: str,
     dimension: str = "marketing",
+    lookback_days: int | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    """Run all ready connectors for a dimension now (manual refresh button)."""
+    """Run all ready connectors for a dimension now.
+
+    ``lookback_days`` is an operator-only recovery aid for a short outage. It
+    widens the provider publication window while keeping the normal scheduler
+    cadence unchanged; records remain deduplicated by their external IDs.
+    """
     brand = fetch_brand(conn, brand_id)
+    recovery_days = None
+    if lookback_days is not None:
+        recovery_days = max(1, min(int(lookback_days), 30))
     if dimension == "sales":
         from ..connectors.sales.runner import run_sales_collection
 
@@ -162,8 +181,17 @@ def monitoring_refresh(
     for spec in REGISTRY:
         if spec.dimension != dimension or spec.collect is None or spec.status != "ready":
             continue
-        collector_brand = {**brand, "_force_collect": True} if spec.id == "social_accounts" else brand
+        collector_brand = dict(brand)
+        if spec.id == "social_accounts":
+            collector_brand["_force_collect"] = True
+        if recovery_days is not None:
+            collector_brand["_collection_lookback_days"] = recovery_days
         res = run_collector(conn, spec, collector_brand)
         created += res.get("created", 0)
         results.append(res)
-    return {"dimension": dimension, "created": created, "results": results}
+    return {
+        "dimension": dimension,
+        "lookback_days": recovery_days,
+        "created": created,
+        "results": results,
+    }

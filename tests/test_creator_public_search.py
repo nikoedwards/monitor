@@ -278,6 +278,46 @@ class CreatorPublicSearchTests(unittest.TestCase):
         self.assertLess(age, timedelta(days=1, minutes=1))
         conn.close()
 
+    def test_runner_accepts_a_bounded_recovery_window(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE sources (id TEXT PRIMARY KEY, last_collect_at TEXT, last_status TEXT,
+                last_error TEXT, item_count INTEGER DEFAULT 0);
+            CREATE TABLE source_brand_runs (source_id TEXT, brand_id TEXT, last_collect_at TEXT,
+                last_status TEXT, last_error TEXT, item_count INTEGER DEFAULT 0,
+                PRIMARY KEY (source_id, brand_id));
+            """
+        )
+        conn.execute("INSERT INTO sources (id) VALUES ('window-test')")
+        seen = {}
+
+        def collect(_conn, brand):
+            seen.update(brand)
+            return []
+
+        spec = ConnectorSpec(
+            id="window-test",
+            name="Window test",
+            category="creators",
+            dimension="marketing",
+            tier=1,
+            cadence="daily",
+            collect=collect,
+        )
+        result = run_collector(
+            conn,
+            spec,
+            {"id": "brand-1", "name": "PLAUD", "_collection_lookback_days": 3},
+        )
+        self.assertEqual(result["status"], "ok")
+        since = datetime.fromisoformat(seen["_collection_since"])
+        age = datetime.now(timezone.utc) - since
+        self.assertGreater(age, timedelta(days=2, hours=23))
+        self.assertLess(age, timedelta(days=3, minutes=1))
+        conn.close()
+
     @patch("server.connectors.creators.public_search.fetch_page")
     def test_bing_results_are_reduced_to_public_profiles(self, fetch_page):
         fetch_page.return_value = {
