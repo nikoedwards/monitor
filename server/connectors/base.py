@@ -69,11 +69,18 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
             "hourly": timedelta(hours=1),
             "weekly": timedelta(days=7),
         }.get(cadence, timedelta(days=1))
+        lookback_days = brand.get("_collection_lookback_days")
+        if lookback_days is not None:
+            try:
+                lookback_days = max(1, min(int(lookback_days), 30))
+            except (TypeError, ValueError):
+                lookback_days = None
         collector_brand = {
             **brand,
             "_collection_cadence": cadence,
             "_collection_since": (
-                datetime.now(timezone.utc) - window
+                datetime.now(timezone.utc)
+                - (timedelta(days=lookback_days) if lookback_days else window)
             ).replace(microsecond=0).isoformat(),
         }
         payloads = spec.collect(conn, collector_brand) or []
