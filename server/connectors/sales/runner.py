@@ -296,10 +296,22 @@ def run_sales_collection(conn: sqlite3.Connection, brand: dict, link_id: str | N
         for ref in refs:
             _upsert_listing(conn, link, ref)
             summary["listings"] += 1
-        conn.execute(
-            "UPDATE links SET last_status = ?, last_error = '', last_collect_at = ?, updated_at = ? WHERE id = ?",
-            ("ok", utc_now(), utc_now(), link["id"]),
-        )
+        if refs:
+            conn.execute(
+                "UPDATE links SET last_status = ?, last_error = '', last_collect_at = ?, updated_at = ? WHERE id = ?",
+                ("ok", utc_now(), utc_now(), link["id"]),
+            )
+        else:
+            # Keep an empty expansion distinguishable from a successful one.
+            # This matters for storefronts: a zero result can mean an empty
+            # page or an Amazon page that was rendered/blocked unexpectedly.
+            empty_error = "未解析到可用 Listing"
+            if link.get("channel") == "amazon":
+                empty_error = "Amazon 页面未解析到可用 Listing，可能被限流或页面结构已变化"
+            conn.execute(
+                "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
+                ("empty", empty_error, utc_now(), utc_now(), link["id"]),
+            )
 
     # Capture monitored listings.
     listing_clause = "AND link_id = ?" if link_id else ""

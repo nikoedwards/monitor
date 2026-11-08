@@ -279,7 +279,31 @@ function TouchpointSlot({ brandId, section, platform, label, channel, placeholde
     try {
       const res: any = await sync.mutateAsync({ brandId, linkId });
       const n = res?.listings ?? 0;
-      setFeedback(n > 0 ? { kind: "ok", text: `✓ 展开 ${n} 个 Listing` } : { kind: "ok", text: "✓ 已保存，未发现 Listing（可改用店铺/商品页）" });
+      const captured = Number(res?.captured || 0);
+      const errors = Number(res?.errors || 0);
+      if (n > 0) {
+        setFeedback({ kind: "ok", text: `✓ 展开 ${n} 个 Listing` });
+        return;
+      }
+
+      // A storefront URL is already the recommended input for Amazon. When
+      // Amazon returns no parseable cards, suggesting another storefront URL
+      // is misleading; the page may simply be blocked or rendered differently.
+      const role = salesConfig(channel, url).role;
+      if (errors > 0) {
+        setFeedback({
+          kind: "err",
+          text: role === "storefront" ? "同步异常：店铺页暂时无法访问，请稍后重试" : "同步异常：商品页暂时无法访问，请稍后重试",
+        });
+      } else if (captured > 0) {
+        setFeedback({ kind: "ok", text: `✓ 已同步 ${captured} 个已有 Listing` });
+      } else if (channel === "amazon" && role === "storefront") {
+        setFeedback({ kind: "ok", text: "✓ 已保存，暂未解析到 Listing（Amazon 店铺页可能被限流，请稍后重试）" });
+      } else if (role === "listing") {
+        setFeedback({ kind: "ok", text: "✓ 已保存，暂未解析到商品（请检查商品链接）" });
+      } else {
+        setFeedback({ kind: "ok", text: "✓ 已保存，暂未解析到商品（请检查店铺页是否公开）" });
+      }
     } catch (e: any) {
       setFeedback({ kind: "err", text: e?.message || "同步失败" });
     }
