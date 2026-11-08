@@ -322,6 +322,25 @@ class SocialAccountCollectorTests(unittest.TestCase):
         self.assertEqual(status["last_status"], "unsupported")
         self.assertIn("尚未接入", status["last_error"])
 
+    @patch("server.connectors.social.cache_social_cover", return_value="/api/media/cache/cover-key")
+    @patch("server.connectors.social.collect_instagram_public")
+    def test_instagram_cover_is_cached_before_record_is_saved(self, collect, cache):
+        self.add_link("instagram", "https://www.instagram.com/example/")
+        collect.return_value = [CreatorPost(platform="instagram", external_id="post", url="https://www.instagram.com/p/ABC/", body="Post", thumbnail_url="https://cdn.example/temporary.jpg")]
+        records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
+        self.assertEqual(records[0]["metrics"]["thumbnail_url"], "/api/media/cache/cover-key")
+        self.assertIn("collected_at", records[0]["raw"])
+        cache.assert_called_once_with("https://www.instagram.com/p/ABC/", "https://cdn.example/temporary.jpg")
+
+    @patch("server.connectors.social.cache_social_cover", side_effect=FetchError("HTTP 429"))
+    @patch("server.connectors.social.collect_instagram_public")
+    def test_cover_failure_does_not_discard_collected_post(self, collect, cache):
+        self.add_link("instagram", "https://www.instagram.com/example/")
+        collect.return_value = [CreatorPost(platform="instagram", external_id="post", url="https://www.instagram.com/p/ABC/", body="Post", thumbnail_url="https://cdn.example/temporary.jpg")]
+        records = collect_social_accounts(self.conn, {"id": "brand-1", "_force_collect": True})
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records.status, "ok")
+
     @patch("server.connectors.social.fetch_page")
     def test_scheduler_skips_account_already_checked_today(self, fetch_page):
         self.add_link("youtube", "https://www.youtube.com/@example", last_collect_at=f"{today()}T01:00:00+00:00")

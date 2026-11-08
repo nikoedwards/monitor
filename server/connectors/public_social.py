@@ -127,6 +127,8 @@ def instagram_posts_from_user(user: dict, account_url: str, *, limit: int = _MAX
         likes = _count(node.get("edge_liked_by"))
         if likes is None:
             likes = _count(node.get("edge_media_preview_like"))
+        if node.get("like_and_view_counts_disabled"):
+            likes = None
         comments = _count(node.get("edge_media_to_comment"))
         views = _number(node.get("video_play_count")) if is_video else None
         if views is None and is_video:
@@ -161,6 +163,34 @@ def instagram_posts_from_user(user: dict, account_url: str, *, limit: int = _MAX
             },
         ))
     return posts
+
+
+def instagram_posts_from_embed(html: str, account_url: str, handle: str, *, limit: int = _MAX_POSTS) -> list[CreatorPost]:
+    """Decode Instagram's public embed context as JSON, without running scripts."""
+    for match in re.finditer(r'"contextJSON"\s*:\s*', html or ""):
+        try:
+            encoded, _ = json.JSONDecoder().raw_decode(html[match.end():])
+            context = json.loads(encoded).get("context", {})
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not isinstance(context, dict):
+            continue
+        username = str(context.get("username") or "").lower()
+        if username != handle.lower():
+            continue
+        media = context.get("graphql_media") or []
+        nodes = [item.get("shortcode_media") for item in media if isinstance(item, dict)]
+        user = {
+            **context,
+            "edge_followed_by": {"count": context.get("followers_count")},
+            "edge_owner_to_timeline_media": {"edges": [{"node": node} for node in nodes if isinstance(node, dict)]},
+        }
+        posts = instagram_posts_from_user(user, account_url, limit=limit)
+        for post in posts:
+            post.raw["collection_method"] = "instagram_public_embed"
+        if posts:
+            return posts
+    return []
 
 
 def instagram_posts_from_feed(
@@ -577,6 +607,7 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
     # The profile HTML remains public even when Instagram rejects the older
     # /api/v1 endpoints. Use its embedded Polaris timeline first so public
     # monitoring does not require a login or access token.
+    errors = []
     try:
         html = fetch_text(
             f"https://www.instagram.com/{handle}/",
@@ -586,10 +617,18 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
         html_posts = instagram_posts_from_html(html, account_url, handle, limit=limit)
         if html_posts:
             return html_posts
-    except FetchError:
+    except FetchError as exc:
         # Keep the browser/API fallback for temporary HTML challenges or an
         # account whose page uses a different response shape.
-        pass
+        errors.append(str(exc))
+
+    try:
+        html = fetch_text(f"https://www.instagram.com/{handle}/embed/", timeout=25)
+        posts = instagram_posts_from_embed(html, account_url, handle, limit=limit)
+        if posts:
+            return posts
+    except FetchError as exc:
+        errors.append(str(exc))
 
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -681,7 +720,10 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
     except Exception as exc:
         raise FetchError(f"Instagram 公开主页采集失败：{exc}") from exc
 
-    return instagram_posts_from_responses(result, account_url, handle, limit=limit)
+    try:
+        return instagram_posts_from_responses(result, account_url, handle, limit=limit)
+    except FetchError as exc:
+        raise FetchError("; ".join([*errors, str(exc)])) from exc
 
 
 def _json_script(html: str, script_id: str) -> dict:

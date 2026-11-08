@@ -69,7 +69,7 @@ async def secure_snapshot_archives(request, call_next):
     response = await call_next(request)
     path = request.url.path.lower()
     comparison_image = path.startswith("/api/web/snapshots/") and path.endswith("/comparison")
-    if path.startswith("/api/") and not comparison_image and not path.startswith("/api/media/thumbnail"):
+    if path.startswith("/api/") and not comparison_image and not path.startswith(("/api/media/thumbnail", "/api/media/cache/")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
     if path.startswith("/snapshots/"):

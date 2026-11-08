@@ -15,6 +15,15 @@ from ..util import utc_now
 CollectFn = Callable[[sqlite3.Connection, dict], list[dict]]
 
 
+class CollectionBatch(list):
+    """Collected records plus a status that survives partial account failures."""
+
+    def __init__(self, records=(), *, status="ok", error=""):
+        super().__init__(records)
+        self.status = status
+        self.error = error
+
+
 @dataclass
 class ConnectorSpec:
     id: str
@@ -83,7 +92,9 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
                 - (timedelta(days=lookback_days) if lookback_days else window)
             ).replace(microsecond=0).isoformat(),
         }
-        payloads = spec.collect(conn, collector_brand) or []
+        payloads = spec.collect(conn, collector_brand)
+        if payloads is None:
+            payloads = []
         created = 0
         for payload in payloads:
             payload.setdefault("source_id", spec.id)
@@ -100,8 +111,10 @@ def run_collector(conn: sqlite3.Connection, spec: ConnectorSpec, brand: dict) ->
             if insert_record_if_new(conn, payload) is not None:
                 created += 1
         result["created"] = created
-        _update_source_stats(conn, spec.id, status="ok", error="", added=created)
-        _update_brand_run(conn, spec.id, brand.get("id"), status="ok", error="", added=created)
+        result["status"] = getattr(payloads, "status", "ok")
+        result["error"] = getattr(payloads, "error", "")[:500]
+        _update_source_stats(conn, spec.id, status=result["status"], error=result["error"], added=created)
+        _update_brand_run(conn, spec.id, brand.get("id"), status=result["status"], error=result["error"], added=created)
     except Exception as exc:  # surface, do not silently swallow
         result["status"] = "error"
         result["error"] = str(exc)[:500]
