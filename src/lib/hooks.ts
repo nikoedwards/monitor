@@ -137,11 +137,11 @@ export function useOverview(brandId?: string, range?: TimeRange, marketBrandIds?
 
 export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[], refreshKey = 0) {
   const rp = rangeParams(range);
-  const storageKey = dailyPersistentTaskKey("executive-summary", [brandId, rp.start_date, rp.end_date, marketBrandIds?.join(",")]);
+  const storageKey = dailyPersistentTaskKey("executive-summary-research-v3", [brandId, rp.start_date, rp.end_date, marketBrandIds?.join(",")]);
   const stored = readPersistentTask<any>(storageKey);
   const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 30 * 60_000;
   return useQuery({
-    queryKey: ["overview-summary", brandId, rp, marketBrandIds, refreshKey],
+    queryKey: ["overview-summary-research-v3", brandId, rp, marketBrandIds, refreshKey],
     queryFn: async () => {
       persistTaskPending(storageKey);
       try {

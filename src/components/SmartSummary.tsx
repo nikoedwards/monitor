@@ -5,6 +5,7 @@ import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
 import { dailyPersistentTaskKey, persistTaskValue, PERSISTENT_TASK_EVENT, readPersistentTask } from "../lib/persistentTask";
 import { AsyncProgress, Badge, Button } from "./ui";
+import { OverviewResearch } from "./OverviewResearch";
 
 function usePersistentSummary<T>(key: string, fetched: T | undefined): T | null {
   const [cached, setCached] = useState<T | null>(() => {
@@ -56,7 +57,7 @@ function highlightSource(highlight: string, representative: any[] = []) {
 export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { brandId?: string; range: TimeRange; marketBrandIds?: string[] }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const summary = useOverviewSummary(brandId, range, marketBrandIds, refreshKey);
-  const cacheKey = dailyPersistentTaskKey("executive-summary", [brandId, range.start_date, range.end_date, marketBrandIds?.join(",")]);
+  const cacheKey = dailyPersistentTaskKey("executive-summary-research-v3", [brandId, range.start_date, range.end_date, marketBrandIds?.join(",")]);
   const cached = usePersistentSummary<any>(cacheKey, summary.data);
   const data = cached || summary.data;
   const pending = summary.isFetching || readPersistentTask<any>(cacheKey)?.status === "pending";
@@ -65,70 +66,21 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { bran
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Badge tone={data?.mode === "ai" ? "accent" : "neutral"}>{data?.mode === "ai" ? "AI 经营判断" : "系统速览"}</Badge>
-          <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
+          <Badge tone={data?.mode === "ai" ? "accent" : "neutral"}>{data?.mode === "ai" ? "AI 竞争情报" : "系统速览"}</Badge>
+          <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 跨板块证据研判</span>
         </div>
         <div className="flex flex-col items-end">
           <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={pending}>
             <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
-            {pending ? "更新中…" : "刷新总结"}
+            {pending ? "更新中…" : "重新研判"}
           </Button>
-          <AsyncProgress active={pending} label="正在整理经营数据" />
+          <AsyncProgress active={pending} label="正在交叉分析经营证据" />
         </div>
       </div>
 
-      {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在整理经营数据…</p>}
+      {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在交叉分析经营证据…</p>}
       {summary.isError && <p className="text-[13px]" style={{ color: "var(--danger)" }}>经营总结暂时不可用，下面的业务指标仍可正常查看。</p>}
-      {data && (
-        <>
-          <div className="grid grid-cols-1 lg:grid-cols-[1.35fr_1fr] gap-4">
-            <div>
-              <div className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{data.summary}</div>
-              <div className="mt-3 p-3 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[12px] font-medium" style={{ color: "var(--ink)" }}>昨日速览</span>
-                  <span className="text-[11px]" style={{ color: "var(--mute)" }}>{data.yesterday?.date || data.range?.end}</span>
-                </div>
-                <div className="text-[13px] leading-relaxed" style={{ color: "var(--body)" }}>{data.yesterday_summary || "暂无昨日数据。"}</div>
-              </div>
-            </div>
-            <div>
-              <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>需要关注</div>
-              {Array.isArray(data.focus) && data.focus.length ? (
-                <div className="space-y-2">
-                  {data.focus.map((item: any, index: number) => (
-                    <div key={index} className="flex gap-2 text-[13px]" style={{ color: "var(--body)" }}>
-                      <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{ color: "var(--warning)" }} />
-                      <span><b style={{ color: "var(--ink)" }}>{item.action}</b>{item.reason ? `：${item.reason}` : ""}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : <span className="text-[13px]" style={{ color: "var(--mute)" }}>当前没有需要立即跟进的事项。</span>}
-            </div>
-          </div>
-
-          {Array.isArray(data.highlights) && data.highlights.length > 0 && (
-            <div>
-              <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>关键发现</div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {data.highlights.map((item: any, index: number) => (
-                  <div key={index} className="p-2.5 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
-                    <div className="flex items-center gap-2">
-                      <Badge tone={item.severity === "high" ? "negative" : item.severity === "medium" ? "warning" : "neutral"}>{item.domain || "经营"}</Badge>
-                      <span className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{item.title}</span>
-                    </div>
-                    <div className="text-[12px] mt-1 leading-relaxed" style={{ color: "var(--body)" }}>{item.detail}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {Array.isArray(data.caveats) && data.caveats.length > 0 && (
-            <div className="text-[12px]" style={{ color: "var(--mute)" }}>{data.caveats.join(" · ")}</div>
-          )}
-        </>
-      )}
+      {data && <OverviewResearch data={data} brandId={brandId} />}
     </div>
   );
 }

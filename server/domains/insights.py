@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
+from ..overview_evidence import OVERVIEW_VERSION, build_overview_evidence
 from .common import build_trend, get_conn, query_records, resolve_window
 
 router = APIRouter(prefix="/api", tags=["insights"])
@@ -280,7 +281,18 @@ def _fallback_summary(payload: dict) -> dict:
     if marketing.get("ads", {}).get("changed"):
         highlights.append({"domain": "marketing", "severity": "medium", "title": "广告素材发生变化", "detail": f"检测到 {marketing['ads']['changed']} 条广告在本期更新。"})
     yesterday = payload.get("yesterday") or {}
-    return {"mode": "fallback", "summary": "".join(parts), "yesterday_summary": f"{yesterday.get('date')}：销售额估算 {yesterday.get('sales_revenue', 0):,.0f}，营销记录 {yesterday.get('marketing_total', 0):,.0f} 条，负向反馈 {yesterday.get('voc_negative', 0):,.0f} 条。", "highlights": highlights[:6], "focus": [{"domain": "voice", "action": "优先查看高优先级用户反馈", "reason": "用户之声模块提供 P0 与负向反馈明细。"}] if voice.get("p0", {}).get("total") else [], "caveats": ["当前为确定性系统速览；配置大模型后可生成更完整的跨业务总结。"], "range": payload.get("range"), "record_count": payload.get("kpis", {}).get("records_total", 0)}
+    fallback_signals = list(payload.get("signals") or []) + highlights
+    seen_titles = set()
+    priority = []
+    for item in fallback_signals:
+        title = item.get("title")
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+        priority.append({"domain": item.get("domain"), "title": title, "priority": "high" if item.get("severity") == "high" else "medium", "polarity": "negative" if item.get("severity") == "high" else "neutral", "observation": item.get("detail", ""), "inference": "需要先核对原始记录和影响范围。", "why_it_matters": "该信号可能影响近期经营判断。", "alternative": "也可能是采集覆盖或口径变化。", "next_signal": "继续观察下一批同口径数据是否重复出现。", "time_horizon": "未来 7 天", "confidence": "low", "evidence_ids": []})
+        if len(priority) >= 4:
+            break
+    return {"mode": "fallback", "summary": "".join(parts), "yesterday_summary": f"{yesterday.get('date')}：销售额估算 {yesterday.get('sales_revenue', 0):,.0f}，营销记录 {yesterday.get('marketing_total', 0):,.0f} 条，负向反馈 {yesterday.get('voc_negative', 0):,.0f} 条。", "highlights": highlights[:6], "focus": [{"domain": "voice", "action": "优先查看高优先级用户反馈", "reason": "用户之声模块提供 P0 与负向反馈明细。"}] if voice.get("p0", {}).get("total") else [], "priority_alerts": priority, "recent_highlights": priority, "deep_insights": [], "insights": [], "caveats": ["当前为确定性系统速览；配置大模型后可生成更完整的跨业务总结。"], "range": payload.get("range"), "record_count": payload.get("kpis", {}).get("records_total", 0)}
 
 
 def _overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: str, market_brand_ids: str | None) -> dict:
@@ -311,7 +323,7 @@ def _overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: 
     severity_order = {"high": 0, "medium": 1, "low": 2}
     signals.sort(key=lambda item: severity_order.get(item["severity"], 9))
     coverage = {key: {"status": value.get("status", "empty"), "last_data_at": value.get("last_data_at")} for key, value in modules.items()}
-    return {"range": {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end}, "kpis": kpis, "modules": modules, "coverage": coverage, "yesterday": _yesterday(conn, brand_id, end), "signals": signals[:12], "trend": modules["voice"].get("trend", []), "sentiment": [], "top_topics": modules["voice"].get("topics", []), "high_signal": []}
+    return {"range": {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end}, "kpis": kpis, "modules": modules, "previous_modules": previous, "coverage": coverage, "yesterday": _yesterday(conn, brand_id, end), "signals": signals[:12], "trend": modules["voice"].get("trend", []), "sentiment": [], "top_topics": modules["voice"].get("topics", []), "high_signal": []}
 
 
 @router.get("/overview")
@@ -331,7 +343,7 @@ def overview(brand_id: str | None = None, days: int = 30, start_date: str | None
 def overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, market_brand_ids: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
     payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
-    cache_key = (brand_id, start, end, market_brand_ids or "")
+    cache_key = (OVERVIEW_VERSION, brand_id, start, end, market_brand_ids or "")
     now = time.monotonic()
     persistent_key = "overview:" + "|".join(cache_key)
     if not refresh:
@@ -342,31 +354,27 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
     cached = _OVERVIEW_SUMMARY_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
+    transient_failure = False
     if not ai.is_configured(conn):
         result = _fallback_summary(payload)
     else:
         try:
-            evidence = {
-                "range": payload["range"],
-                "kpis": payload["kpis"],
-                "coverage": payload["coverage"],
-                "yesterday": payload["yesterday"],
-                "signals": payload["signals"],
-                "modules": {
-                    key: {
-                        field: value for field, value in module.items()
-                        if field not in {"trend", "brands"}
-                    }
-                    for key, module in payload["modules"].items()
-                },
-            }
+            evidence = build_overview_evidence(conn, brand_id, payload)
             result = {"mode": "ai", **ai.summarize_overview(conn, evidence)}
         except ai.LlmError:
+            transient_failure = True
             result = _fallback_summary(payload)
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
     result.update({"range": payload["range"], "cached": False})
-    _OVERVIEW_SUMMARY_CACHE[cache_key] = (now, result)
-    ai.put_cached_summary(conn, persistent_key, result)
+    result.setdefault("deep_insights", result.get("insights", []))
+    result.setdefault("priority_alerts", result.get("recent_highlights", []))
+    result.setdefault("insights", result.get("deep_insights", []))
+    result.setdefault("recent_highlights", result.get("priority_alerts", []))
+    result.setdefault("coverage", payload["coverage"])
+    result["schema_version"] = OVERVIEW_VERSION
+    if not transient_failure:
+        _OVERVIEW_SUMMARY_CACHE[cache_key] = (now, result)
+        ai.put_cached_summary(conn, persistent_key, result)
     return result
 
 

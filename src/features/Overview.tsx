@@ -101,14 +101,14 @@ export default function Overview() {
 
   return (
     <div className="space-y-6">
-      <SectionTitle
+      <div className="[&>div]:flex-wrap"><SectionTitle
         title="经营总览"
         subtitle={`经营驾驶舱 · ${rangeLabel(range)} · 销售、市场、招聘、营销与用户反馈`}
         action={<div className="flex items-center gap-2"><TimeRangePicker /><Button size="sm" onClick={() => refetch()} disabled={isFetching}><RefreshCw size={13} className={isFetching ? "animate-spin" : ""} />刷新数据</Button></div>}
-      />
+      /></div>
 
       <Card className="p-5">
-        <SectionTitle title="智能总结" subtitle={lastUpdated ? `最近数据 ${String(lastUpdated).slice(0, 16).replace("T", " ")}` : "按当前时间范围自动整理经营变化"} />
+        <SectionTitle title="经营情报洞察" subtitle={`先看高优先事项，再看跨板块深度预测${lastUpdated ? ` · 最近数据 ${String(lastUpdated).slice(0, 16).replace("T", " ")}` : ""}`} />
         <ExecutiveSmartSummary brandId={brandId} range={range} marketBrandIds={marketBrandIds} />
       </Card>
 
