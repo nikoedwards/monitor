@@ -16,8 +16,10 @@ from urllib.parse import quote_plus, urlparse
 from xml.etree import ElementTree as ET
 
 from ..fetchers import FetchError, fetch_bytes, fetch_json_post, fetch_page
-from ..util import clean_text, today, utc_now
+from ..util import clean_text, utc_now
 from .creators.base import CreatorPost
+from .base import CollectionBatch
+from ..media_cache import cache_social_cover
 from .public_social import collect_instagram_public, collect_tiktok_public
 
 SOURCE_ID = "social_accounts"
@@ -32,6 +34,40 @@ _ATOM = "http://www.w3.org/2005/Atom"
 _YT = "http://www.youtube.com/xml/schemas/2015"
 _MEDIA = "http://search.yahoo.com/mrss/"
 _YT_WEB_METRICS_LIMIT = 12
+RETRY_STATUSES = {"blocked", "network", "error", "needs_credential"}
+
+
+def social_account_status(conn: sqlite3.Connection, brand_id: str | None = None) -> dict:
+    scope = "AND brand_id = ?" if brand_id else ""
+    accounts = [dict(row) for row in conn.execute(
+        f"SELECT id, platform, url, last_collect_at, last_status, last_error FROM links "
+        f"WHERE dimension = 'marketing' AND channel = 'social' AND status = 'active' "
+        f"AND url IS NOT NULL AND url != '' {scope}",
+        (brand_id,) if brand_id else (),
+    ).fetchall()]
+    unavailable = [row for row in accounts if row["last_status"] in RETRY_STATUSES | {"unsupported"}]
+    successful = any(row["last_status"] in {"ok", "empty"} for row in accounts)
+    status = "ok"
+    if unavailable:
+        status = "partial" if successful else ("error" if any(row["last_status"] in RETRY_STATUSES for row in unavailable) else "unsupported")
+    return {"status": status, "error": "; ".join(
+        f"{row['platform']}: {row['last_error'] or row['last_status']}" for row in unavailable
+    )[:500], "accounts": accounts}
+
+
+def social_next_collect_at(conn: sqlite3.Connection, brand_id: str | None, now: datetime) -> datetime:
+    accounts = social_account_status(conn, brand_id)["accounts"]
+    deadlines = []
+    for account in accounts:
+        try:
+            last = datetime.fromisoformat((account["last_collect_at"] or "").replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return now
+        interval = timedelta(hours=1) if account["last_status"] in RETRY_STATUSES else timedelta(days=1)
+        deadlines.append(last.astimezone(timezone.utc) + interval)
+    return min(deadlines) if deadlines else now + timedelta(days=1)
 
 
 def _touch_link(conn: sqlite3.Connection, link_id: str, status: str, error: str = "") -> None:
@@ -58,13 +94,14 @@ def _active_links(conn: sqlite3.Connection, brand_id: str, *, force: bool) -> li
     # Successful sources remain daily; failed/blocked sources get a bounded
     # hourly retry so a transient Instagram/TikTok challenge does not suppress
     # the rest of the day.
-    retry_before = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+    now = datetime.now(timezone.utc)
+    retry_before = (now - timedelta(hours=1)).isoformat()
     due_clause = "" if force else (
-        "AND (last_collect_at IS NULL OR substr(last_collect_at, 1, 10) < ? "
+        "AND (last_collect_at IS NULL OR julianday(last_collect_at) <= julianday(?) "
         "OR (last_status IN ('blocked', 'network', 'error', 'needs_credential') "
-        "AND last_collect_at < ?))"
+        "AND julianday(last_collect_at) <= julianday(?)))"
     )
-    params: tuple = (brand_id,) if force else (brand_id, today(), retry_before)
+    params: tuple = (brand_id,) if force else (brand_id, (now - timedelta(days=1)).isoformat(), retry_before)
     rows = conn.execute(
         f"""
         SELECT * FROM links
@@ -715,6 +752,20 @@ def collect_social_accounts(conn: sqlite3.Connection, brand: dict) -> list[dict]
                 _touch_link(conn, link["id"], "unsupported", message)
                 continue
 
+            if platform == "instagram":
+                def cache_cover(post: CreatorPost) -> None:
+                    if not post.thumbnail_url:
+                        return
+                    try:
+                        post.thumbnail_url = cache_social_cover(post.url, post.thumbnail_url)
+                    except (FetchError, OSError):
+                        # Content collection still succeeds if a cover is temporarily unavailable.
+                        pass
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    list(executor.map(cache_cover, posts))
+            collected_at = utc_now()
+            for post in posts:
+                post.raw["collected_at"] = collected_at
             payloads.extend(_payload(brand, link, post) for post in posts)
             if posts:
                 _touch_link(conn, link["id"], "ok")
@@ -725,4 +776,5 @@ def collect_social_accounts(conn: sqlite3.Connection, brand: dict) -> list[dict]
         except Exception as exc:
             status, message = _error_status(exc)
             _touch_link(conn, link["id"], status, message)
-    return _refresh_existing_social_records(conn, payloads)
+    state = social_account_status(conn, brand.get("id") or "")
+    return CollectionBatch(_refresh_existing_social_records(conn, payloads), status=state["status"], error=state["error"])

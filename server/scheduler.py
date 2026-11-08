@@ -35,6 +35,9 @@ def _cadence_delta(cadence: str) -> timedelta:
 
 
 def _collector_is_due(conn, source_id: str, brand_id: str, cadence: str, now: datetime) -> bool:
+    if source_id == "social_accounts":
+        from .connectors.social import social_next_collect_at
+        return social_next_collect_at(conn, brand_id, now) <= now
     row = conn.execute(
         "SELECT last_collect_at FROM source_brand_runs WHERE source_id = ? AND brand_id = ?",
         (source_id, brand_id),

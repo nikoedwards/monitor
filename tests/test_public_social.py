@@ -1,7 +1,10 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from server.connectors.public_social import (
+    instagram_posts_from_embed,
+    collect_instagram_public,
     _json_script,
     instagram_posts_from_feed,
     instagram_posts_from_html,
@@ -13,6 +16,43 @@ from server.fetchers import FetchError
 
 
 class PublicSocialNormalizerTests(unittest.TestCase):
+    def embed_html(self, **overrides):
+        context = {
+            "username": "example", "full_name": "Example", "followers_count": 100,
+            "graphql_media": [{"shortcode_media": {
+                "id": "123", "shortcode": "ABC", "display_url": "https://cdn.example/fresh.jpg",
+                "taken_at_timestamp": 1793503524, "is_video": False,
+                "edge_media_to_caption": {"edges": [{"node": {"text": "New post"}}]},
+                "like_and_view_counts_disabled": True, "edge_liked_by": {"count": 0},
+                "edge_media_to_comment": {"count": 7},
+            }}], **overrides,
+        }
+        return '<script>requireLazy([],function(){s.handle({"contextJSON":' + json.dumps(json.dumps({"context": context})) + '});});</script>'
+
+    def test_public_embed_decodes_nested_json_and_hidden_likes(self):
+        posts = instagram_posts_from_embed(self.embed_html(), "https://www.instagram.com/example/", "example")
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].external_id, "123")
+        self.assertEqual(posts[0].body, "New post")
+        self.assertEqual(posts[0].occurred_at, "2026-11-01T03:25:24+00:00")
+        self.assertEqual(posts[0].follower_count, 100)
+        self.assertIsNone(posts[0].likes)
+        self.assertEqual(posts[0].comments, 7)
+        self.assertEqual(posts[0].raw["collection_method"], "instagram_public_embed")
+
+    def test_embed_rejects_other_accounts_and_private_profiles(self):
+        self.assertEqual(instagram_posts_from_embed(self.embed_html(username="other"), "url", "example"), [])
+        with self.assertRaises(FetchError):
+            instagram_posts_from_embed(self.embed_html(is_private=True), "url", "example")
+        self.assertEqual(instagram_posts_from_embed('<script>"contextJSON":"broken"</script>', "url", "example"), [])
+
+    @patch("server.connectors.public_social.fetch_text")
+    def test_profile_rate_limit_uses_public_embed_before_browser(self, fetch):
+        fetch.side_effect = [FetchError("HTTP 429"), self.embed_html()]
+        posts = collect_instagram_public("https://www.instagram.com/example/", "example")
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(fetch.call_args.args[0], "https://www.instagram.com/example/embed/")
+
     def test_instagram_profile_response_becomes_posts_with_metrics(self):
         user = {
             "username": "example",

@@ -65,11 +65,11 @@ function textValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function thumbnailSrc(url?: string): string | undefined {
+function thumbnailSrc(url?: string, postUrl?: string): string | undefined {
   const normalized = textValue(url);
   if (!normalized) return undefined;
   if (normalized.startsWith("/") || normalized.startsWith("data:") || normalized.startsWith("blob:")) return normalized;
-  return `/api/media/thumbnail?url=${encodeURIComponent(normalized)}`;
+  return `/api/media/thumbnail?url=${encodeURIComponent(normalized)}${postUrl ? `&post_url=${encodeURIComponent(postUrl)}` : ""}`;
 }
 
 function youtubeThumbnailFromUrl(url?: string): string | undefined {
@@ -435,7 +435,7 @@ function HighlightedText({ record }: { record: RecordItem }) {
 
 function SocialThumbnail({ record }: { record: RecordItem }) {
   const [failed, setFailed] = useState(false);
-  const thumbnail = thumbnailSrc(recordThumbnail(record));
+  const thumbnail = thumbnailSrc(recordThumbnail(record), record.platform === "instagram" ? record.url : undefined);
   const platform = record.platform || "social";
   const platformLabel = SOCIAL_PLATFORM_LABEL[platform] || platform;
   const instagramReel = platform === "instagram"

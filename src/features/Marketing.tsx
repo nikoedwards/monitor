@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { TrendChart, Bars } from "../components/charts";
 import { RecordList } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Spinner, StatCard } from "../components/ui";
-import { MonitorStatus } from "../components/MonitorStatus";
+import { MonitorStatus, SocialAccountStatus } from "../components/MonitorStatus";
 import { CreatorSourceStatus } from "../components/CreatorSourceStatus";
 import { CreatorCollectionLogic } from "../components/CreatorCollectionLogic";
 import { TimeRangePicker } from "../components/TimeRangePicker";
@@ -193,6 +193,7 @@ export default function Marketing() {
         subtitle="媒体公关、广告、红人、社群与社交声量"
         action={<div className="flex flex-wrap items-center gap-2"><TimeRangePicker /><MonitorStatus brandId={brandId} dimension="marketing" /></div>}
       />
+      {isSocial && <SocialAccountStatus brandId={brandId} />}
       {channel === "creators" && <CreatorSourceStatus brandId={brandId} />}
       {channel === "creators" && <CreatorCollectionLogic compact />}
 

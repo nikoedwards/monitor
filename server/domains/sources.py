@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..config import CREDENTIALS, SCHEDULER_ENABLED, SCHEDULER_SECONDS
 from ..connectors.base import run_collector
 from ..connectors.registry import REGISTRY, get_spec
+from ..connectors.social import social_account_status, social_next_collect_at
 from .common import fetch_brand, get_conn
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
@@ -112,6 +113,9 @@ def monitoring_status(
         if parsed and (last_run is None or parsed > last_run):
             last_run = parsed
         due_at = _next_collect_at(last_collect_at, spec.cadence, now)
+        social = social_account_status(conn, brand_id) if spec.id == "social_accounts" else None
+        if social and social["accounts"]:
+            due_at = social_next_collect_at(conn, brand_id, now)
         if spec.status == "ready" and (next_due is None or due_at < next_due):
             next_due = due_at
         items.append({
@@ -128,6 +132,11 @@ def monitoring_status(
             "next_collect_at": due_at.isoformat(),
             "due": due_at <= now,
         })
+        if social:
+            items[-1]["accounts"] = social["accounts"]
+            if social["accounts"]:
+                items[-1]["last_status"] = social["status"]
+                items[-1]["last_error"] = social["error"]
 
     interval = SCHEDULER_SECONDS
     # Marketing is connector-driven; sales is link-driven (scheduler runs it daily).
