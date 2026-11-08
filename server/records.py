@@ -133,6 +133,36 @@ def cleanup_google_ad_mismatches(
     return len(stale)
 
 
+def cleanup_meta_ad_mismatches(conn: sqlite3.Connection, brand: dict) -> int:
+    """Remove obvious cross-advertiser rows created by Meta keyword search."""
+    if conn is None:
+        return 0
+    brand_id = brand.get("id") if isinstance(brand, dict) else ""
+    if not brand_id:
+        return 0
+    try:
+        keywords = json.loads(brand.get("monitoring_keywords_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        keywords = []
+    candidates = [clean_text(brand.get("name"))] + [clean_text(v) for v in keywords if isinstance(v, str)]
+    candidates = [v.casefold() for v in candidates if v]
+    rows = conn.execute(
+        "SELECT id, page_name, ad_external_id FROM ad_entities WHERE brand_id = ? AND source_id = 'meta_ads'",
+        (brand_id,),
+    ).fetchall()
+    stale = []
+    for row in rows:
+        name = clean_text(row["page_name"]).casefold()
+        if not name or any(name == c or (name.startswith(c) and (len(name) == len(c) or not name[len(c)].isalnum())) for c in candidates):
+            continue
+        stale.append((row["id"], row["ad_external_id"]))
+    for entity_id, external_id in stale:
+        conn.execute("DELETE FROM ad_events WHERE entity_id = ?", (entity_id,))
+        conn.execute("DELETE FROM ad_snapshots WHERE entity_id = ?", (entity_id,))
+        conn.execute("DELETE FROM ad_entities WHERE id = ?", (entity_id,))
+        conn.execute("DELETE FROM records WHERE source_id = 'meta_ads' AND external_id = ?", (external_id,))
+    return len(stale)
+
 def _cleanup_google_stale_ads(
     conn: sqlite3.Connection,
     brand_id: str,

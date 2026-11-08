@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, ur
 from ..config import CREDENTIALS, USER_AGENT
 from ..fetchers import FetchError, fetch_bytes, fetch_bytes_post, fetch_form_json, fetch_json, fetch_page, fetch_text, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
-from ..records import cleanup_google_ad_mismatches
+from ..records import cleanup_google_ad_mismatches, cleanup_meta_ad_mismatches
 from ..relevance import google_news_match_evidence, query_match_evidence, reddit_post_id, search_query_parts
 from ..util import (
     clean_text,
@@ -1794,6 +1794,42 @@ def _meta_page_ids_from_links(conn: sqlite3.Connection | None, brand_id: str | N
     return result
 
 
+def _meta_name_matches_brand(page_name: str, brand: dict) -> bool:
+    """Keep Meta keyword results scoped to the brand's advertiser pages."""
+    value = clean_text(page_name).casefold()
+    if not value:
+        return False
+    candidates = [clean_text(brand.get("name"))]
+    try:
+        keywords = json.loads(brand.get("monitoring_keywords_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        keywords = []
+    candidates.extend(clean_text(item) for item in keywords if isinstance(item, str))
+    for candidate in candidates:
+        candidate = candidate.casefold().strip()
+        if candidate and (value == candidate or (value.startswith(candidate) and (len(value) == len(candidate) or not value[len(candidate)].isalnum()))):
+            return True
+    return False
+
+def _meta_historical_page_ids(conn: sqlite3.Connection | None, brand: dict) -> list[str]:
+    """Recover page ids from prior verified Meta observations."""
+    if conn is None or not brand.get("id"):
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT page_id, page_name FROM ad_entities "
+            "WHERE brand_id = ? AND source_id = 'meta_ads' AND page_id IS NOT NULL",
+            (brand.get("id"),),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    result: list[str] = []
+    for row in rows:
+        page_id = str(row["page_id"] or "")
+        if page_id.isdigit() and _meta_name_matches_brand(row["page_name"], brand) and page_id not in result:
+            result.append(page_id)
+    return result
+
 def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
     snapshot = ad.get("snapshot") or {}
     cards = snapshot.get("cards") or []
@@ -2013,8 +2049,16 @@ def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
                 if not next_url or next_url == url:
                     break
                 url = next_url
+        # The Graph API branch searches by terms, so apply the advertiser scope.
+        payloads = [item for item in payloads if _meta_name_matches_brand(item.get("author"), brand)]
+        cleanup_meta_ad_mismatches(conn, brand)
         return payloads
-    return _collect_meta_public_ads({**brand, "_meta_page_ids": _meta_page_ids_from_links(conn, brand.get("id"))})
+    page_ids = _meta_page_ids_from_links(conn, brand.get("id")) or _meta_historical_page_ids(conn, brand)
+    payloads = _collect_meta_public_ads({**brand, "_meta_page_ids": page_ids})
+    if not page_ids:
+        payloads = [item for item in payloads if _meta_name_matches_brand(item.get("author"), brand)]
+    cleanup_meta_ad_mismatches(conn, brand)
+    return payloads
 
 
 # YouTube creator collection now lives in connectors/creators/youtube.py

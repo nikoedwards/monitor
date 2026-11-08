@@ -77,3 +77,11 @@ def test_meta_token_collection_follows_paging_and_deduplicates():
         payloads = collectors.collect_meta_ads(None, {"id": "brand-1", "name": "Example", "monitoring_keywords_json": "[\"Example\"]"})
     assert [item["external_id"] for item in payloads] == ["brand-1:1", "brand-1:2", "brand-1:3"]
     assert fetch.call_count == 2
+
+def test_meta_keyword_results_are_scoped_to_brand_advertiser():
+    brand = {"name": "PLAUD", "monitoring_keywords_json": '["PLAUD", "NotePin"]'}
+    assert collectors._meta_name_matches_brand("Plaud", brand)
+    assert collectors._meta_name_matches_brand("Plaud France", brand)
+    assert collectors._meta_name_matches_brand("Plaud.kr", brand)
+    assert not collectors._meta_name_matches_brand("Top AI tools", brand)
+    assert not collectors._meta_name_matches_brand("Pocket FM Stories", brand)
