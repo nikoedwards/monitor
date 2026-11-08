@@ -378,11 +378,41 @@ def insert_record_if_new(conn: sqlite3.Connection, payload: dict) -> dict | None
     external_id = payload.get("external_id")
     source_id = payload.get("source_id")
     if external_id:
-        existing = conn.execute(
-            "SELECT id, metrics_json FROM records WHERE source_id = ? AND external_id = ?",
-            (source_id, external_id),
-        ).fetchone()
+        try:
+            existing = conn.execute(
+                "SELECT id, title, body, author, occurred_at, metrics_json FROM records WHERE source_id = ? AND external_id = ?",
+                (source_id, external_id),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Keep thumbnail dedupe working for minimal maintenance tables;
+            # body enrichment applies only to the full records schema.
+            existing = conn.execute(
+                "SELECT id, metrics_json FROM records WHERE source_id = ? AND external_id = ?",
+                (source_id, external_id),
+            ).fetchone()
         if existing:
+            if source_id == "community_site" and "body" in existing.keys():
+                incoming_body = _resolve_body(payload)
+                stored_body = clean_text(existing["body"])
+                incoming_title = clean_text(payload.get("title"))
+                stored_title = clean_text(existing["title"])
+                title_only = not stored_body or stored_body == stored_title
+                if (
+                    incoming_body
+                    and len(incoming_body) > len(stored_body)
+                    and (title_only or len(incoming_body) >= len(stored_body) * 2)
+                ):
+                    conn.execute(
+                        "UPDATE records SET body = ?, title = COALESCE(NULLIF(?, ''), title), "
+                        "author = COALESCE(NULLIF(?, ''), author), occurred_at = COALESCE(?, occurred_at) WHERE id = ?",
+                        (
+                            incoming_body,
+                            incoming_title,
+                            clean_text(payload.get("author")),
+                            payload.get("occurred_at"),
+                            existing["id"],
+                        ),
+                    )
             # A record may predate thumbnail extraction.  Refresh only the
             # missing media field when a later sync has a usable cover, while
             # preserving the immutable content and dedupe semantics.

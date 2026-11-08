@@ -2085,11 +2085,30 @@ def _parse_iso(value) -> str | None:
         return None
 
 
-def _discourse_replies(root: str, topic_id, topic_title: str, topic_url: str, topic_ext: str, brand: dict, link_id, host: str) -> list[dict]:
-    """Top-level replies of a Discourse topic (post_stream minus the original post)."""
+def _discourse_topic_detail(root: str, topic_id) -> dict | None:
+    """Fetch the topic JSON once so both the original post and replies are available."""
     try:
         detail = fetch_json(f"{root}/t/{topic_id}.json", timeout=16)
     except (FetchError, ValueError):
+        return None
+    return detail if isinstance(detail, dict) else None
+
+
+def _discourse_replies(
+    root: str,
+    topic_id,
+    topic_title: str,
+    topic_url: str,
+    topic_ext: str,
+    brand: dict,
+    link_id,
+    host: str,
+    *,
+    detail: dict | None = None,
+) -> list[dict]:
+    """Top-level replies of a Discourse topic (post_stream minus the original post)."""
+    detail = detail if detail is not None else _discourse_topic_detail(root, topic_id)
+    if not detail:
         return []
     posts = (((detail or {}).get("post_stream") or {}).get("posts")) or []
     out: list[dict] = []
@@ -2137,6 +2156,12 @@ def _discourse_payloads(url: str, brand: dict, link_id) -> list[dict]:
         topic_url = f"{root}/t/{slug}/{topic_id}" if slug and topic_id else root
         title = clean_text(topic.get("title")) or "Forum topic"
         topic_ext = f"{brand.get('id')}:discourse:{host}:{topic_id}"
+        detail = _discourse_topic_detail(root, topic_id) if topic_id else None
+        posts = (((detail or {}).get("post_stream") or {}).get("posts")) or []
+        original = posts[0] if posts else {}
+        body = html_fragment_to_text(original.get("cooked") or original.get("raw")) or clean_text(
+            topic.get("excerpt") or topic.get("blurb") or topic.get("description")
+        ) or title
         payloads.append({
             "source_id": "community_site",
             "brand_id": brand.get("id"),
@@ -2147,9 +2172,10 @@ def _discourse_payloads(url: str, brand: dict, link_id) -> list[dict]:
             "channel": "community",
             "platform": "discourse",
             "title": title,
-            "body": clean_text(topic.get("excerpt")) or title,
+            "author": clean_text(original.get("username") or original.get("name")),
+            "body": body,
             "url": topic_url,
-            "occurred_at": _parse_iso(topic.get("last_posted_at") or topic.get("created_at")),
+            "occurred_at": _parse_iso(original.get("created_at") or topic.get("created_at") or topic.get("last_posted_at")),
             "metrics": {
                 "posts_count": topic.get("posts_count"),
                 "reply_count": topic.get("reply_count"),
@@ -2158,8 +2184,13 @@ def _discourse_payloads(url: str, brand: dict, link_id) -> list[dict]:
             "raw": {"topic_id": topic_id, "site": root},
         })
         # Pull replies for the most recent handful of topics to keep request volume bounded.
-        if index < 8 and topic_id and (topic.get("posts_count") or 0) > 1:
-            payloads.extend(_discourse_replies(root, topic_id, title, topic_url, topic_ext, brand, link_id, host))
+        if index < 8 and topic_id and detail is not None and (topic.get("posts_count") or 0) > 1:
+            payloads.extend(
+                _discourse_replies(
+                    root, topic_id, title, topic_url, topic_ext, brand, link_id, host,
+                    detail=detail,
+                )
+            )
     return payloads
 
 
