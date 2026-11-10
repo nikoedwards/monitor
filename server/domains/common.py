@@ -212,8 +212,6 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
                     transcript_hit=transcript_hit,
                     brand_mentions=brand_mentions,
                     product_queries=product_queries,
-                    title=item.get("title") or "",
-                    body=item.get("body") or "",
                 ):
                     continue
                 item = enrich_creator_record_evidence(item, brand=creator_brands.get(brand_id), product_matches=product_matches)

@@ -15,6 +15,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from ..fetchers import FetchError, fetch_text
+from ..browser_jobs import chromium_args, restrict_resources, run_browser_job
 from .creators.base import CreatorPost
 
 _BROWSER_USER_AGENT = (
@@ -630,6 +631,15 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
     except FetchError as exc:
         errors.append(str(exc))
 
+    result = run_browser_job("instagram", {"handle": handle, "limit": limit})
+
+    try:
+        return instagram_posts_from_responses(result, account_url, handle, limit=limit)
+    except FetchError as exc:
+        raise FetchError("; ".join([*errors, str(exc)])) from exc
+
+
+def _instagram_browser_result(handle: str, limit: int, *, constrained: bool) -> dict:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -640,11 +650,13 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True,
-                args=["--disable-dev-shm-usage", "--no-sandbox"],
+                args=chromium_args(constrained),
             )
             context = None
             try:
                 context = browser.new_context(user_agent=_BROWSER_USER_AGENT, locale="en-US")
+                restrict_resources(context)
+                context.set_default_timeout(15_000)
                 page = context.new_page()
                 page.goto(
                     f"https://www.instagram.com/{handle}/",
@@ -720,10 +732,7 @@ def collect_instagram_public(account_url: str, handle: str, *, limit: int = _MAX
     except Exception as exc:
         raise FetchError(f"Instagram 公开主页采集失败：{exc}") from exc
 
-    try:
-        return instagram_posts_from_responses(result, account_url, handle, limit=limit)
-    except FetchError as exc:
-        raise FetchError("; ".join([*errors, str(exc)])) from exc
+    return result
 
 
 def _json_script(html: str, script_id: str) -> dict:

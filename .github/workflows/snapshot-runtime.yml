@@ -4,6 +4,14 @@ on:
   pull_request:
     paths:
       - server/snapshot*.py
+      - server/browser_jobs.py
+      - server/collector_worker.py
+      - server/worker_support.py
+      - server/connectors/collectors.py
+      - server/connectors/public_social.py
+      - tests/test_browser_jobs.py
+      - tests/test_monitor_watchdog.py
+      - deploy/aliyun/monitor-watchdog.*
       - tests/*snapshot*.py
       - requirements.txt
       - Dockerfile
@@ -20,6 +28,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production runtime
         run: docker build -t monitor-snapshot-test .
+      - name: Verify collector cleanup and watchdog recovery
+        run: |
+          docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
+            --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
+            -e MONITOR_TEST_BROWSER_RUNTIME=1 --network=none monitor-snapshot-test python -m unittest tests.test_browser_jobs tests.test_monitor_watchdog tests.test_public_social tests.test_creator_evidence
       - name: Verify CDP in a bounded Linux container
         timeout-minutes: 4
         run: |
