@@ -22,7 +22,9 @@ RUN set -eux; \
       && test -d /ms-playwright; then \
       echo "Reusing cached Monitor runtime dependencies"; \
     else \
-      python -m pip install --no-cache-dir -r /tmp/monitor-requirements.txt \
+      apt-get update && apt-get install -y --no-install-recommends libatomic1 \
+      && rm -rf /var/lib/apt/lists/* \
+      && python -m pip install --no-cache-dir -r /tmp/monitor-requirements.txt \
       && python -m pip install --no-cache-dir "playwright>=1.50,<2" \
       && python -m playwright install --with-deps chromium; \
     fi
