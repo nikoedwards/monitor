@@ -24,6 +24,12 @@ services:
       MONITOR_CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT: "8000"
       # Let health/API settle before replaying overdue browser work after a reboot.
       MONITOR_SCHEDULER_STARTUP_DELAY_SECONDS: "300"
+      # Browser collectors are disposable and back off under memory pressure.
+      MONITOR_COLLECTOR_TIMEOUT_SECONDS: "90"
+      MONITOR_COLLECTOR_MIN_AVAILABLE_MB: "384"
+      MONITOR_COLLECTOR_RESERVE_MB: "160"
+      MONITOR_COLLECTOR_MAX_RSS_MB: "320"
+      MONITOR_COLLECTOR_COOLDOWN_SECONDS: "1800"
     # Keep the application private when Caddy is enabled. Set
     # APP_BIND_ADDRESS=0.0.0.0 if direct access is required instead.
     ports:

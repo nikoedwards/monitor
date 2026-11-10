@@ -5,4 +5,5 @@ After=docker.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=75
 ExecStart=/opt/monitor/deploy/aliyun/monitor-watchdog.sh

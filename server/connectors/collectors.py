@@ -25,6 +25,8 @@ from ..util import (
     utc_now,
 )
 from .publications import enrich_publication, estimate_ave
+from .base import CollectionBatch
+from ..browser_jobs import chromium_args, restrict_resources, run_browser_job
 
 
 def brand_queries(brand: dict) -> list[str]:
@@ -1915,6 +1917,12 @@ def _meta_public_payload(ad: dict, brand: dict, query: str) -> dict | None:
 
 
 def _collect_meta_public_ads(brand: dict) -> list[dict]:
+    result = run_browser_job("meta_ads", brand)
+    return CollectionBatch(result["records"], status="partial" if result.get("partial") else "ok",
+                           error=result.get("reason", ""))
+
+
+def _collect_meta_public_ads_in_process(brand: dict, *, constrained: bool, timeout: int) -> dict:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -1922,18 +1930,26 @@ def _collect_meta_public_ads(brand: dict) -> list[dict]:
 
     payloads: list[dict] = []
     seen: set[str] = set()
-    max_ads = 1000
+    max_ads = 200 if constrained else 1000
+    max_rounds = 20 if constrained else 80
+    deadline = time.monotonic() + timeout
+    partial_reason = ""
     page_ids = [str(value) for value in (brand.get("_meta_page_ids") or []) if str(value).isdigit()]
     searches = [("", page_id) for page_id in page_ids] or [(query, None) for query in brand_queries(brand)[:4]]
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+            args=chromium_args(constrained),
         )
         context = browser.new_context(locale="en-US", user_agent=_META_PUBLIC_USER_AGENT, viewport={"width": 1366, "height": 900})
+        restrict_resources(context)
+        context.set_default_timeout(10_000)
         page = context.new_page()
         try:
             for query, page_id in searches:
+                if time.monotonic() >= deadline or len(payloads) >= max_ads:
+                    partial_reason = "Browser collection budget reached; results are partial"
+                    break
                 params = urlencode({
                     "active_status": "all",
                     "ad_type": "all",
@@ -1943,40 +1959,52 @@ def _collect_meta_public_ads(brand: dict) -> list[dict]:
                     **({"view_all_page_id": page_id} if page_id else {"q": query}),
                 })
                 response_ads: list[dict] = []
+                search_seen: set[str] = set()
 
                 def on_response(response) -> None:
                     if "/api/graphql/" not in response.url:
                         return
                     try:
-                        if response.status == 200:
+                        if response.status == 200 and len(response_ads) < max_ads:
                             _meta_collect_ads_from_value(response.json(), response_ads, {str(item.get("ad_archive_id")) for item in response_ads})
+                            del response_ads[max_ads:]
                     except Exception:
                         return
 
                 page.on("response", on_response)
                 try:
-                    page.goto(f"{_META_PUBLIC_URL}?{params}", wait_until="domcontentloaded", timeout=90_000)
+                    page.goto(f"{_META_PUBLIC_URL}?{params}", wait_until="domcontentloaded", timeout=min(30_000, max(1, int((deadline - time.monotonic()) * 1000))))
                     page.wait_for_timeout(4_500)
                     html = page.content()
                 except Exception:
                     page.remove_listener("response", on_response)
+                    partial_reason = "Some advertiser pages could not be loaded; results are partial"
                     continue
-                expected = min(_meta_public_ad_count_from_html(html) or max_ads, max_ads)
+                expected_count = _meta_public_ad_count_from_html(html)
+                expected = min(expected_count if expected_count is not None else max_ads, max_ads)
+                if expected_count and expected_count > max_ads:
+                    partial_reason = "Browser ad limit reached; results are partial"
                 page_ads = _meta_public_ads_from_html(html)
                 stable_rounds = 0
                 previous_count = 0
-                for _ in range(80):
+                for _ in range(max_rounds):
+                    if time.monotonic() >= deadline:
+                        partial_reason = "Browser collection deadline reached; results are partial"
+                        break
                     candidates = page_ads + response_ads
                     for ad in candidates:
                         ad_id = str(ad.get("ad_archive_id"))
+                        search_seen.add(ad_id)
                         if ad_id in seen:
                             continue
                         payload = _meta_public_payload(ad, brand, query or page_id or "Meta")
                         if payload:
                             seen.add(ad_id)
                             payloads.append(payload)
-                    current_count = len(seen)
-                    if current_count >= expected:
+                            if len(payloads) >= max_ads:
+                                break
+                    current_count = len(search_seen)
+                    if current_count >= expected or len(payloads) >= max_ads:
                         break
                     if current_count == previous_count:
                         stable_rounds += 1
@@ -1992,13 +2020,17 @@ def _collect_meta_public_ads(brand: dict) -> list[dict]:
                         page_ads = _meta_public_ads_from_html(html)
                     except Exception:
                         break
+                if expected_count is None or len(search_seen) < expected_count:
+                    partial_reason = partial_reason or "Public ad page may contain more results; collection is partial"
                 page.remove_listener("response", on_response)
         finally:
             try:
                 context.close()
             finally:
                 browser.close()
-    return payloads
+    if not payloads and partial_reason:
+        raise FetchError(partial_reason)
+    return {"records": payloads, "partial": bool(partial_reason), "reason": partial_reason}
 
 
 def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
@@ -2056,7 +2088,9 @@ def collect_meta_ads(conn: sqlite3.Connection, brand: dict) -> list[dict]:
     page_ids = _meta_page_ids_from_links(conn, brand.get("id")) or _meta_historical_page_ids(conn, brand)
     payloads = _collect_meta_public_ads({**brand, "_meta_page_ids": page_ids})
     if not page_ids:
-        payloads = [item for item in payloads if _meta_name_matches_brand(item.get("author"), brand)]
+        payloads = CollectionBatch(
+            [item for item in payloads if _meta_name_matches_brand(item.get("author"), brand)],
+            status=getattr(payloads, "status", "ok"), error=getattr(payloads, "error", ""))
     cleanup_meta_ad_mismatches(conn, brand)
     return payloads
 
