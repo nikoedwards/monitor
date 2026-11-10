@@ -14,6 +14,7 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..app_identity import app_id, app_record_allowed, configured_app_ids
 from ..relevance import google_news_record_is_relevant, reddit_search_record_is_relevant
 from ..util import new_id, today, utc_now
 from .common import get_conn, resolve_window
@@ -23,8 +24,8 @@ router = APIRouter(prefix="/api/market-share", tags=["market-share"])
 
 MODEL_PRESETS = {
     "balanced": {
-        "label": "App 下载与评分模型",
-        "description": "使用所选国家的 App 下载估算与 App Store 公开评分数计算相对份额。",
+        "label": "App 评分样本模型",
+        "description": "使用所选品牌的应用商店累计评分计算样本内份额；有可比较的真实下载量时再计入下载信号。",
         "weights": {"sales": 0.0, "app": 0.65, "conversation": 0.35, "engagement": 0.0},
     },
     "commerce": {
@@ -109,10 +110,16 @@ def _record_signals(
     app_ratings_by_app: dict[str, float] = defaultdict(float)
     app_average_rating_by_app: dict[str, tuple[float, float]] = {}
     app_data_updated_at = ""
+    allowed_apps = configured_app_ids(conn, brand["id"])
+    excluded_app_records = 0
+    latest_app_metrics: dict[str, tuple[str, int, dict]] = {}
 
     for row in rows:
         metrics = _json_object(row["metrics_json"])
         raw = _json_object(row["raw_json"])
+        if not app_record_allowed({**dict(row), "raw": raw}, allowed_apps):
+            excluded_app_records += 1
+            continue
         if not _record_is_relevant(row, brand["name"], raw):
             continue
 
@@ -145,12 +152,26 @@ def _record_signals(
         views += _number(metrics.get("views"))
 
         if is_app:
+            # Play exposes a global cumulative rating count even on localized
+            # storefronts. Do not present it as ratings from a single country.
+            if country and platform == "google_play" and data_type == "app_metric":
+                continue
             app_data_updated_at = max(app_data_updated_at, str(row["occurred_at"] or ""))
             is_review_record = data_type != "app_metric" and (
                 dimension == "voc" or "review" in source_id or "review" in data_type
             )
             app_reviews += 1 if is_review_record else 0
-            app_key = str(row["link_id"] or source_id or platform or "app")
+            identity = app_id(platform, row["url"], raw)
+            scope = "global" if platform == "google_play" else str(row["region"] or "")
+            app_key = f"{platform}:{identity}:{scope}" if identity else str(row["link_id"] or source_id or platform or "app")
+            if data_type == "app_metric":
+                # Use the latest observation, including legitimate decreases;
+                # configured/automatic links and localized Play pages share a key.
+                order = (str(row["occurred_at"] or ""), int(row["region"] == "US"))
+                previous = latest_app_metrics.get(app_key)
+                if previous is None or order >= previous[:2]:
+                    latest_app_metrics[app_key] = (*order, metrics)
+                continue
             rating = _number(metrics.get("rating"))
             rating_count = _number(metrics.get("rating_count"))
             if data_type == "app_metric" and rating and rating_count >= app_average_rating_by_app.get(app_key, (0, 0))[1]:
@@ -161,6 +182,14 @@ def _record_signals(
             app_ratings_by_app[app_key] = max(
                 app_ratings_by_app[app_key], rating_count
             )
+
+    for app_key, (_, _, metrics) in latest_app_metrics.items():
+        rating = _number(metrics.get("rating"))
+        rating_count = _number(metrics.get("rating_count"))
+        app_ratings_by_app[app_key] = rating_count
+        if rating:
+            app_average_rating_by_app[app_key] = (rating, rating_count)
+        explicit_downloads_by_app[app_key] = _first_metric(metrics, DOWNLOAD_KEYS)
 
     explicit_downloads = sum(explicit_downloads_by_app.values())
     known_app_ratings = sum(app_ratings_by_app.values())
@@ -202,6 +231,7 @@ def _record_signals(
         "app_downloads_high": round(app_downloads_high),
         "app_download_basis": app_download_basis,
         "app_data_updated_at": app_data_updated_at or None,
+        "excluded_app_records": excluded_app_records,
     }
 
 
@@ -389,6 +419,12 @@ def sync_market_share_snapshots(
             params,
         ).fetchall()
         dates.update(str(row["d"]) for row in rows if row["d"])
+        snapshot_dates = conn.execute(
+            "SELECT DISTINCT snapshot_date FROM market_share_snapshots"
+            + (f" WHERE brand_id IN ({','.join('?' for _ in brand_ids)})" if brand_ids else ""),
+            brand_ids or [],
+        ).fetchall()
+        dates.update(str(row["snapshot_date"]) for row in snapshot_dates)
 
     changes = 0
     captured_dates: list[str] = []
@@ -410,12 +446,18 @@ def _trend_shares(brand_ids: list[str], state: dict[str, dict], model: str) -> d
     weights = MODEL_PRESETS[model]["weights"]
     comparable_floor = max(2, math.ceil(len(brand_ids) * 0.5))
     signal_values = {
-        "app": {brand_id: _number(state.get(brand_id, {}).get("app_downloads_est")) for brand_id in brand_ids},
+        "app": {brand_id: (
+            _number(state.get(brand_id, {}).get("app_downloads_est"))
+            if state.get(brand_id, {}).get("app_download_basis") == "observed" else 0
+        ) for brand_id in brand_ids},
         "conversation": {brand_id: _number(state.get(brand_id, {}).get("app_reviews")) for brand_id in brand_ids},
     }
     active = [
         key for key in ("app", "conversation")
         if weights[key] > 0 and sum(1 for value in signal_values[key].values() if value > 0) >= comparable_floor
+        and (key != "app" or sum(
+            1 for brand_id in brand_ids if state.get(brand_id, {}).get("app_download_basis") == "observed"
+        ) >= comparable_floor)
     ]
     active_total = sum(weights[key] for key in active)
     shares = {brand_id: 0.0 for brand_id in brand_ids}
@@ -618,7 +660,7 @@ def market_share(
         conversation_signal = record_data["app_reviews"]
         signals = {
             "sales": 0,
-            "app": record_data["app_downloads_est"],
+            "app": record_data["app_downloads_est"] if record_data["app_download_basis"] == "observed" else 0,
             "conversation": conversation_signal,
             "engagement": record_data["engagement"],
         }
@@ -657,6 +699,9 @@ def market_share(
     active_keys = [
         key for key in base_weights
         if base_weights[key] > 0 and signal_coverage[key] >= comparable_floor
+        and (key != "app" or sum(
+            row["raw"]["app_download_basis"] == "observed" for row in rows
+        ) >= comparable_floor)
     ]
     active_base_weight = sum(base_weights[key] for key in active_keys)
     active_weights = {
@@ -667,6 +712,8 @@ def market_share(
 
     for row in rows:
         gaps = row["gaps"]
+        if row["raw"]["excluded_app_records"]:
+            gaps.append(f"已排除 {row['raw']['excluded_app_records']} 条非当前配置应用的记录")
         if base_weights["sales"] > 0 and not row["signals"]["sales"]:
             gaps.append("缺少可比较的销量或销售额")
         if row["raw"]["app_download_basis"] == "unavailable":
@@ -714,7 +761,14 @@ def market_share(
     confidence_score = round(base_confidence * (1.0 - 0.30 * proxy_ratio))
     confidence_label = "高" if confidence_score >= 75 else "中" if confidence_score >= 50 else "低"
 
-    warnings = ["该结果是所选品牌与已采集数据源内的相对份额，不等同于官方全行业市占。"]
+    warnings = [
+        "该结果是所选品牌与已采集数据源内的相对份额，不等同于官方全行业市占。",
+        "统计的是所选时段内最近采集的累计评分，不是该时段新增评分、下载量或销量。",
+    ]
+    if country_code:
+        warnings.append("Google Play 累计评分为全球口径，不计入单个国家的评分样本。")
+    else:
+        warnings.append("Google Play 全球累计评分按应用包名去重，不重复累加各国家页面。")
     if country_code:
         warnings.append(f"当前仅统计国家标签为 {country_code} 的记录；未标注国家的数据不会混入该国家。")
     categories = {str(row["category"]).strip() for row in rows if row.get("category")}
@@ -723,7 +777,7 @@ def market_share(
     elif any(not row.get("category") for row in rows):
         warnings.append("部分品牌未设置品类，请确认它们属于同一竞争市场。")
     if any(row["raw"]["app_download_basis"] == "review_proxy" for row in rows):
-        warnings.append("App Store 评分数与平均评分为对应国家商店的公开准确值；下载量仍按 0.5%-2% 的评分转化率估算，中位值按 1% 计算。")
+        warnings.append("下载估算仅供参考：按评分数的 50–200 倍估算，中位值为 100 倍；此推算不作为独立信号参与份额计算。")
     if active_base_weight < 0.999:
         warnings.append("数据覆盖不足、无法横向比较的指标未计入综合值，其权重已自动分配给可用指标。")
     for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "App Store 评分数"), ("engagement", "互动")):

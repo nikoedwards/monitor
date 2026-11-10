@@ -1,10 +1,12 @@
 import json
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from fastapi import HTTPException
 
 from server.domains.market_share import market_share, market_share_trend, sync_market_share_snapshots
+from server.domains.common import query_records
 
 
 SCHEMA = """
@@ -37,7 +39,9 @@ CREATE TABLE links (
   brand_id TEXT,
   channel TEXT,
   platform TEXT,
-  region TEXT
+  region TEXT,
+  url TEXT,
+  status TEXT
 );
 CREATE TABLE sales_metrics (
   id TEXT PRIMARY KEY,
@@ -146,7 +150,7 @@ class MarketShareTests(unittest.TestCase):
             result["model"]["base_weights"],
             {"sales": 0.0, "app": 0.65, "conversation": 0.35, "engagement": 0.0},
         )
-        self.assertEqual(result["model"]["active_weights"], result["model"]["base_weights"])
+        self.assertEqual(result["model"]["active_weights"], {"sales": 0, "app": 0, "conversation": 1, "engagement": 0})
 
     def test_missing_signals_are_reweighted_to_available_data(self):
         self.add_record(
@@ -305,6 +309,58 @@ class MarketShareTests(unittest.TestCase):
         alpha = next(row for row in result["summary"] if row["brand_id"] == "a")
         self.assertAlmostEqual(16.67, alpha["change_pp"], places=2)
         self.assertEqual(100, alpha["rating_count_change"])
+
+    def test_google_play_global_count_is_deduplicated_and_not_a_country_metric(self):
+        for country in ("US", "JP"):
+            self.add_record(
+                f"play-{country}", "a", dimension="platform", channel="app", platform="google_play",
+                source_id="google_play_reviews", data_type="app_metric", region=country,
+                metrics={"rating_count": 747422, "rating": 4},
+            )
+            self.conn.execute("UPDATE records SET raw_json = ?, link_id = ? WHERE id = ?", (
+                json.dumps({"package_name": "sg.omi"}), f"auto-google-play:{country}:sg.omi", f"play-{country}",
+            ))
+        result = market_share(brand_ids="a,b", start_date="2026-07-01", end_date="2026-07-31", conn=self.conn)
+        alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
+        self.assertEqual(747422, alpha["raw"]["app_reviews"])
+        country_result = market_share(brand_ids="a,b", country="US", start_date="2026-07-01", end_date="2026-07-31", conn=self.conn)
+        alpha = next(row for row in country_result["brands"] if row["brand_id"] == "a")
+        self.assertEqual(0, alpha["raw"]["app_reviews"])
+
+    def test_configured_identity_excludes_wrong_history_and_rebuilds_snapshots(self):
+        self.add_record("wrong", "a", dimension="platform", channel="app", platform="app_store", source_id="app_store_reviews", data_type="app_metric", metrics={"rating_count": 1000000})
+        self.conn.execute("UPDATE records SET url = 'https://apps.apple.com/us/app/id1347676495' WHERE id = 'wrong'")
+        sync_market_share_snapshots(self.conn, brand_ids=["a"], include_history=True)
+        self.conn.execute("INSERT INTO links (id, brand_id, platform, url, status) VALUES ('official', 'a', 'app_store', 'https://apps.apple.com/us/app/id6502156163', 'active')")
+        self.add_record("right", "a", dimension="platform", channel="app", platform="app_store", source_id="app_store_reviews", data_type="app_metric", metrics={"rating_count": 151})
+        self.conn.execute("UPDATE records SET url = 'https://apps.apple.com/us/app/id6502156163' WHERE id = 'right'")
+        sync_market_share_snapshots(self.conn, brand_ids=["a"], include_history=True)
+        result = market_share(brand_ids="a,b", start_date="2026-07-01", end_date="2026-07-31", conn=self.conn)
+        alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
+        self.assertEqual(151, alpha["raw"]["app_reviews"])
+        self.assertEqual(1, alpha["raw"]["excluded_app_records"])
+        self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+        self.assertEqual(151, self.conn.execute("SELECT app_reviews FROM market_share_snapshots WHERE brand_id = 'a' AND country = 'all' AND snapshot_date = '2026-07-15'").fetchone()[0])
+        with patch("server.domains.common.record_to_dict", side_effect=dict):
+            self.assertEqual(["right"], [r["id"] for r in query_records(self.conn, {"brand_id": "a"})])
+
+    def test_proxy_downloads_do_not_compete_with_observed_downloads(self):
+        self.conn.execute("INSERT INTO brands VALUES ('c', 'Gamma', 'AI App', 0, 1)")
+        for brand, metrics in [("a", {"downloads": 2000, "rating_count": 20}), ("b", {"downloads": 1000, "rating_count": 10}), ("c", {"rating_count": 100000})]:
+            self.add_record(brand, brand, dimension="platform", channel="app", platform="app_store", source_id="app_store_reviews", data_type="app_metric", metrics=metrics)
+        result = market_share(brand_ids="a,b,c", start_date="2026-07-01", end_date="2026-07-31", conn=self.conn)
+        gamma = next(row for row in result["brands"] if row["brand_id"] == "c")
+        self.assertEqual(0, gamma["signal_shares"]["app"])
+        self.assertEqual(10000000, gamma["raw"]["app_downloads_est"])
+        self.assertEqual(0.65, result["model"]["active_weights"]["app"])
+
+    def test_latest_app_count_can_decrease_and_duplicate_links_do_not_double_count(self):
+        for record_id, count, day in [("older", 200, "14"), ("newer", 100, "15"), ("duplicate", 100, "15")]:
+            self.add_record(record_id, "a", dimension="platform", channel="app", platform="app_store", source_id="app_store_reviews", data_type="app_metric", metrics={"rating_count": count}, occurred_at=f"2026-07-{day}T08:00:00+00:00")
+            self.conn.execute("UPDATE records SET url = 'https://apps.apple.com/us/app/id6502156163', link_id = ? WHERE id = ?", (record_id, record_id))
+        result = market_share(brand_ids="a,b", start_date="2026-07-01", end_date="2026-07-31", conn=self.conn)
+        alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
+        self.assertEqual(100, alpha["raw"]["app_reviews"])
 
 
 if __name__ == "__main__":
