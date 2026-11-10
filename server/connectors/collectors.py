@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 
 from ..config import CREDENTIALS, USER_AGENT
+from ..app_identity import configured_app_ids
 from ..fetchers import FetchError, fetch_bytes, fetch_bytes_post, fetch_form_json, fetch_json, fetch_page, fetch_text, parse_rss
 from ..nlp import classify_media_property, detect_pr_themes
 from ..records import cleanup_google_ad_mismatches, cleanup_meta_ad_mismatches
@@ -485,13 +486,13 @@ def _app_store_count(value) -> int:
 
 
 def _select_official_apps(brand: dict, results: list[dict]) -> list[dict]:
-    """Keep the most likely official seller portfolio for a brand search.
-
-    Apple search can return competitors and third-party companion apps.  We
-    first score sellers whose app names visibly contain the configured brand,
-    then keep results from the strongest seller only.  This admits portfolios
-    such as Anker/soundcore/eufy while rejecting unrelated search results.
-    """
+    """Require a matching official website before considering seller portfolios."""
+    official_host = host_key(brand.get("official_website") or "")
+    if not official_host:
+        return []
+    # A popular title containing "friend" or "omi" is not brand evidence.
+    results = [item for item in results if isinstance(item, dict)
+               and host_key(item.get("sellerUrl") or "") == official_host]
     brand_key = _app_store_identity(brand.get("name"))
     if len(brand_key) < 3:
         return []
@@ -640,18 +641,16 @@ def _configured_market_metric_payloads(
         return [], set()
 
     app_ids = list(targets)
-    fallback_row = next(iter(targets.values()))
 
     def collect_market(country: str) -> list[tuple[dict, str]]:
         apps = _lookup_app_store_apps(app_ids, country)
         discovery = "configured_link_market_lookup"
-        if not apps:
-            apps = _search_official_app_store_apps(brand, country)
-            discovery = "configured_link_storefront_search"
         market_payloads: list[tuple[dict, str]] = []
         for app in apps:
             app_id = clean_text(str(app.get("trackId") or ""))
-            row = targets.get(app_id) or fallback_row
+            row = targets.get(app_id)
+            if row is None:
+                continue
             metric = _app_store_metric_payload(
                 brand,
                 app,
@@ -756,7 +755,7 @@ def _app_store_review_payloads(
                 "region": country,
                 "occurred_at": occurred_at,
                 "metrics": {"rating": rating},
-                "raw": {"rating": rating},
+                "raw": {"rating": rating, "track_id": app_id, "storefront": country},
             })
     except FetchError as exc:
         raise exc
@@ -790,9 +789,7 @@ def _discovered_app_payloads(brand: dict) -> list[dict]:
         except (FetchError, ValueError):
             apps = []
         discovery = "portfolio_market_lookup"
-        if not apps:
-            apps = _search_official_app_store_apps(brand, country)
-            discovery = "storefront_brand_search"
+        apps = [app for app in apps if str(app.get("trackId") or "") in app_ids]
         return [
             metric
             for app in apps
@@ -824,6 +821,8 @@ def collect_app_store(conn: sqlite3.Connection, brand: dict) -> list[dict]:
         (brand.get("id"),),
     ).fetchall()
     if not rows:
+        if configured_app_ids(conn, brand.get("id")) is not None:
+            return []
         return _discovered_app_payloads(brand)
     payloads, successful_links = _configured_market_metric_payloads(brand, rows)
     for row in rows:
@@ -921,6 +920,7 @@ def _google_play_detail(brand: dict, app_id: str, country: str, *, link_id: str 
             "app_name": name,
             "developer": developer,
             "rating_count": rating_count,
+            "rating_count_scope": "global",
             "average_rating": rating,
             "storefront": country,
             "public_data": True,
@@ -950,16 +950,18 @@ def _google_play_search_app_ids(brand: dict, country: str) -> list[str]:
 
 
 def _google_play_discover_app_ids(brand: dict) -> list[str]:
+    official_host = host_key(brand.get("official_website") or "")
+    if not official_host:
+        return []
     for country in _GOOGLE_PLAY_DISCOVERY_COUNTRIES:
         try:
             ids = _google_play_search_app_ids(brand, country)
         except FetchError:
             continue
         if ids:
-            brand_key = _app_store_identity(brand.get("name"))
             # Search results often include adjacent competitors.  Inspect a
-            # small prefix of candidates and stop at the first seller/name
-            # match so automatic collection stays within a normal request
+            # small prefix of candidates and require the official website
+            # so automatic collection stays within a normal request
             # budget even when the search page is large.
             matches: list[str] = []
             for app_id in ids[:4]:
@@ -968,15 +970,12 @@ def _google_play_discover_app_ids(brand: dict) -> list[str]:
                 except FetchError:
                     continue
                 author = detail.get("author") if isinstance(detail.get("author"), dict) else {}
-                developer = author.get("name") if isinstance(author, dict) else ""
-                candidate_key = _app_store_identity(detail.get("name"))
-                developer_key = _app_store_identity(developer)
-                if brand_key and (brand_key in candidate_key or brand_key in developer_key):
+                developer_host = host_key(author.get("url") or "")
+                if official_host and developer_host == official_host:
                     matches.append(app_id)
                     if len(matches) >= 1:
                         break
-            # Do not attach an unrelated search result when the brand name is
-            # absent from both the app title and developer name.
+            # Title similarity alone is never sufficient identity evidence.
             return matches[:3]
     return []
 
@@ -1158,6 +1157,8 @@ def collect_google_play(conn: sqlite3.Connection, brand: dict) -> list[dict]:
             rows_by_id[app_id] = row
             app_ids.append(app_id)
     if not app_ids:
+        if configured_app_ids(conn, brand.get("id")) is not None:
+            return []
         app_ids = _google_play_discover_app_ids(brand)
     if not app_ids:
         for row in rows:

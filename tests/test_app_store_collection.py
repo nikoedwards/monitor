@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from server.connectors.collectors import _APP_STORE_REVIEW_COUNTRIES, _DEFAULT_APP_STORE_COUNTRIES, collect_app_store
+from server.connectors.collectors import _APP_STORE_REVIEW_COUNTRIES, _DEFAULT_APP_STORE_COUNTRIES, _select_official_apps, collect_app_store
 
 
 SCHEMA = """
@@ -38,6 +38,7 @@ class AppStoreCollectorTests(unittest.TestCase):
                     "trackId": 1635029057,
                     "trackName": "Anker",
                     "sellerName": "Power Mobile Life LLC",
+                    "sellerUrl": "https://www.anker.com",
                     "userRatingCount": 1281,
                     "averageUserRating": 4.5,
                     "trackViewUrl": "https://apps.apple.com/us/app/anker/id1635029057",
@@ -46,6 +47,7 @@ class AppStoreCollectorTests(unittest.TestCase):
                     "trackId": 1331876603,
                     "trackName": "soundcore",
                     "sellerName": "Power Mobile Life LLC",
+                    "sellerUrl": "https://www.anker.com",
                     "userRatingCount": 39867,
                     "averageUserRating": 4.7,
                     "trackViewUrl": "https://apps.apple.com/us/app/soundcore/id1331876603",
@@ -87,7 +89,7 @@ class AppStoreCollectorTests(unittest.TestCase):
 
         fetch_json.side_effect = response
 
-        payloads = collect_app_store(self.conn, {"id": "anker", "name": "Anker"})
+        payloads = collect_app_store(self.conn, {"id": "anker", "name": "Anker", "official_website": "https://anker.com"})
 
         self.assertEqual(set(_DEFAULT_APP_STORE_COUNTRIES), {item["region"] for item in payloads})
         self.assertEqual(
@@ -159,7 +161,7 @@ class AppStoreCollectorTests(unittest.TestCase):
         self.assertEqual("ok", status["last_status"])
 
     @patch("server.connectors.collectors.fetch_json")
-    def test_configured_link_falls_back_to_local_storefront_app(self, fetch_json):
+    def test_missing_storefront_never_substitutes_an_unconfigured_app(self, fetch_json):
         self.conn.execute(
             "INSERT INTO links (id, brand_id, product_id, platform, url, region, status) "
             "VALUES ('plaud-us', 'plaud', NULL, 'app_store', "
@@ -192,13 +194,19 @@ class AppStoreCollectorTests(unittest.TestCase):
         fetch_json.side_effect = response
         payloads = collect_app_store(self.conn, {"id": "plaud", "name": "PLAUD"})
 
-        cn_metric = next(
-            item for item in payloads
-            if item["data_type"] == "app_metric" and item["region"] == "CN"
-        )
-        self.assertEqual("6748500037", cn_metric["raw"]["track_id"])
-        self.assertEqual(50, cn_metric["metrics"]["rating_count"])
-        self.assertEqual("configured_link_storefront_search", cn_metric["raw"]["discovery"])
+        self.assertFalse(any(item["region"] == "CN" for item in payloads))
+        self.assertFalse(any("/search?" in call.args[0] for call in fetch_json.call_args_list))
+
+    def test_homonymous_popular_apps_are_not_official(self):
+        for name, website, title, seller_url in [
+            ("Omi", "https://omi.me", "Omi - Date & Meet Friends", "https://omi.sg"),
+            ("Friend", "https://friend.com", "Hoop - make new friends", "https://hoop.photo"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual([], _select_official_apps(
+                    {"name": name, "official_website": website},
+                    [{"trackId": 1, "trackName": title, "sellerName": "Other", "sellerUrl": seller_url, "userRatingCount": 999999}],
+                ))
 
 
 if __name__ == "__main__":

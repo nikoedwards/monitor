@@ -5,6 +5,7 @@ from unittest.mock import patch
 from server.connectors.collectors import (
     _GOOGLE_PLAY_REVIEW_COUNTRIES,
     _google_play_review_payloads,
+    _google_play_discover_app_ids,
     collect_google_play,
 )
 
@@ -82,6 +83,22 @@ class GooglePlayCollectorTests(unittest.TestCase):
         })
         self.assertEqual(len(_GOOGLE_PLAY_REVIEW_COUNTRIES), reviews.call_count)
         self.assertEqual(2, detail.call_count)
+
+    @patch("server.connectors.collectors._google_play_discover_app_ids")
+    def test_ios_only_configuration_does_not_discover_unrelated_android_app(self, discover):
+        self.conn.execute(
+            "INSERT INTO links (id, brand_id, platform, url, status) VALUES "
+            "('friend-ios', 'friend', 'app_store', 'https://apps.apple.com/us/app/id6739473884', 'active')"
+        )
+        self.assertEqual([], collect_google_play(self.conn, {"id": "friend", "name": "Friend"}))
+        discover.assert_not_called()
+
+    @patch("server.connectors.collectors.fetch_text")
+    @patch("server.connectors.collectors._google_play_search_app_ids")
+    def test_discovery_requires_official_domain_not_brand_substring(self, search, fetch):
+        search.return_value = ["sg.omi"]
+        fetch.return_value = '<script type="application/ld+json">{"name":"Omi - Dating & Meet Friends","author":{"name":"MatchUp UK Limited","url":"https://omi.sg"}}</script>'
+        self.assertEqual([], _google_play_discover_app_ids({"name": "Omi", "official_website": "https://omi.me"}))
 
 
 if __name__ == "__main__":

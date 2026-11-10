@@ -13,8 +13,8 @@ import type { MarketShareBrand } from "../lib/api";
 const STORAGE_KEY = "monitor.marketShare.brandIds";
 const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280", "#ef4444", "#14b8a6"];
 const SIGNALS = [
-  { key: "app", label: "App 下载" },
-  { key: "conversation", label: "App Store 评分数" },
+  { key: "app", label: "真实下载量" },
+  { key: "conversation", label: "应用商店评分数" },
 ] as const;
 
 const COUNTRY_LABELS: Record<string, string> = {
@@ -112,7 +112,7 @@ export default function MarketShare() {
     () => Array.from(new Set([...(result?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
     [result?.countries, country],
   );
-  const leader = result?.brands[0];
+  const leader = result?.brands.find((row) => row.share > 0);
   const appRatingCount = result?.brands.reduce((sum, row) => sum + row.raw.app_reviews, 0) || 0;
   const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0).length : 0;
   const trendData = useMemo(
@@ -146,7 +146,7 @@ export default function MarketShare() {
     <div className="space-y-6">
       <SectionTitle
         title="市占分析"
-        subtitle="按国家使用 App Store 公开评分数据，并结合下载量估算计算相对份额"
+        subtitle="按国家使用 应用商店累计评分据，并结合下载量估算计算相对份额"
         hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -210,8 +210,8 @@ export default function MarketShare() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
             <StatCard label="模型置信度" value={`${result.confidence.score}%`} hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`} />
-            <StatCard label="可用信号" value={`${activeSignals}/2`} hint="App 下载估算 + App Store 公开评分数" />
-            <StatCard label="App Store 评分数" value={appRatingCount ? fmtNum(appRatingCount) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · Apple 公开准确值`} />
+            <StatCard label="可用信号" value={`${activeSignals}/2`} hint="真实下载量 + 应用商店累计评分" />
+            <StatCard label="应用商店评分数" value={appRatingCount ? fmtNum(appRatingCount) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 商店累计值；非所选期间新增`} />
           </div>
 
           {result.warnings.length > 0 && (
@@ -225,7 +225,7 @@ export default function MarketShare() {
 
           <Card>
             <SectionTitle
-              title="每日市占趋势"
+              title="每日样本份额趋势"
               subtitle={trendQuery.data?.latest_date
                 ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 已记录至 ${trendQuery.data.latest_date}`
                 : "每天采集 App 数据后生成国家 × 品牌快照"}
@@ -274,7 +274,7 @@ export default function MarketShare() {
 
           <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4">
             <Card>
-              <SectionTitle title="综合估算份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
+              <SectionTitle title="App 评分样本份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
               <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-5 items-center">
                 <div className="h-[260px] relative">
                   <ResponsiveContainer width="100%" height="100%">
@@ -288,7 +288,7 @@ export default function MarketShare() {
                   <div className="absolute inset-0 pointer-events-none grid place-items-center text-center">
                     <div>
                       <div className="text-[12px]" style={{ color: "var(--mute)" }}>领先份额</div>
-                      <div className="text-[30px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{leader?.share.toFixed(1)}%</div>
+                      <div className="text-[30px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{leader ? `${leader.share.toFixed(1)}%` : "—"}</div>
                     </div>
                   </div>
                 </div>
@@ -300,7 +300,7 @@ export default function MarketShare() {
                           <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
                           <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.rank}. {row.name}</span>
                         </div>
-                        <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{row.share.toFixed(2)}%</span>
+                        <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{row.raw.app_download_basis === "unavailable" ? "缺数据" : `${row.share.toFixed(2)}%`}</span>
                       </div>
                       <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
                         <div className="h-full rounded-full" style={{ width: `${Math.max(row.share, 0.5)}%`, background: COLORS[index % COLORS.length] }} />
@@ -312,7 +312,7 @@ export default function MarketShare() {
             </Card>
 
             <Card>
-              <SectionTitle title="份额拆解" subtitle="每列先在所选品牌内归一化，再按模型权重合成" />
+              <SectionTitle title="份额拆解" subtitle="评分推算的下载量不重复计权；仅真实下载量参与下载信号" />
               <div className="overflow-x-auto">
                 <table className="w-full text-[13px] min-w-[620px]">
                   <thead>
@@ -355,7 +355,7 @@ export default function MarketShare() {
                   <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
                     <th className="text-left font-medium py-2.5 px-3">品牌</th>
                     <th className="text-right font-medium py-2.5 px-3">销售结果（不计权）</th>
-                    <th className="text-right font-medium py-2.5 px-3">App Store 评分数（公开）</th>
+                    <th className="text-right font-medium py-2.5 px-3">应用商店评分数（公开）</th>
                     <th className="text-right font-medium py-2.5 px-3">平均评分（公开）</th>
                     <th className="text-right font-medium py-2.5 px-3">App 下载估算</th>
                     <th className="text-right font-medium py-2.5 px-3">商品评论量（不计权）</th>
@@ -406,7 +406,7 @@ export default function MarketShare() {
                 })}
               </div>
               <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
-                算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，App Store 公开评分数权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。评分数和平均评分直接来自对应国家 App Store；下载量不公开，仍单独标记为估算。销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
+                算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，应用商店累计评分权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。评分数来自应用商店累计值；Google Play 全球评分仅在“全部国家”中计入一次。评分推算的下载量仅供参考，不作为独立证据计权。销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
               </div>
             </Card>
 

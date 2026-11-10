@@ -10,6 +10,7 @@ from typing import Iterator
 from fastapi import HTTPException
 
 from ..db import db as _db
+from ..app_identity import app_record_allowed, configured_app_ids
 from ..records import record_to_dict
 from ..relevance import (
     google_news_record_is_relevant,
@@ -127,7 +128,18 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
     creator_brands: dict[str, dict] = {}
     creator_products: dict[str, list[dict]] = {}
     creator_product_queries_cache: dict[str, list[str]] = {}
+    app_policies: dict[str, dict | None] = {}
     for row in rows:
+        if row["platform"] in {"app_store", "google_play"} or row["source_id"] in {"app_store_reviews", "google_play_reviews"}:
+            app_brand_id = row["brand_id"] or ""
+            if app_brand_id not in app_policies:
+                app_policies[app_brand_id] = configured_app_ids(conn, app_brand_id)
+            try:
+                app_raw = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError):
+                app_raw = {}
+            if not app_record_allowed({**dict(row), "raw": app_raw}, app_policies[app_brand_id]):
+                continue
         if (
             row["source_id"] in {"google_news", "reddit_search"}
             or (row["dimension"] == "marketing" and row["channel"] in {"media", "social", "creators", "community"})
