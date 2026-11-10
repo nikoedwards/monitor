@@ -32,6 +32,7 @@ jobs:
         run: |
           docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
             --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
+            --mount type=bind,src="$PWD/deploy",dst=/app/deploy,readonly \
             -e MONITOR_TEST_BROWSER_RUNTIME=1 --network=none monitor-snapshot-test python -m unittest tests.test_browser_jobs tests.test_monitor_watchdog tests.test_public_social tests.test_creator_evidence
       - name: Verify CDP in a bounded Linux container
         timeout-minutes: 4
