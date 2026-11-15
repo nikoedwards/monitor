@@ -166,8 +166,20 @@ function HiringWindowModal({
 // --------------------------------------------------------------------- jobs tab
 function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { brandId: string; platform: string; setPlatform: (v: string) => void; summary: any; loading: boolean; range: any }) {
   const [status, setStatus] = useState("all");
+  const [city, setCity] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [pageSize, setPageSize] = useState(50);
+  const scope = JSON.stringify([brandId, platform, status, city.trim(), keyword.trim(), pageSize]);
+  const [selection, setSelection] = useState({ scope, page: 1 });
+  // Reset before querying a changed filter, including external brand/platform changes.
+  if (selection.scope !== scope) setSelection({ scope, page: 1 });
+  const requestedPage = selection.scope === scope ? selection.page : 1;
   const [detailId, setDetailId] = useState<string | undefined>();
-  const { data: postings = [], isLoading: postingsLoading } = useJobPostings(brandId, platform, status);
+  const postingsQuery = useJobPostings(brandId, platform, status, { page: requestedPage, pageSize, city: city.trim(), q: keyword.trim() });
+  const { data: result, isLoading: postingsLoading, isFetching, isError } = postingsQuery;
+  const currentPage = result?.page ?? requestedPage;
+  const totalPages = result?.total_pages ?? 1;
+  const goToPage = (page: number) => setSelection({ scope, page: Math.max(1, Math.min(totalPages, page)) });
 
   if (loading) return <Spinner />;
 
@@ -217,7 +229,31 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
             </div>
           }
         />
-        {postingsLoading ? <Spinner /> : <PostingTable postings={postings} onDetail={setDetailId} />}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <Input aria-label="地区筛选" placeholder="地区 / 城市" value={city} onChange={(event) => setCity(event.target.value)} className="max-w-[180px]" />
+          <Input aria-label="职位关键词" placeholder="搜索职位、部门或 JD" value={keyword} onChange={(event) => setKeyword(event.target.value)} className="max-w-[260px]" />
+        </div>
+        {isError ? (
+          <EmptyState title="职位加载失败" hint={postingsQuery.error.message} action={<Button onClick={() => postingsQuery.refetch()}>重试</Button>} />
+        ) : postingsLoading ? <Spinner /> : <PostingTable postings={result?.postings ?? []} onDetail={setDetailId} />}
+        <nav aria-label="职位列表分页" className="flex flex-wrap items-center justify-between gap-3 mt-4 text-[13px]" style={{ color: "var(--body)" }}>
+          <span aria-live="polite">{result && !isError ? `共 ${fmtNum(result.total)} 条 · 第 ${currentPage} / ${totalPages} 页` : isError ? "分页数据不可用" : "正在加载职位…"}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select aria-label="每页职位数" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+              {[20, 50, 100].map((size) => <option key={size} value={size}>每页 {size} 条</option>)}
+            </Select>
+            <Button size="sm" disabled={isFetching || isError || !result || currentPage <= 1} onClick={() => goToPage(currentPage - 1)}>上一页</Button>
+            <Button size="sm" disabled={isFetching || isError || !result || currentPage >= totalPages} onClick={() => goToPage(currentPage + 1)}>下一页</Button>
+            <form className="flex items-center gap-2" onSubmit={(event) => {
+              event.preventDefault();
+              const page = Number(new FormData(event.currentTarget).get("page"));
+              if (Number.isInteger(page)) goToPage(page);
+            }}>
+              <Input key={`${scope}-${currentPage}`} name="page" aria-label="跳转页码" type="number" min={1} max={totalPages} defaultValue={currentPage} required className="max-w-[80px]" disabled={isFetching || isError || !result || !result.total} />
+              <Button type="submit" size="sm" disabled={isFetching || isError || !result || !result.total}>跳转</Button>
+            </form>
+          </div>
+        </nav>
       </Card>
 
       <PostingDetailModal postingId={detailId} onClose={() => setDetailId(undefined)} />

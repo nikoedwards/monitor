@@ -11,10 +11,11 @@ import sqlite3
 from collections import defaultdict
 from datetime import date, timedelta
 from io import BytesIO
+from typing import Annotated
 from urllib.parse import urlparse
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from .. import ai
@@ -207,6 +208,10 @@ def list_postings(
     platform: str | None = None,
     status: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    city: str | None = None,
+    q: str | None = None,
 ):
     clauses, params = ["brand_id = ?"], [brand_id]
     if platform and platform != "all":
@@ -215,12 +220,33 @@ def list_postings(
     if status and status != "all":
         clauses.append("status = ?")
         params.append(status)
+    # Treat search text literally, including SQL LIKE wildcard characters.
+    def search_pattern(value: str) -> str:
+        return "%" + value.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    if city and city.strip():
+        clauses.append("city LIKE ? ESCAPE '\\'")
+        params.append(search_pattern(city))
+    if q and q.strip():
+        fields = ("title", "department", "city", "jd_text")
+        clauses.append("(" + " OR ".join(f"{field} LIKE ? ESCAPE '\\'" for field in fields) + ")")
+        params.extend([search_pattern(q)] * len(fields))
     where = " AND ".join(clauses)
+    total = conn.execute(f"SELECT COUNT(*) FROM job_postings WHERE {where}", params).fetchone()[0]
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    # Deletion or collection can shrink the result while the user is paging.
+    page = min(page, total_pages)
     rows = conn.execute(
-        f"SELECT * FROM job_postings WHERE {where} ORDER BY last_change_at DESC, last_seen DESC LIMIT 500",
-        params,
+        f"SELECT * FROM job_postings WHERE {where} ORDER BY last_change_at DESC, last_seen DESC, id ASC LIMIT ? OFFSET ?",
+        [*params, page_size, (page - 1) * page_size],
     ).fetchall()
-    return {"postings": [posting_to_dict(conn, r) for r in rows]}
+    return {
+        "postings": [posting_to_dict(conn, r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.get("/postings/{posting_id}/history")

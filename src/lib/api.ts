@@ -284,6 +284,14 @@ export interface JobPosting {
   latest?: JobSnapshotItem | null;
 }
 
+export interface JobPostingsPage {
+  postings: JobPosting[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export interface HiringWindowPosting {
   id: string;
   platform: string;
