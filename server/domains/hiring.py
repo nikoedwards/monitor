@@ -271,6 +271,9 @@ def browser_capture(payload: BrowserHiringCaptureIn, conn: sqlite3.Connection = 
             source_title=payload.source_title or "",
             page_status=payload.page_status,
             page_error=payload.page_error or "",
+            failed_details=payload.failed_details,
+            skipped_details=payload.skipped_details,
+            discovered_jobs=payload.discovered_jobs,
             jobs=[item.model_dump() for item in payload.jobs],
         )
     except ValueError as exc:
