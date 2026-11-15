@@ -31,7 +31,7 @@ function domainLabel(value: string) {
 }
 
 export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
-  const { data, isLoading, isError, refetch } = useHiringStrategicSignals(brandId);
+  const { data, isLoading, isError, refresh } = useHiringStrategicSignals(brandId);
   const [selected, setSelected] = useState<HiringStrategicSignal>();
 
   if (isLoading) return <Card><Spinner /></Card>;
@@ -44,7 +44,7 @@ export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
         <SectionTitle
           title="组织推演台"
           subtitle="基于全量历史的跨板块组织与战略研判"
-          action={<div className="flex items-center gap-2"><Badge tone={tone(data.headline.posture)}>{POSTURE_LABEL[data.headline.posture] || "观察"}</Badge><Badge tone="neutral">全量历史</Badge><Button size="sm" onClick={() => refetch()}>刷新</Button></div>}
+          action={<div className="flex items-center gap-2"><Badge tone={tone(data.headline.posture)}>{POSTURE_LABEL[data.headline.posture] || "观察"}</Badge><Badge tone="neutral">全量历史</Badge><Button size="sm" onClick={() => refresh.mutate()} disabled={refresh.isPending}>{refresh.isPending ? "研判中…" : "刷新"}</Button></div>}
         />
         <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
           <div className="max-w-3xl">

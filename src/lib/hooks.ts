@@ -672,11 +672,18 @@ export function useHiringOrgEstimate() {
 }
 
 export function useHiringStrategicSignals(brandId?: string) {
-  return useQuery({
-    queryKey: ["hiring-strategic-signals", brandId],
+  const qc = useQueryClient();
+  const queryKey = ["hiring-strategic-signals", brandId];
+  const query = useQuery({
+    queryKey,
     queryFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history" })}`),
     enabled: !!brandId,
   });
+  const refresh = useMutation({
+    mutationFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history", refresh: true })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, refresh };
 }
 
 export function useJobPostings(brandId?: string, platform?: string, status?: string, filters: { page?: number; pageSize?: number; city?: string; q?: string } = {}) {

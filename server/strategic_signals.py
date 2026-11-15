@@ -156,6 +156,50 @@ def _fallback_signals(payload: dict, packet: dict) -> list[dict]:
     return output[:3]
 
 
+def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: str, end: str, scope: str) -> dict:
+    """Return a bounded cold-start response without building the full packet."""
+    brand = conn.execute("SELECT name FROM brands WHERE id = ?", (brand_id,)).fetchone()
+    counts: dict[str, int] = {}
+    queries = {
+        "hiring": ("job_postings", "first_seen"),
+        "voice": ("records", "occurred_at"),
+        "sales": ("sales_metrics", "snapshot_date"),
+        "web": ("web_snapshots", "snapshot_date"),
+        "marketing": ("ad_entities", "first_seen_at"),
+    }
+    for domain, (table, column) in queries.items():
+        try:
+            counts[domain] = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE brand_id = ? AND substr({column}, 1, 10) BETWEEN ? AND ?",
+                (brand_id, start, end),
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            counts[domain] = 0
+    ready = [domain for domain, count in counts.items() if count]
+    return {
+        "schema_version": "strategic-signals-v1",
+        "brand": brand["name"] if brand else brand_id,
+        "window": {"scope": scope, "start": start, "end": end},
+        "headline": {
+            "posture": "watch",
+            "summary": "跨板块战略研判正在准备中，当前先展示确定性数据覆盖；点击刷新后生成完整证据链。",
+            "confidence": "low",
+        },
+        "signals": [],
+        "coverage": {domain: {"status": "ready" if count else "empty", "sample_count": count} for domain, count in counts.items()},
+        "source_coverage": {},
+        "timeline": [],
+        "details": {
+            "organization_estimate": {"status": "available", "href": f"/api/hiring/org-estimate?brand_id={brand_id}&start_date={start}&end_date={end}", "note": "人数、部门和地区区间估算在二级详情加载。"},
+            "evidence_chain": [],
+            "method": {"scope": scope, "fast_path": True, "ready_domains": ready},
+        },
+        "caveats": ["冷请求使用轻量确定性覆盖统计；完整跨板块证据链需点击刷新生成。"],
+        "cached": False,
+        "refresh": False,
+    }
+
+
 def build_strategic_signals(
     conn: sqlite3.Connection,
     brand_id: str,
@@ -176,6 +220,7 @@ def build_strategic_signals(
         cached = ai.get_cached_summary(conn, cache_key)
         if isinstance(cached, dict):
             return {**cached, "cached": True, "refresh": False}
+        return _quick_strategic_response(conn, brand_id, start, end, scope)
 
     # React can issue the initial query and a refetch close together. Serialize
     # only identical keys so one slow model request populates the shared cache

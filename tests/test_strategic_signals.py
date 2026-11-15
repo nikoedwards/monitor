@@ -79,7 +79,7 @@ class StrategicSignalsTests(unittest.TestCase):
              patch("server.strategic_signals.build_overview_evidence", return_value=packet) as evidence, \
              patch("server.strategic_signals.ai.is_configured", return_value=True), \
              patch("server.strategic_signals.ai.summarize_overview", return_value=model_result) as summarize:
-            first = build_strategic_signals(self.conn, "brand-1", scope="range", start_date="2026-10-01", end_date="2026-10-31")
+            first = build_strategic_signals(self.conn, "brand-1", scope="range", start_date="2026-10-01", end_date="2026-10-31", refresh=True)
             second = build_strategic_signals(self.conn, "brand-1", scope="range", start_date="2026-10-01", end_date="2026-10-31")
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
