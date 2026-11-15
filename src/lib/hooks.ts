@@ -679,15 +679,15 @@ export function useHiringStrategicSignals(brandId?: string) {
   });
 }
 
-export function useJobPostings(brandId?: string, platform?: string, status?: string) {
+export function useJobPostings(brandId?: string, platform?: string, status?: string, filters: { page?: number; pageSize?: number; city?: string; q?: string } = {}) {
+  const { page = 1, pageSize = 50, city, q } = filters;
   return useQuery({
-    queryKey: ["job-postings", brandId, platform, status],
+    queryKey: ["job-postings", brandId, platform, status, page, pageSize, city, q],
     queryFn: () =>
       api
-        .get<{ postings: import("./api").JobPosting[] }>(
-          `/api/hiring/postings${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, status: status === "all" ? undefined : status })}`,
-        )
-        .then((d) => d.postings),
+        .get<import("./api").JobPostingsPage>(
+          `/api/hiring/postings${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, status: status === "all" ? undefined : status, page, page_size: pageSize, city, q })}`,
+        ),
     enabled: !!brandId,
   });
 }
