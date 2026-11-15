@@ -122,6 +122,7 @@ export function useRecords(filters: Record<string, unknown>) {
   return useQuery({
     queryKey: ["records", filters],
     queryFn: () => api.get<{ records: RecordItem[] }>(`/api/records${qs(filters)}`).then((d) => d.records),
+    refetchInterval: filters.relevance_status ? 10000 : false,
   });
 }
 
@@ -651,6 +652,22 @@ export function useHiringSummary(brandId?: string, platform?: string, range?: Ti
     queryKey: ["hiring-summary", brandId, platform, rp],
     queryFn: () => api.get<import("./api").HiringSummary>(`/api/hiring/summary${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
     enabled: !!brandId,
+  });
+}
+
+export function useHiringOrgRadar(brandId?: string, platform?: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["hiring-org-radar", brandId, platform, rp],
+    queryFn: () => api.get<import("./api").HiringOrgRadar>(`/api/hiring/org-radar${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
+    enabled: !!brandId,
+  });
+}
+
+export function useHiringOrgEstimate() {
+  return useMutation({
+    mutationFn: ({ brandId, platform, range, refresh }: { brandId: string; platform?: string; range?: TimeRange; refresh?: boolean }) =>
+      api.post<import("./api").HiringOrgEstimate>(`/api/hiring/org-estimate${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rangeParams(range), refresh: refresh ? true : undefined })}`),
   });
 }
 

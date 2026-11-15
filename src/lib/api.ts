@@ -44,6 +44,7 @@ export function qs(params: Record<string, unknown>): string {
 export interface Brand {
   id: string;
   name: string;
+  slug?: string;
   is_competitor: boolean;
   is_primary: boolean;
   official_website?: string;
@@ -123,6 +124,18 @@ export interface RecordItem {
   interaction_velocity?: number;
   age_hours?: number | null;
   hot_risk?: boolean;
+  relevance_status?: "confirmed" | "pending" | "rejected";
+  media_candidate_id?: string;
+  retry_at?: string;
+  media_relevance?: {
+    status: "confirmed" | "pending" | "rejected";
+    reason: string;
+    mention_type?: "dedicated" | "roundup" | "comparison" | "incidental";
+    evidence: { quote: string; field?: string; links?: string[] }[];
+    manual?: boolean;
+    model?: string;
+    rule_version?: string;
+  };
 }
 
 export interface Source {
@@ -304,6 +317,49 @@ export interface HiringSummary {
   closed_in_window: number;
   released_postings: HiringWindowPosting[];
   closed_postings: HiringWindowPosting[];
+}
+
+export interface HiringOrgRadar {
+  window: { start: string; end: string };
+  overview: { open_roles: number; known_people: number; city_count: number; department_count: number; confidence: string };
+  departments: HiringOrgRadarGroup[];
+  locations: (HiringOrgRadarGroup & { city: string; departments: { department: string; count: number }[] })[];
+  role_families: (HiringOrgRadarGroup & { role_family: string })[];
+  trend: { date: string; released: number; closed: number; active: number }[];
+  data_quality: { postings_total: number; with_city: number; with_department: number; people_total: number; limitations: string[] };
+}
+
+export interface HiringOrgRadarGroup {
+  department?: string;
+  open_roles: number;
+  released: number;
+  closed: number;
+  net_change: number;
+  known_people: number;
+  top_roles: { title: string; count: number }[];
+  confidence: string;
+  evidence: { id: string; title: string; url?: string; first_seen?: string; closed_at?: string; city?: string; status?: string }[];
+}
+
+export interface HiringOrgEstimateGroup {
+  department?: string;
+  city?: string;
+  low: number;
+  high: number;
+  confidence: string;
+  rationale: string;
+  evidence_ids: string[];
+}
+
+export interface HiringOrgEstimate {
+  summary: string;
+  overall: { low: number; high: number; confidence: string; basis: string[] };
+  departments: HiringOrgEstimateGroup[];
+  locations: HiringOrgEstimateGroup[];
+  assumptions: string[];
+  limitations: string[];
+  cached?: boolean;
+  model?: string;
 }
 
 export interface LinkedInEmployee {

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars, SimpleLine } from "../components/charts";
+import { HiringOrgRadar } from "../components/HiringOrgRadar";
 import { AsyncProgress, Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import {
@@ -14,6 +15,7 @@ import {
   useEmployees,
   useEmployeesSync,
   useHiringSummary,
+  useHiringOrgRadar,
   useHiringSync,
   useJobPostings,
   useLinks,
@@ -52,6 +54,7 @@ export default function Hiring() {
 
   const [range] = useTimeRange();
   const { data: summary, isLoading } = useHiringSummary(brandId, platform, range);
+  const { data: orgRadar } = useHiringOrgRadar(brandId, platform, range);
   const sync = useHiringSync();
 
   return (
@@ -75,6 +78,8 @@ export default function Hiring() {
         <StatCard label="窗口内下线" value={fmtNum(summary?.closed_in_window)} onClick={() => setWindowDetail("closed")} />
         <StatCard label="平均在招天数" value={summary?.avg_open_days != null ? `${summary.avg_open_days}天` : "—"} />
       </div>
+
+      <HiringOrgRadar data={orgRadar} brandId={brandId} platform={platform} range={range} />
 
       <SegmentGroup
         value={tab}

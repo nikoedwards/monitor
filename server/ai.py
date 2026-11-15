@@ -586,3 +586,113 @@ def analyze_jd(conn: sqlite3.Connection, postings: list[dict], context: dict) ->
         if not isinstance(parsed.get(key), list):
             parsed[key] = []
     return parsed
+
+
+ORG_ESTIMATE_SYSTEM = (
+    "你是组织规模估算助手。你只能基于输入的招聘岗位、可见员工样本和公司公开元数据做区间推断，"
+    "不能把在招岗位数直接当成员工数。你必须返回严格 JSON，不要 markdown，不要编造职位 ID、链接、城市或部门。"
+)
+
+ORG_ESTIMATE_PROMPT = """目标公司：{brand}
+公司公开元数据（可能为空）：{public_context}
+统计窗口：{start} 至 {end}
+
+招聘组织雷达原始信号：
+{radar}
+
+请估算部门和地区的可能员工人数区间。输出严格符合以下 JSON：
+{{
+  "summary": "2-4 句话，说明估算依据和最大不确定性",
+  "overall": {{"low": 0, "high": 0, "confidence": "low|medium|high", "basis": ["依据"]}},
+  "departments": [{{"department": "只能使用输入中的部门名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["输入中的职位 ID"]}}],
+  "locations": [{{"city": "只能使用输入中的城市名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["输入中的职位 ID"]}}],
+  "assumptions": ["明确写出使用的假设"],
+  "limitations": ["明确写出数据限制"]
+}}
+
+规则：
+- low/high 必须是非负整数，low <= high；区间要比单点更诚实。
+- 已知员工样本是可见下界，部门 low 不得低于该部门已知样本；不要把样本当作完整 headcount。
+- 招聘需求只能作为扩张或岗位结构信号；岗位数量多不等于员工数量多。
+- 只对输入中已有的部门和城市输出结果；没有足够证据的条目可以省略。
+- evidence_ids 只能来自输入证据，最多 6 个；没有证据时返回空数组并降低置信度。
+- 不要使用当前日期之外的外部事实，不要声称已经访问了网页；公开元数据只能作为弱辅助信号。
+"""
+
+
+def estimate_hiring_org(conn: sqlite3.Connection, context: dict) -> dict:
+    """Ask the configured model for bounded headcount ranges with evidence IDs."""
+    cfg = get_config(conn)
+    radar = context.get("radar") or {}
+    brand = context.get("brand") or {}
+    cache_key = "hiring-org-estimate:" + "|".join(
+        [str(brand.get("id") or brand.get("name") or ""), str(context.get("start") or ""), str(context.get("end") or ""), str(context.get("platform") or "all"), "v1"]
+    )
+    cached = get_cached_summary(conn, cache_key)
+    if cached is not None and not context.get("refresh"):
+        return {**cached, "cached": True}
+
+    prompt = ORG_ESTIMATE_PROMPT.format(
+        brand=brand.get("name") or "目标公司",
+        public_context=json.dumps({
+            "description": (brand.get("description") or "")[:800],
+            "official_website": brand.get("official_website") or "",
+            "category": brand.get("category") or "",
+        }, ensure_ascii=False),
+        start=context.get("start") or "",
+        end=context.get("end") or "",
+        radar=json.dumps({
+            "overview": radar.get("overview") or {},
+            "departments": radar.get("departments") or [],
+            "locations": radar.get("locations") or [],
+            "role_families": radar.get("role_families") or [],
+            "data_quality": radar.get("data_quality") or {},
+        }, ensure_ascii=False),
+    )
+    parsed = _extract_json(call_llm(cfg, ORG_ESTIMATE_SYSTEM, prompt))
+    if not isinstance(parsed, dict):
+        raise LlmError("大模型未返回有效的组织规模估算对象")
+
+    def clean_group(item: dict, key: str) -> dict | None:
+        if not isinstance(item, dict) or not str(item.get(key) or "").strip():
+            return None
+        try:
+            low = max(0, int(item.get("low") or 0))
+            high = max(low, int(item.get("high") or low))
+        except (TypeError, ValueError):
+            low = high = 0
+        evidence_ids = item.get("evidence_ids") if isinstance(item.get("evidence_ids"), list) else []
+        return {
+            key: str(item.get(key)).strip()[:80],
+            "low": low,
+            "high": high,
+            "confidence": item.get("confidence") if item.get("confidence") in {"low", "medium", "high"} else "low",
+            "rationale": str(item.get("rationale") or "").strip()[:400],
+            "evidence_ids": [str(value) for value in evidence_ids[:6]],
+        }
+
+    departments = [item for raw in parsed.get("departments") or [] if (item := clean_group(raw, "department"))]
+    locations = [item for raw in parsed.get("locations") or [] if (item := clean_group(raw, "city"))]
+    overall = parsed.get("overall") if isinstance(parsed.get("overall"), dict) else {}
+    try:
+        overall_low = max(0, int(overall.get("low") or 0))
+        overall_high = max(overall_low, int(overall.get("high") or overall_low))
+    except (TypeError, ValueError):
+        overall_low = overall_high = 0
+    result = {
+        "summary": str(parsed.get("summary") or "").strip()[:1200],
+        "overall": {
+            "low": overall_low,
+            "high": overall_high,
+            "confidence": overall.get("confidence") if overall.get("confidence") in {"low", "medium", "high"} else "low",
+            "basis": [str(value)[:240] for value in (overall.get("basis") if isinstance(overall.get("basis"), list) else [])[:6]],
+        },
+        "departments": departments,
+        "locations": locations,
+        "assumptions": [str(value)[:300] for value in (parsed.get("assumptions") if isinstance(parsed.get("assumptions"), list) else [])[:8]],
+        "limitations": [str(value)[:300] for value in (parsed.get("limitations") if isinstance(parsed.get("limitations"), list) else [])[:8]],
+        "cached": False,
+        "model": cfg.get("llm_model") or DEFAULTS["llm_model"],
+    }
+    put_cached_summary(conn, cache_key, result)
+    return result
