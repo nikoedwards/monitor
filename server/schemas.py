@@ -71,6 +71,9 @@ class BrowserHiringCaptureIn(BaseModel):
     source_title: Optional[str] = Field(default=None, max_length=500)
     page_status: str = "ok"
     page_error: Optional[str] = Field(default=None, max_length=500)
+    failed_details: int = Field(default=0, ge=0, le=200)
+    skipped_details: int = Field(default=0, ge=0)
+    discovered_jobs: int = Field(default=0, ge=0)
     jobs: list[BrowserCapturedJobIn] = Field(default_factory=list, max_length=200)
 
 
