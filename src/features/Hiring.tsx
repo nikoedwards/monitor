@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars, SimpleLine } from "../components/charts";
-import { HiringStrategicSignals } from "../components/HiringStrategicSignals";
+import { HiringOrganizationAtlas } from "../components/HiringOrganizationAtlas";
 import { AsyncProgress, Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import {
@@ -216,7 +216,7 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
       </div>
 
       <BusinessAnalysisCard brandId={brandId} range={range} platform={platform} status={status} />
-      <HiringStrategicSignals brandId={brandId} />
+      <HiringOrganizationAtlas brandId={brandId} platform={platform} />
 
       <Card>
         <SectionTitle

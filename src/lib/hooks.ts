@@ -655,10 +655,10 @@ export function useHiringSummary(brandId?: string, platform?: string, range?: Ti
   });
 }
 
-export function useHiringOrgRadar(brandId?: string, platform?: string, range?: TimeRange) {
-  const rp = rangeParams(range);
+export function useHiringOrgRadar(brandId?: string, platform?: string, range?: TimeRange, options?: { lifetime?: boolean }) {
+  const rp = options?.lifetime ? { days: 3650 } : rangeParams(range);
   return useQuery({
-    queryKey: ["hiring-org-radar", brandId, platform, rp],
+    queryKey: ["hiring-org-radar", brandId, platform, rp, options?.lifetime],
     queryFn: () => api.get<import("./api").HiringOrgRadar>(`/api/hiring/org-radar${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
     enabled: !!brandId,
   });
