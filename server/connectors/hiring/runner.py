@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 from ...util import canonical_url, clean_text, new_id, today, utc_now
 from . import pick_people_provider, pick_provider
 from .base import JobRef, JobSnapshot, ProfileRef, ProfileSnapshot
+from .boss import _LOGIN_MARKERS as _BOSS_LOGIN_MARKERS
+from .boss import _LOGIN_PATH_MARKERS as _BOSS_LOGIN_PATH_MARKERS
 
 
 _BROWSER_CAPTURE_LABEL = {
@@ -178,7 +180,7 @@ def _record_snapshot(conn: sqlite3.Connection, posting: dict, snap: JobSnapshot)
 
 def _browser_job_id(platform: str, url: str) -> str:
     matcher = _BOSS_JOB_ID_RE if platform == "boss" else _LINKEDIN_JOB_ID_RE
-    match = matcher.search(url or "")
+    match = matcher.search(urlparse(url or "").path)
     return match.group(1) if match else ""
 
 
@@ -298,6 +300,9 @@ def ingest_browser_hiring_capture(
     page_status: str = "ok",
     page_error: str = "",
     jobs: list[dict] | None = None,
+    failed_details: int = 0,
+    skipped_details: int = 0,
+    discovered_jobs: int = 0,
 ) -> dict:
     """Ingest jobs extracted by the user's normal signed-in browser.
 
@@ -308,6 +313,10 @@ def ingest_browser_hiring_capture(
     platform = (platform or "").lower()
     if platform not in _BROWSER_CAPTURE_LABEL:
         raise ValueError("浏览器助手目前仅支持 BOSS 直聘和 LinkedIn 职位。")
+    if page_status not in {"ok", "partial", "blocked"}:
+        raise ValueError("采集状态必须为 ok、partial 或 blocked。")
+    if any(not isinstance(count, int) or count < 0 for count in (failed_details, skipped_details, discovered_jobs)):
+        raise ValueError("采集计数必须为非负整数。")
 
     expected_hosts = {
         "boss": ("zhipin.com",),
@@ -315,11 +324,20 @@ def ingest_browser_hiring_capture(
     }[platform]
 
     def valid_host(value: str) -> bool:
-        host = (urlparse(value).hostname or "").lower()
-        return any(host == root or host.endswith(f".{root}") for root in expected_hosts)
+        try:
+            parsed = urlparse(value)
+            host = (parsed.hostname or "").lower()
+            return parsed.scheme in {"http", "https"} and any(host == root or host.endswith(f".{root}") for root in expected_hosts)
+        except ValueError:
+            return False
 
     if not valid_host(source_url):
         raise ValueError("当前页面域名与所选招聘平台不匹配。")
+    if platform == "boss" and (
+        any(marker in urlparse(source_url).path.lower() for marker in _BOSS_LOGIN_PATH_MARKERS)
+        or any(marker.lower() in source_title.lower() for marker in _BOSS_LOGIN_MARKERS)
+    ):
+        page_status, page_error, jobs = "blocked", "来源页面为登录或安全验证页，本次未采集职位。", []
 
     link = _browser_capture_link(conn, brand["id"], platform, source_url, source_title)
     now = utc_now()
@@ -337,7 +355,11 @@ def ingest_browser_hiring_capture(
         "captured": 0,
         "changed": 0,
         "closed": 0,
-        "errors": 1 if blocked_capture else 0,
+        "errors": max(failed_details, int(blocked_capture)),
+        "failed_details": failed_details,
+        "skipped_details": skipped_details,
+        "discovered_jobs": discovered_jobs,
+        "partial_jobs": 0,
         "status": "blocked" if blocked_capture else "ok",
     }
     seen: set[str] = set()
@@ -350,6 +372,14 @@ def ingest_browser_hiring_capture(
         if not external_id:
             summary["errors"] += 1
             continue
+        if platform == "boss":
+            text = f"{item.get('title') or ''}\n{item.get('jd_text') or ''}".lower()
+            invalid_content = any(marker.lower() in text for marker in (
+                *_BOSS_LOGIN_MARKERS, "页面不存在", "页面出错", "系统异常", "访问异常", "服务异常", "网络异常", "出错了", "访问受限",
+            ))
+            if invalid_content or (not clean_text(item.get("title")) and item.get("is_open") is not False):
+                summary["errors"] += 1
+                continue
         canon = canonical_url(url)
         if not canon or canon in seen:
             continue
@@ -384,19 +414,30 @@ def ingest_browser_hiring_capture(
                 "provider": "browser_helper",
                 "source_url": source_url,
                 "source_title": clean_text(source_title),
+                "captured_at": (item.get("raw") or {}).get("captured_at") or now,
+                "capture_stats": {
+                    "page_status": page_status, "failed_details": failed_details,
+                    "skipped_details": skipped_details, "discovered_jobs": discovered_jobs,
+                },
             },
         )
         result = _record_snapshot(conn, posting, snap)
         summary["captured"] += 1
         summary["changed"] += int(result["changed"])
         summary["closed"] += int(result["job_status"] == "closed")
+        summary["partial_jobs"] += int(not item.get("jd_text") and item.get("is_open") is not False)
 
     if blocked_capture:
         link_status = "blocked"
         link_error = clean_text(page_error) or "访问职位详情时遇到登录或安全验证，请人工处理后重试。"
     else:
-        link_status = "ok" if summary["captured"] else "partial"
-        link_error = "" if summary["captured"] else "当前页面没有发现可识别的职位；请打开职位列表或职位详情页后重试。"
+        incomplete = (page_status == "partial" or summary["errors"] or skipped_details
+                      or discovered_jobs > summary["captured"]
+                      or summary["partial_jobs"] or not summary["captured"])
+        link_status = "partial" if incomplete else "ok"
+        link_error = "" if not incomplete else (clean_text(page_error) or (
+            f"采集不完整：失败 {summary['errors']}，未采集 {skipped_details}，缺少 JD {summary['partial_jobs']}。"
+        ))
     conn.execute(
         "UPDATE links SET last_collect_at = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
         (now, link_status, link_error, now, link["id"]),

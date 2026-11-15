@@ -386,7 +386,32 @@ class HiringBrowserCaptureTests(unittest.TestCase):
         capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
         self.assertEqual(capture.page_status, "blocked")
         self.assertIn("2/15", capture.page_error)
+        self.assertEqual(capture.skipped_details, 13)
+        self.assertEqual(capture.discovered_jobs, 2)
         self.assertEqual(detail_urls, [])
+
+    def test_company_pagination_challenge_is_blocked_even_when_url_leaves_company_route(self):
+        class _ChallengePage(_PagedListingPage):
+            def select_page(self, token):
+                self.url = "https://www.zhipin.com/web/user/"
+
+        page = _ChallengePage([[f"https://www.zhipin.com/job_detail/{index}.html" for index in range(15)]])
+        capture, detail_urls = asyncio.run(_extract_listing(page, page.url))
+        self.assertEqual(capture.page_status, "blocked")
+        self.assertEqual(detail_urls, [])
+
+    def test_unknown_listing_url_never_uses_requested_url(self):
+        page = _ListingPage("", [], "")
+        capture, detail_urls = asyncio.run(_extract_listing(page, "https://www.zhipin.com/gongsi/job/company.html"))
+        self.assertEqual(capture.page_status, "blocked")
+        self.assertEqual(detail_urls, [])
+
+    def test_direct_detail_source_does_not_expand_recommendations(self):
+        url = "https://www.zhipin.com/job_detail/source.html"
+        page = _ListingPage("职位描述", ["https://www.zhipin.com/job_detail/recommendation.html"], url)
+        capture, detail_urls = asyncio.run(_extract_listing(page, url))
+        self.assertEqual(capture.page_status, "ok")
+        self.assertEqual(detail_urls, [url])
 
     def test_complete_company_listing_is_still_harvestable(self):
         hrefs = [f"https://www.zhipin.com/job_detail/{letter}.html" for letter in "abc"]
