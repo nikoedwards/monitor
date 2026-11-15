@@ -31,6 +31,7 @@ from ..schemas import (
     LinkedInProfileIn,
     LinkedInProfileUpdate,
 )
+from ..strategic_signals import build_strategic_signals
 from ..util import canonical_url, clean_text, new_id, normalize_url, utc_now
 from .common import fetch_brand, get_conn, resolve_window
 
@@ -850,6 +851,34 @@ def hiring_org_radar(
             "limitations": ["招聘岗位数量代表招聘需求，不等于真实员工数。", "LinkedIn 企业员工为可见样本下界，平台可能不完整。"],
         },
     }
+
+
+@router.get("/strategic-signals")
+def hiring_strategic_signals(
+    brand_id: str,
+    scope: str = "all_history",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    refresh: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Return the cross-board strategic signal card for the hiring surface.
+
+    The default scope deliberately ignores the hiring page's 7/30-day picker:
+    organization and strategy signals are based on the full available history.
+    Explicit dates remain available for the secondary detail view.
+    """
+    if scope not in {"all_history", "range"}:
+        raise HTTPException(status_code=400, detail="scope must be all_history or range")
+    fetch_brand(conn, brand_id)
+    return build_strategic_signals(
+        conn,
+        brand_id,
+        scope=scope,
+        start_date=start_date,
+        end_date=end_date,
+        refresh=refresh,
+    )
 
 
 @router.post("/org-estimate")
