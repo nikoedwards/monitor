@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useId } from "react";
 
 type Div = React.HTMLAttributes<HTMLDivElement>;
 
@@ -10,20 +10,23 @@ export function Card({ className, ...rest }: Div) {
   return <div className={cx("panel p-5", className)} style={{ boxShadow: "var(--shadow)" }} {...rest} />;
 }
 
-export function InfoHint({ text, className }: { text: React.ReactNode; className?: string }) {
+export function InfoHint({ text, className, symbol = "i", label = "查看说明", align = "left" }: { text: React.ReactNode; className?: string; symbol?: string; label?: string; align?: "left" | "right" }) {
+  const tooltipId = useId();
   return (
     <span className={cx("relative inline-flex items-center group align-middle", className)}>
-      <span
-        tabIndex={0}
-        aria-label="说明"
-        className="inline-flex items-center justify-center w-[15px] h-[15px] rounded-full text-[10px] font-semibold leading-none cursor-help select-none"
-        style={{ background: "var(--bg-soft-2)", color: "var(--mute)", border: "1px solid var(--hairline-strong)" }}
+      <button
+        type="button"
+        aria-label={label}
+        aria-describedby={tooltipId}
+        className="inline-flex items-center justify-center w-[15px] h-[15px] rounded-full text-[10px] font-semibold leading-none cursor-help select-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+        style={{ background: "var(--bg-soft-2)", color: "var(--mute)", border: "1px solid var(--hairline-strong)", fontFamily: "inherit" }}
       >
-        i
-      </span>
+        {symbol}
+      </button>
       <span
+        id={tooltipId}
         role="tooltip"
-        className="pointer-events-none absolute left-0 top-[150%] z-50 w-[300px] p-3 rounded-md text-[12px] font-normal leading-relaxed opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+        className={cx("pointer-events-none absolute top-[150%] z-50 w-[300px] max-w-[calc(100vw-2rem)] p-3 rounded-md text-[12px] font-normal leading-relaxed opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity", align === "right" ? "right-0" : "left-0")}
         style={{ background: "var(--panel)", color: "var(--body)", border: "1px solid var(--hairline-strong)", boxShadow: "var(--shadow)" }}
       >
         {text}
@@ -32,13 +35,13 @@ export function InfoHint({ text, className }: { text: React.ReactNode; className
   );
 }
 
-export function SectionTitle({ title, subtitle, action, hint }: { title: string; subtitle?: string; action?: React.ReactNode; hint?: React.ReactNode }) {
+export function SectionTitle({ title, subtitle, action, hint, hintSymbol = "i" }: { title: string; subtitle?: string; action?: React.ReactNode; hint?: React.ReactNode; hintSymbol?: string }) {
   return (
     <div className="flex items-start justify-between gap-3 mb-4">
       <div>
         <h2 className="text-[20px] font-semibold tracking-tight flex items-center gap-2" style={{ color: "var(--ink)" }}>
           {title}
-          {hint && <InfoHint text={hint} />}
+          {hint && <InfoHint text={hint} symbol={hintSymbol} />}
         </h2>
         {subtitle && <p className="text-[13px] mt-0.5" style={{ color: "var(--mute)" }}>{subtitle}</p>}
       </div>
@@ -109,7 +112,7 @@ export function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement
   );
 }
 
-export function StatCard({ label, value, hint, tone, onClick }: { label: string; value: React.ReactNode; hint?: string; tone?: "negative" | "accent"; onClick?: () => void }) {
+export function StatCard({ label, value, hint, labelHint, tone, onClick }: { label: React.ReactNode; value: React.ReactNode; hint?: string; labelHint?: React.ReactNode; tone?: "negative" | "accent"; onClick?: () => void }) {
   const color = tone === "negative" ? "var(--danger)" : tone === "accent" ? "var(--accent)" : "var(--ink)";
   return (
     <Card
@@ -119,7 +122,7 @@ export function StatCard({ label, value, hint, tone, onClick }: { label: string;
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
     >
-      <div className="text-[12px] uppercase tracking-wide" style={{ color: "var(--mute)" }}>{label}</div>
+      <div className="text-[12px] uppercase tracking-wide flex items-center gap-1.5" style={{ color: "var(--mute)" }}>{label}{labelHint}</div>
       <div className="text-[28px] font-semibold mt-1 tabular-nums tracking-tight" style={{ color }}>{value}</div>
       {hint && <div className="text-[12px] mt-1" style={{ color: "var(--mute)" }}>{hint}</div>}
     </Card>
