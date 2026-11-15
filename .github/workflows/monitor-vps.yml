@@ -1,0 +1,72 @@
+name: Monitor VPS
+
+on:
+  push:
+    branches: [main, codex/monitor-tencent-migration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor-vps-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check migration tooling
+        run: |
+          python3 -m unittest discover -s tests -p test_data_inventory.py -v
+          bash -n deploy/tencent/apply-release.sh
+          # Only an empty fixture on this disposable GitHub runner. Production
+          # app.env is never sent to GitHub and remains required on the VPS.
+          sudo install -d /opt/monitor/shared
+          sudo touch /opt/monitor/shared/app.env
+          MONITOR_IMAGE=monitor:validation MONITOR_SITE=localhost docker compose -f deploy/tencent/compose.yml config --no-env-resolution --quiet
+      - name: Build the existing application
+        run: |
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "monitor:$GITHUB_SHA" .
+          docker run --rm --entrypoint python "monitor:$GITHUB_SHA" -c "import fastapi, sqlite3; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True, args=['--no-sandbox']); page=b.new_page(); page.set_content('<title>migration-smoke</title>'); assert page.title() == 'migration-smoke'; b.close(); p.stop()"
+          docker save "monitor:$GITHUB_SHA" | gzip -1 > monitor-image.tar.gz
+          sha256sum monitor-image.tar.gz > monitor-image.tar.gz.sha256
+      - name: Save deployable image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: monitor-${{ github.sha }}
+          path: |
+            monitor-image.tar.gz
+            monitor-image.tar.gz.sha256
+          compression-level: 0
+          retention-days: 3
+      - name: Deploy verified main to VPS
+        if: github.ref == 'refs/heads/main' && vars.MONITOR_VPS_DEPLOY_ENABLED == 'true'
+        env:
+          SSH_HOST: ${{ secrets.MONITOR_SSH_HOST }}
+          SSH_USER: ${{ secrets.MONITOR_SSH_USER }}
+          SSH_PORT: ${{ secrets.MONITOR_SSH_PORT }}
+          SSH_KEY: ${{ secrets.MONITOR_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.MONITOR_SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          [[ "$SSH_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          SSH_PORT="${SSH_PORT:-22}"
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]]
+          [[ -n "$SSH_KEY" && -n "$SSH_KNOWN_HOSTS" ]]
+          ssh_dir="$(mktemp -d)"
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          unset SSH_KEY SSH_KNOWN_HOSTS
+          options=(-i "$ssh_dir/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$ssh_dir/known_hosts" -o ConnectTimeout=20)
+          remote="$SSH_USER@$SSH_HOST"
+          release="/opt/monitor/releases/$GITHUB_SHA"
+          ssh "${options[@]}" -p "$SSH_PORT" "$remote" "mkdir -p '$release'"
+          scp "${options[@]}" -P "$SSH_PORT" monitor-image.tar.gz monitor-image.tar.gz.sha256 deploy/tencent/compose.yml deploy/tencent/Caddyfile deploy/tencent/apply-release.sh deploy/data_inventory.py "$remote:$release/"
+          ssh "${options[@]}" -p "$SSH_PORT" "$remote" "bash '$release/apply-release.sh' '$GITHUB_SHA'"
