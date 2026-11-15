@@ -188,7 +188,11 @@ def build_strategic_signals(
                 if isinstance(cached, dict):
                     return {**cached, "cached": True, "refresh": False}
 
-            payload = _overview_payload(conn, brand_id, start, end, None)
+            # The market-share module is a derived, cross-brand calculation and
+            # can dominate a cold request on large datasets. Strategic signals
+            # already mark it as non-independent evidence; keep this endpoint
+            # bounded by requesting the current brand only.
+            payload = _overview_payload(conn, brand_id, start, end, brand_id)
             packet = build_overview_evidence(conn, brand_id, payload)
             result = None
             model_succeeded = False
