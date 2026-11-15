@@ -694,6 +694,8 @@ export interface MarketShareBrand {
     sales_units: number;
     product_reviews: number;
     sales_data_points: number;
+    sales_currency?: string | null;
+    sales_currency_mixed?: boolean;
   };
   gaps: string[];
 }
