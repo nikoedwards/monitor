@@ -287,7 +287,7 @@ OVERVIEW_SUMMARY_PROMPT = """研究周期：{start} 至 {end}。请回答：这�
 }}"""
 
 
-def summarize_overview(conn: sqlite3.Connection, overview: dict) -> dict:
+def summarize_overview(conn: sqlite3.Connection, overview: dict, *, timeout: float = 90) -> dict:
     """Generate a cross-dimension executive summary from normalized evidence."""
     context = overview.get("range") or {}
     prompt = OVERVIEW_SUMMARY_PROMPT.format(
@@ -295,7 +295,7 @@ def summarize_overview(conn: sqlite3.Connection, overview: dict) -> dict:
         end=context.get("end") or "",
         overview=json.dumps(overview, ensure_ascii=False),
     )
-    text = call_llm(get_config(conn), OVERVIEW_SUMMARY_SYSTEM, prompt)
+    text = call_llm(get_config(conn), OVERVIEW_SUMMARY_SYSTEM, prompt, timeout=timeout)
     try:
         parsed = _extract_json(text)
     except (ValueError, TypeError) as exc:

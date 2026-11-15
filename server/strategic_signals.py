@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import os
 from collections import defaultdict
 from datetime import date, timedelta
 
@@ -13,6 +14,10 @@ from .domains.insights import _overview_payload
 
 
 _MAX_HISTORY_DAYS = 3650
+try:
+    STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_STRATEGIC_SIGNALS_TIMEOUT_SECONDS", "10")))
+except (TypeError, ValueError):
+    STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = 10.0
 _STRATEGIC_SIGNALS_VERSION = "strategic-signals-v2"
 _CACHE_LOCK = threading.Lock()
 _IN_FLIGHT: dict[str, threading.Lock] = {}
@@ -189,7 +194,7 @@ def build_strategic_signals(
             model_succeeded = False
             if ai.is_configured(conn):
                 try:
-                    result = ai.summarize_overview(conn, packet)
+                    result = ai.summarize_overview(conn, packet, timeout=STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS)
                     model_succeeded = isinstance(result, dict)
                 except ai.LlmError:
                     result = None
