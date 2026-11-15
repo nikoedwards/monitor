@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { TrendChart, Bars, SimpleLine } from "../components/charts";
-import { HiringOrgRadar } from "../components/HiringOrgRadar";
+import { HiringStrategicSignals } from "../components/HiringStrategicSignals";
 import { AsyncProgress, Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import {
@@ -15,7 +15,6 @@ import {
   useEmployees,
   useEmployeesSync,
   useHiringSummary,
-  useHiringOrgRadar,
   useHiringSync,
   useJobPostings,
   useLinks,
@@ -54,7 +53,6 @@ export default function Hiring() {
 
   const [range] = useTimeRange();
   const { data: summary, isLoading } = useHiringSummary(brandId, platform, range);
-  const { data: orgRadar } = useHiringOrgRadar(brandId, platform, range);
   const sync = useHiringSync();
 
   return (
@@ -78,8 +76,6 @@ export default function Hiring() {
         <StatCard label="窗口内下线" value={fmtNum(summary?.closed_in_window)} onClick={() => setWindowDetail("closed")} />
         <StatCard label="平均在招天数" value={summary?.avg_open_days != null ? `${summary.avg_open_days}天` : "—"} />
       </div>
-
-      <HiringOrgRadar data={orgRadar} brandId={brandId} platform={platform} range={range} />
 
       <SegmentGroup
         value={tab}
@@ -208,6 +204,7 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
       </div>
 
       <BusinessAnalysisCard brandId={brandId} range={range} platform={platform} status={status} />
+      <HiringStrategicSignals brandId={brandId} />
 
       <Card>
         <SectionTitle
@@ -264,6 +261,11 @@ function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: s
       {(manualResult || analyze.data) && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>
           <p style={{ color: "var(--ink)" }}>{(manualResult || analyze.data).summary}</p>
+          {(manualResult || analyze.data).analysis_status === "fallback" && (
+            <p className="text-[12px]" style={{ color: "var(--warning)" }}>
+              大模型暂时不可用，当前展示基于岗位数量和部门的确定性统计；稍后可重新生成语义分析。
+            </p>
+          )}
           {!!(manualResult || analyze.data).business_directions?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>推导业务方向</div>

@@ -7,6 +7,7 @@ the browser. Uses stdlib urllib (no extra dependency).
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,10 @@ class LlmError(RuntimeError):
 
 
 SUMMARY_CACHE_TTL = timedelta(hours=24)
+try:
+    JD_ANALYSIS_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_JD_ANALYSIS_TIMEOUT_SECONDS", "30")))
+except (TypeError, ValueError):
+    JD_ANALYSIS_TIMEOUT_SECONDS = 30.0
 
 
 def get_cached_summary(conn: sqlite3.Connection, cache_key: str) -> dict | None:
@@ -78,7 +83,7 @@ def is_configured(conn: sqlite3.Connection) -> bool:
     return bool(get_config(conn).get("llm_api_key"))
 
 
-def call_llm_content(cfg: dict, system: str, content: str | list[dict]) -> str:
+def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeout: float = 90) -> str:
     if not cfg.get("llm_api_key"):
         raise LlmError("尚未配置大模型 Token，请先在设置中填写。")
     try:
@@ -102,7 +107,7 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict]) -> str:
         },
     )
     try:
-        with urlopen(request, timeout=90) as response:
+        with urlopen(request, timeout=timeout) as response:
             raw = response.read()
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -124,8 +129,8 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict]) -> str:
     raise LlmError("大模型响应中没有文本内容。")
 
 
-def call_llm(cfg: dict, system: str, prompt: str) -> str:
-    return call_llm_content(cfg, system, prompt)
+def call_llm(cfg: dict, system: str, prompt: str, *, timeout: float = 90) -> str:
+    return call_llm_content(cfg, system, prompt, timeout=timeout)
 
 
 def _extract_json(text: str) -> dict:
@@ -577,7 +582,7 @@ def analyze_jd(conn: sqlite3.Connection, postings: list[dict], context: dict) ->
         count=len(items),
         postings=json.dumps(items, ensure_ascii=False),
     )
-    text = call_llm(cfg, JD_SYSTEM, prompt)
+    text = call_llm(cfg, JD_SYSTEM, prompt, timeout=JD_ANALYSIS_TIMEOUT_SECONDS)
     parsed = _extract_json(text)
     if not isinstance(parsed, dict):
         raise LlmError("大模型未返回有效的分析对象")

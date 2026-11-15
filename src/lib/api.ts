@@ -1,11 +1,25 @@
 const BASE = "";
+const REQUEST_TIMEOUT_MS = 120_000;
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      ...options,
+      signal: options.signal || controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请稍后重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -360,6 +374,50 @@ export interface HiringOrgEstimate {
   limitations: string[];
   cached?: boolean;
   model?: string;
+}
+
+export interface HiringStrategicSignalEvidence {
+  id: string;
+  domain: string;
+  kind: string;
+  at?: string;
+  title?: string;
+  detail?: string;
+  url?: string;
+  independence_group?: string;
+  metrics?: Record<string, unknown>;
+}
+
+export interface HiringStrategicSignal {
+  id: string;
+  title: string;
+  direction: string;
+  priority: "high" | "medium" | "low";
+  confidence: string;
+  observation: string;
+  inference: string;
+  business_impact: string;
+  alternative: string;
+  next_signal: string;
+  time_horizon: string;
+  domains: string[];
+  evidence_ids: string[];
+  evidence: HiringStrategicSignalEvidence[];
+}
+
+export interface HiringStrategicSignals {
+  schema_version: string;
+  brand: string;
+  window: { scope: string; start: string; end: string };
+  headline: { posture: string; summary: string; confidence: string };
+  signals: HiringStrategicSignal[];
+  coverage: Record<string, any>;
+  source_coverage: Record<string, any>;
+  timeline: { date: string; events: { domain: string; event_type: string; label: string; evidence_ids: string[] }[] }[];
+  details: { organization_estimate?: { status: string; href: string; note: string }; evidence_chain?: any[]; method?: Record<string, any> };
+  caveats: string[];
+  cached?: boolean;
+  refresh?: boolean;
 }
 
 export interface LinkedInEmployee {

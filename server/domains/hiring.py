@@ -31,6 +31,7 @@ from ..schemas import (
     LinkedInProfileIn,
     LinkedInProfileUpdate,
 )
+from ..strategic_signals import build_strategic_signals
 from ..util import canonical_url, clean_text, new_id, normalize_url, utc_now
 from .common import fetch_brand, get_conn, resolve_window
 
@@ -852,6 +853,34 @@ def hiring_org_radar(
     }
 
 
+@router.get("/strategic-signals")
+def hiring_strategic_signals(
+    brand_id: str,
+    scope: str = "all_history",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    refresh: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Return the cross-board strategic signal card for the hiring surface.
+
+    The default scope deliberately ignores the hiring page's 7/30-day picker:
+    organization and strategy signals are based on the full available history.
+    Explicit dates remain available for the secondary detail view.
+    """
+    if scope not in {"all_history", "range"}:
+        raise HTTPException(status_code=400, detail="scope must be all_history or range")
+    fetch_brand(conn, brand_id)
+    return build_strategic_signals(
+        conn,
+        brand_id,
+        scope=scope,
+        start_date=start_date,
+        end_date=end_date,
+        refresh=refresh,
+    )
+
+
 @router.post("/org-estimate")
 def hiring_org_estimate(
     brand_id: str,
@@ -906,6 +935,39 @@ def _empty_trend(start: str, end: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------- LLM analysis
+def _fallback_jd_analysis(postings: list[dict], start: str, end: str, error: str = "") -> dict:
+    """Return a deterministic, bounded result when the model is unavailable."""
+    department_counts: dict[str, int] = defaultdict(int)
+    role_counts: dict[str, int] = defaultdict(int)
+    for posting in postings:
+        department_counts[infer_department(posting.get("department"), posting.get("title"), posting.get("jd_text"))] += 1
+        role_counts[infer_role_family(posting.get("title"), posting.get("department"))] += 1
+    top_departments = sorted(department_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    top_roles = sorted(role_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    summary = (
+        f"模型暂时不可用，已基于 {len(postings)} 条职位的确定性统计生成初步结果。"
+        f"统计窗口为 {start} 至 {end}，招聘集中度可作为后续研判的线索。"
+    )
+    return {
+        "summary": summary,
+        "business_directions": [
+            {"direction": department, "evidence": f"窗口内有 {count} 个相关岗位。", "job_count": count}
+            for department, count in top_departments
+        ],
+        "team_focus": [
+            {"team": department, "signal": f"窗口内出现 {count} 个岗位，建议结合后续采集核查。"}
+            for department, count in top_departments
+        ],
+        "hot_roles": [{"title": role, "count": count} for role, count in top_roles],
+        "strategic_signals": [
+            "当前结果为确定性招聘统计，尚未形成跨板块战略研判。",
+            "模型恢复后可重新生成包含 JD 语义的战略信号。",
+        ],
+        "risks": ["大模型暂时不可用，以上内容不包含 JD 语义推断。"] + ([str(error)[:160]] if error else []),
+        "analysis_status": "fallback",
+    }
+
+
 @router.post("/analyze")
 def analyze_hiring(
     brand_id: str,
@@ -952,9 +1014,10 @@ def analyze_hiring(
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     try:
         result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end, "filters": {"platform": platform, "status": status}})
-    except ai.LlmError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except (ai.LlmError, TimeoutError, OSError) as exc:
+        result = _fallback_jd_analysis(postings, start, end, str(exc))
     result = {**result, "cached": False, "range": {"start": start, "end": end}, "filters": {"platform": platform, "status": status}}
-    _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
-    ai.put_cached_summary(conn, persistent_key, result)
+    if result.get("analysis_status") != "fallback":
+        _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
+        ai.put_cached_summary(conn, persistent_key, result)
     return result

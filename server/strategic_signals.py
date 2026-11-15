@@ -1,0 +1,260 @@
+"""Cross-board strategic signal normalization for the hiring surface."""
+from __future__ import annotations
+
+import sqlite3
+import threading
+from collections import defaultdict
+from datetime import date, timedelta
+
+from . import ai
+from .overview_evidence import build_overview_evidence
+from .domains.common import resolve_window
+from .domains.insights import _overview_payload
+
+
+_MAX_HISTORY_DAYS = 3650
+_STRATEGIC_SIGNALS_VERSION = "strategic-signals-v2"
+_CACHE_LOCK = threading.Lock()
+_IN_FLIGHT: dict[str, threading.Lock] = {}
+
+
+def _data_revision(conn: sqlite3.Connection, brand_id: str) -> str:
+    """Return a cheap revision token so same-day imports invalidate the cache."""
+    sources = (
+        ("records", "occurred_at", "updated_at"),
+        ("job_postings", "first_seen", "updated_at"),
+        ("sales_metrics", "snapshot_date", "created_at"),
+        ("web_snapshots", "snapshot_date", "created_at"),
+        ("ad_entities", "first_seen_at", "updated_at"),
+    )
+    parts = []
+    for table, date_column, updated_column in sources:
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count, MAX(substr(COALESCE({updated_column}, {date_column}), 1, 19)) AS latest "
+                f"FROM {table} WHERE brand_id = ?",
+                (brand_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        parts.append(f"{table}:{row['count']}:{row['latest'] or ''}")
+    return ";".join(parts)
+
+
+def _cache_key(brand_id: str, scope: str, start: str, end: str, revision: str) -> str:
+    return "strategic-signals:" + "|".join((_STRATEGIC_SIGNALS_VERSION, brand_id, scope, start, end, revision))
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _CACHE_LOCK:
+        return _IN_FLIGHT.setdefault(key, threading.Lock())
+
+
+def _release_lock(key: str, lock: threading.Lock) -> None:
+    with _CACHE_LOCK:
+        if _IN_FLIGHT.get(key) is lock:
+            _IN_FLIGHT.pop(key, None)
+
+
+def _table_history(conn: sqlite3.Connection, table: str, column: str, brand_id: str) -> tuple[str | None, str | None]:
+    try:
+        row = conn.execute(
+            f"SELECT MIN(substr({column}, 1, 10)), MAX(substr({column}, 1, 10)) FROM {table} WHERE brand_id = ? AND {column} IS NOT NULL AND {column} != ''",
+            (brand_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None, None
+    return (row[0] if row else None), (row[1] if row else None)
+
+
+def history_window(conn: sqlite3.Connection, brand_id: str) -> tuple[str, str]:
+    """Return the bounded earliest/latest observed dates across Monitor sources."""
+    ranges = [
+        _table_history(conn, "records", "occurred_at", brand_id),
+        _table_history(conn, "job_postings", "first_seen", brand_id),
+        _table_history(conn, "sales_metrics", "snapshot_date", brand_id),
+        _table_history(conn, "web_snapshots", "snapshot_date", brand_id),
+        _table_history(conn, "ad_entities", "first_seen_at", brand_id),
+    ]
+    starts = [value for value, _ in ranges if value]
+    ends = [value for _, value in ranges if value]
+    if not starts or not ends:
+        return resolve_window(365)
+    start, end = min(starts), max(ends)
+    # Keep an accidental bad import from creating an unbounded request.
+    try:
+        start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
+        if (end_day - start_day).days + 1 > _MAX_HISTORY_DAYS:
+            start = (end_day - timedelta(days=_MAX_HISTORY_DAYS - 1)).isoformat()
+    except ValueError:
+        return resolve_window(365)
+    return start, end
+
+
+def _posture(signals: list[dict]) -> str:
+    directions = {str(item.get("direction") or item.get("polarity") or "").lower() for item in signals}
+    if "pivot" in directions or "mixed" in directions or ("expansion" in directions and "pressure" in directions) or ("positive" in directions and "negative" in directions):
+        return "pivot"
+    if "pressure" in directions or "negative" in directions:
+        return "pressure"
+    if "expansion" in directions or "positive" in directions:
+        return "expansion"
+    return "watch"
+
+
+def _timeline(evidence: list[dict], limit: int = 12) -> list[dict]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for item in evidence:
+        if item.get("kind") == "module":
+            continue
+        at = str(item.get("at") or "")[:10]
+        if at:
+            grouped[at].append(item)
+    rows = []
+    for day in sorted(grouped, reverse=True)[:limit]:
+        events = []
+        for item in grouped[day][:6]:
+            events.append({
+                "domain": item.get("domain"),
+                "event_type": item.get("kind"),
+                "label": item.get("title"),
+                "evidence_ids": [item.get("id")],
+            })
+        rows.append({"date": day, "events": events})
+    return rows
+
+
+def _fallback_signals(payload: dict, packet: dict) -> list[dict]:
+    """Build conservative observations when no model is configured."""
+    output = []
+    for raw in payload.get("signals") or []:
+        domain = raw.get("domain")
+        refs = [item for item in packet.get("evidence", []) if item.get("domain") == domain and item.get("kind") != "module"]
+        if not refs:
+            continue
+        output.append({
+            "id": f"fallback-{domain}",
+            "title": raw.get("title") or "待核查业务信号",
+            "direction": "pressure" if raw.get("severity") == "high" else "watch",
+            "priority": "high" if raw.get("severity") == "high" else "medium",
+            "confidence": "low",
+            "observation": raw.get("detail") or "检测到一项业务变化。",
+            "inference": "当前只有单板块观察，尚不足以形成跨板块战略研判。",
+            "business_impact": "需要结合其他来源继续核查。",
+            "alternative": "也可能来自采集覆盖或口径变化。",
+            "next_signal": "等待第二个独立来源组出现同向证据。",
+            "time_horizon": "未来 7-30 天",
+            "domains": [domain],
+            "evidence_ids": [item.get("id") for item in refs[:6]],
+            "evidence": refs[:6],
+        })
+    return output[:3]
+
+
+def build_strategic_signals(
+    conn: sqlite3.Connection,
+    brand_id: str,
+    *,
+    scope: str = "all_history",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    refresh: bool = False,
+) -> dict:
+    if scope == "all_history" and not start_date and not end_date:
+        start, end = history_window(conn, brand_id)
+    else:
+        start, end = resolve_window(365 if scope == "all_history" else 30, start_date, end_date)
+        scope = "range"
+
+    cache_key = _cache_key(brand_id, scope, start, end, _data_revision(conn, brand_id))
+    if not refresh:
+        cached = ai.get_cached_summary(conn, cache_key)
+        if isinstance(cached, dict):
+            return {**cached, "cached": True, "refresh": False}
+
+    # React can issue the initial query and a refetch close together. Serialize
+    # only identical keys so one slow model request populates the shared cache
+    # and the followers return immediately instead of multiplying the timeout.
+    lock = _lock_for(cache_key)
+    try:
+        with lock:
+            if not refresh:
+                cached = ai.get_cached_summary(conn, cache_key)
+                if isinstance(cached, dict):
+                    return {**cached, "cached": True, "refresh": False}
+
+            payload = _overview_payload(conn, brand_id, start, end, None)
+            packet = build_overview_evidence(conn, brand_id, payload)
+            result = None
+            model_succeeded = False
+            if ai.is_configured(conn):
+                try:
+                    result = ai.summarize_overview(conn, packet)
+                    model_succeeded = isinstance(result, dict)
+                except ai.LlmError:
+                    result = None
+            if not isinstance(result, dict):
+                result = {"summary": "当前证据尚不足以形成完整战略研判。", "deep_insights": [], "priority_alerts": [], "caveats": ["大模型未配置或暂时不可用。"]}
+
+            raw_signals = result.get("deep_insights") or result.get("insights") or []
+            signals = [item for item in raw_signals if isinstance(item, dict)][:3]
+            if not signals:
+                signals = _fallback_signals(payload, packet)
+            evidence_by_id = {item.get("id"): item for item in packet.get("evidence", [])}
+            clean_signals = []
+            for item in signals:
+                ids = [value for value in item.get("evidence_ids", []) if value in evidence_by_id]
+                refs = [evidence_by_id[value] for value in ids]
+                domains = sorted({ref.get("domain") for ref in refs if ref.get("domain")})
+                groups = {ref.get("independence_group") for ref in refs if ref.get("kind") != "module" and ref.get("independence_group") not in {None, "derived"}}
+                if len(groups) < 2:
+                    # Keep single-board observations visible but label them clearly.
+                    item = {**item, "title": f"单板块观察：{item.get('title') or '待核查信号'}", "confidence": "low"}
+                clean_signals.append({
+                    "id": item.get("id") or f"signal-{len(clean_signals) + 1}",
+                    "title": str(item.get("title") or "待核查业务信号")[:180],
+                    "direction": item.get("direction") or item.get("polarity") or "watch",
+                    "priority": item.get("priority") if item.get("priority") in {"high", "medium", "low"} else "medium",
+                    "confidence": item.get("confidence") if item.get("confidence") in {"low", "medium", "high"} else "low",
+                    "observation": str(item.get("observation") or "")[:900],
+                    "inference": str(item.get("inference") or "")[:900],
+                    "business_impact": str(item.get("business_impact") or item.get("why_it_matters") or "")[:900],
+                    "alternative": str(item.get("alternative") or "")[:900],
+                    "next_signal": str(item.get("next_signal") or "")[:900],
+                    "time_horizon": str(item.get("time_horizon") or "")[:180],
+                    "domains": domains,
+                    "evidence_ids": [ref.get("id") for ref in refs],
+                    "evidence": refs,
+                })
+
+            headline = str(result.get("summary") or "当前证据尚不足以形成完整战略研判。")[:1200]
+            response = {
+                "schema_version": "strategic-signals-v1",
+                "brand": packet.get("brand") or brand_id,
+                "window": {"scope": scope, "start": start, "end": end},
+                "headline": {"posture": _posture(clean_signals), "summary": headline, "confidence": "medium" if clean_signals else "low"},
+                "signals": clean_signals,
+                "coverage": packet.get("coverage") or {},
+                "source_coverage": packet.get("source_coverage") or {},
+                "timeline": _timeline(packet.get("evidence") or []),
+                "details": {
+                    "organization_estimate": {
+                        "status": "available",
+                        "href": f"/api/hiring/org-estimate?brand_id={brand_id}&start_date={start}&end_date={end}",
+                        "note": "人数、部门和地区区间估算在二级详情加载。",
+                    },
+                    "evidence_chain": [],
+                    "method": {"scope": scope, "max_history_days": _MAX_HISTORY_DAYS, "independent_source_groups": 2},
+                },
+                "caveats": list(dict.fromkeys((result.get("caveats") if isinstance(result.get("caveats"), list) else []) + packet.get("caveats", []))),
+                "cached": False,
+                "refresh": refresh,
+            }
+            if model_succeeded:
+                # Cache the complete evidence-resolved response, so later requests skip
+                # both the cross-board scans and the model call. The cache helper owns
+                # the 24-hour TTL and is safe to use with the existing SQLite schema.
+                ai.put_cached_summary(conn, cache_key, response)
+    finally:
+        _release_lock(cache_key, lock)
+    return response
