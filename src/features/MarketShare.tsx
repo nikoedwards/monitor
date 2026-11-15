@@ -4,7 +4,7 @@ import { AlertTriangle, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-rea
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { MultiLineChart } from "../components/charts";
-import { Badge, Button, Card, EmptyState, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
+import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
 import { fmtNum } from "../lib/format";
 import { useBrands, useMarketShare, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
@@ -209,8 +209,18 @@ export default function MarketShare() {
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
-            <StatCard label="模型置信度" value={`${result.confidence.score}%`} hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`} />
-            <StatCard label="可用信号" value={`${activeSignals}/2`} hint="真实下载量 + 应用商店累计评分" />
+            <StatCard
+              label="模型置信度"
+              labelHint={<InfoHint align="right" symbol="!" label="查看模型置信度说明" text="这不是预测准确率，而是当前估算的证据完整度。系统综合可用信号覆盖、品牌间可比性、证据数量和下载估算占比；数据越完整、口径越一致，置信度越高。" />}
+              value={`${result.confidence.score}%`}
+              hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`}
+            />
+            <StatCard
+              label="可用信号"
+              labelHint={<InfoHint align="right" symbol="!" label="查看可用信号说明" text="表示本次实际参与计算的基础信号数量。2 类信号是 App 下载信号和 App Store 累计评分数；缺失信号不会按 0 强行计入，而是重新分配剩余权重。" />}
+              value={`${activeSignals}/2`}
+              hint="App 下载信号 + App Store 累计评分数"
+            />
             <StatCard label="应用商店评分数" value={appRatingCount ? fmtNum(appRatingCount) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 商店累计值；非所选期间新增`} />
           </div>
 
@@ -312,7 +322,12 @@ export default function MarketShare() {
             </Card>
 
             <Card>
-              <SectionTitle title="份额拆解" subtitle="评分推算的下载量不重复计权；仅真实下载量参与下载信号" />
+              <SectionTitle
+                title="份额拆解"
+                hintSymbol="!"
+                hint="先把每类信号在当前所选品牌内归一化为相对份额，再按当前模型的有效权重合成。它表示样本内相对位置，不等于真实市场占有率；缺失信号会被重新分配权重。"
+                subtitle="每列先在所选品牌内归一化，再按模型权重合成"
+              />
               <div className="overflow-x-auto">
                 <table className="w-full text-[13px] min-w-[620px]">
                   <thead>
@@ -348,7 +363,12 @@ export default function MarketShare() {
           </div>
 
           <Card>
-            <SectionTitle title="原始依据" subtitle="查看份额背后的直接指标与推算值，避免只看一个百分比" />
+            <SectionTitle
+              title="原始依据"
+              hintSymbol="!"
+              hint="这是审计明细，用来追溯份额背后的数据，不代表所有字段具有相同精度。App Store 评分数是公开累计值；App 下载量在没有官方公开值时是区间估算；销售、评论、提及、互动和播放量主要用于补充背景或其他模型口径。"
+              subtitle="查看份额背后的直接指标与推算值，避免只看一个百分比"
+            />
             <div className="overflow-x-auto">
               <table className="w-full text-[13px] min-w-[960px]">
                 <thead>
