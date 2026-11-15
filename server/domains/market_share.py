@@ -109,6 +109,7 @@ def _record_signals(
     explicit_downloads_by_app: dict[str, float] = defaultdict(float)
     app_ratings_by_app: dict[str, float] = defaultdict(float)
     app_average_rating_by_app: dict[str, tuple[float, float]] = {}
+    app_evidence_by_app: set[str] = set()
     app_data_updated_at = ""
     allowed_apps = configured_app_ids(conn, brand["id"])
     excluded_app_records = 0
@@ -164,6 +165,7 @@ def _record_signals(
             identity = app_id(platform, row["url"], raw)
             scope = "global" if platform == "google_play" else str(row["region"] or "")
             app_key = f"{platform}:{identity}:{scope}" if identity else str(row["link_id"] or source_id or platform or "app")
+            app_evidence_by_app.add(str(row["link_id"] or row["id"]))
             if data_type == "app_metric":
                 # Use the latest observation, including legitimate decreases;
                 # configured/automatic links and localized Play pages share a key.
@@ -184,6 +186,7 @@ def _record_signals(
             )
 
     for app_key, (_, _, metrics) in latest_app_metrics.items():
+        app_evidence_by_app.add(app_key)
         rating = _number(metrics.get("rating"))
         rating_count = _number(metrics.get("rating_count"))
         app_ratings_by_app[app_key] = rating_count
@@ -222,6 +225,7 @@ def _record_signals(
         "app_reviews": round(app_review_base),
         "app_rating": round(app_rating, 2) if app_rating is not None else None,
         "app_store_apps": len(app_ratings_by_app),
+        "app_evidence_count": len(app_evidence_by_app),
         "app_rating_count_observed": bool(known_app_ratings),
         "comments": round(comments),
         "engagement": round(engagement),
@@ -246,28 +250,60 @@ def _sales_signals(
     params: list[str] = [brand_id, start, end]
     if country:
         params.append(country)
+    sales_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(sales_metrics)").fetchall()
+    }
+    currency_column = "sm.currency" if "currency" in sales_columns else "NULL"
+    created_at_column = "sm.created_at" if "created_at" in sales_columns else "NULL"
     rows = conn.execute(
-        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.revenue_est, sm.units_est, sm.review_count "
+        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.revenue_est, sm.units_est, sm.review_count, "
+        f"{currency_column} AS currency, {created_at_column} AS created_at "
         "FROM sales_metrics sm LEFT JOIN links l ON l.id = sm.link_id "
         "WHERE sm.brand_id = ? AND sm.snapshot_date >= ? AND sm.snapshot_date <= ?"
         + country_filter
-        + " ORDER BY sm.snapshot_date, sm.id",
+        + " ORDER BY sm.snapshot_date DESC, created_at DESC, sm.id DESC",
         params,
     ).fetchall()
+
+    # Sales rows are point-in-time snapshots. Use only the latest snapshot per
+    # listing in the selected window so daily collection does not multiply a
+    # listing's cumulative estimate.
+    latest_by_listing: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        key = str(row["link_id"] or row["id"])
+        latest_by_listing.setdefault(key, row)
+    selected_rows = list(latest_by_listing.values())
+
     latest_reviews: dict[str, float] = {}
     revenue = 0.0
     units = 0.0
-    for row in rows:
+    currencies: set[str] = set()
+    missing_currency_revenue = False
+    for row in selected_rows:
         revenue += _number(row["revenue_est"])
         units += _number(row["units_est"])
         key = str(row["link_id"] or row["id"])
         if _number(row["review_count"]):
             latest_reviews[key] = _number(row["review_count"])
+        if _number(row["revenue_est"]):
+            currency = str(row["currency"] or "").strip().upper()
+            if currency:
+                currencies.add(currency)
+            else:
+                missing_currency_revenue = True
+
+    sales_currency = next(iter(currencies)) if len(currencies) == 1 and not missing_currency_revenue else None
+    currency_mixed = len(currencies) > 1 or missing_currency_revenue
     return {
-        "sales_revenue": round(revenue, 2),
+        # Revenue without a single known currency is not comparable and must
+        # not leak into the market-share signal as if it were normalized.
+        "sales_revenue": round(revenue, 2) if sales_currency else 0.0,
         "sales_units": round(units),
         "product_reviews": round(sum(latest_reviews.values())),
-        "sales_data_points": len(rows),
+        "sales_data_points": len(selected_rows),
+        "sales_currency": sales_currency,
+        "sales_currency_mixed": currency_mixed,
     }
 
 
@@ -286,16 +322,9 @@ def _available_countries(
         "OR LOWER(COALESCE(platform, '')) IN ('app_store', 'google_play'))",
         [*brand_ids, start, end],
     ).fetchall()
-    link_rows = conn.execute(
-        f"SELECT DISTINCT UPPER(region) AS country FROM links "
-        f"WHERE brand_id IN ({placeholders}) AND region IS NOT NULL AND TRIM(region) != '' "
-        "AND (LOWER(COALESCE(channel, '')) = 'app' "
-        "OR LOWER(COALESCE(platform, '')) IN ('app_store', 'google_play'))",
-        brand_ids,
-    ).fetchall()
     countries = {
         str(row["country"]).strip().upper()
-        for row in [*record_rows, *link_rows]
+        for row in record_rows
         if len(str(row["country"] or "").strip()) == 2
     }
     return sorted(countries)
@@ -680,12 +709,25 @@ def market_share(
 
     # Do not mix currencies with unit counts. Choose one sales basis that is
     # comparable across enough brands; otherwise the sales signal is excluded.
-    revenue_coverage = sum(1 for row in rows if row["raw"]["sales_revenue"] > 0)
+    revenue_currencies = {
+        row["raw"].get("sales_currency")
+        for row in rows
+        if row["raw"].get("sales_revenue", 0) > 0 and row["raw"].get("sales_currency")
+    }
+    revenue_currency = next(iter(revenue_currencies)) if len(revenue_currencies) == 1 else None
+    revenue_coverage = sum(
+        1
+        for row in rows
+        if row["raw"]["sales_revenue"] > 0
+        and not row["raw"].get("sales_currency_mixed")
+        and row["raw"].get("sales_currency") == revenue_currency
+    )
     unit_coverage = sum(1 for row in rows if row["raw"]["sales_units"] > 0)
     if revenue_coverage >= comparable_floor:
         sales_basis = "revenue"
         for row in rows:
-            row["signals"]["sales"] = row["raw"]["sales_revenue"]
+            if row["raw"].get("sales_currency") == revenue_currency and not row["raw"].get("sales_currency_mixed"):
+                row["signals"]["sales"] = row["raw"]["sales_revenue"]
     elif unit_coverage >= comparable_floor:
         sales_basis = "units"
         for row in rows:
@@ -745,10 +787,10 @@ def market_share(
             active_weights[key] * (sum(1 for row in rows if row["signals"][key] > 0) / len(rows))
             for key in active_keys
         )
-    evidence_total = sum(
-        row["raw"]["app_reviews"]
-        for row in rows
-    )
+    # Rating counts are cumulative public totals, not independent evidence
+    # samples. Count distinct observed apps for confidence instead of letting a
+    # popular app's lifetime rating total inflate the score.
+    evidence_total = sum(row["raw"].get("app_evidence_count", 0) for row in rows)
     sample_strength = min(1.0, math.log1p(evidence_total) / math.log1p(max(500, len(rows) * 250)))
     base_confidence = 100 * (0.55 * active_base_weight + 0.25 * fairness + 0.20 * sample_strength)
     proxy_ratio = (

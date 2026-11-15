@@ -263,7 +263,68 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual(2100000, alpha["raw"]["app_downloads_est"])
         self.assertEqual("review_proxy", alpha["raw"]["app_download_basis"])
         self.assertEqual(1.0, result["confidence"]["download_proxy_ratio"])
+        self.assertEqual(2, result["confidence"]["evidence_total"])
         self.assertLessEqual(result["confidence"]["score"], 70)
+
+    def test_sales_uses_latest_listing_snapshot_and_rejects_mixed_currency_revenue(self):
+        self.conn.executescript(
+            """
+            ALTER TABLE sales_metrics ADD COLUMN currency TEXT;
+            ALTER TABLE sales_metrics ADD COLUMN created_at TEXT;
+            """
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO sales_metrics
+              (id, link_id, brand_id, snapshot_date, revenue_est, units_est, review_count, currency, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("a-old", "listing-a", "a", "2026-07-01", 100, 10, 20, "USD", "2026-07-01T01:00:00Z"),
+                ("a-new", "listing-a", "a", "2026-07-15", 150, 15, 25, "USD", "2026-07-15T01:00:00Z"),
+                ("b-new", "listing-b", "b", "2026-07-15", 100, 20, 10, "EUR", "2026-07-15T01:00:00Z"),
+            ],
+        )
+
+        result = market_share(
+            brand_ids="a,b",
+            model="commerce",
+            start_date="2026-07-01",
+            end_date="2026-07-31",
+            conn=self.conn,
+        )
+
+        alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
+        self.assertEqual(150, alpha["raw"]["sales_revenue"])
+        self.assertEqual(1, alpha["raw"]["sales_data_points"])
+        self.assertEqual("USD", alpha["raw"]["sales_currency"])
+        self.assertEqual("units", result["model"]["sales_basis"])
+
+    def test_available_countries_are_limited_to_selected_time_window(self):
+        self.add_record(
+            "a-old-country", "a", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric", metrics={"downloads": 100},
+            region="GB", occurred_at="2026-06-30T00:00:00+00:00",
+        )
+        self.add_record(
+            "a-current-country", "a", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric", metrics={"downloads": 100},
+            region="US", occurred_at="2026-07-15T00:00:00+00:00",
+        )
+        self.add_record(
+            "b-current-country", "b", dimension="platform", channel="app", platform="app_store",
+            source_id="app_store_reviews", data_type="app_metric", metrics={"downloads": 100},
+            region="US", occurred_at="2026-07-15T00:00:00+00:00",
+        )
+
+        result = market_share(
+            brand_ids="a,b",
+            start_date="2026-07-01",
+            end_date="2026-07-31",
+            conn=self.conn,
+        )
+
+        self.assertEqual(["US"], result["countries"])
 
     def test_daily_snapshots_drive_brand_and_cohort_trends(self):
         self.add_record(
