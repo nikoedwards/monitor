@@ -50,8 +50,26 @@ function downloadText(row: MarketShareBrand): string {
   return `${fmtNum(raw.app_downloads_est)}（${fmtNum(raw.app_downloads_low)}–${fmtNum(raw.app_downloads_high)}）`;
 }
 
+const CURRENCY_PREFIXES: Record<string, string> = {
+  AUD: "A$",
+  CAD: "C$",
+  CNY: "¥",
+  EUR: "€",
+  GBP: "£",
+  HKD: "HK$",
+  INR: "₹",
+  JPY: "¥",
+  KRW: "₩",
+  SGD: "S$",
+  USD: "US$",
+};
+
 function salesText(row: MarketShareBrand): string {
-  if (row.raw.sales_revenue) return `¥${fmtNum(row.raw.sales_revenue)}`;
+  if (row.raw.sales_revenue) {
+    const currency = row.raw.sales_currency?.toUpperCase();
+    const prefix = currency ? (CURRENCY_PREFIXES[currency] || `${currency} `) : "";
+    return `${prefix}${fmtNum(row.raw.sales_revenue)}${currency ? "" : "（币种未知）"}`;
+  }
   if (row.raw.sales_units) return `${fmtNum(row.raw.sales_units)} 件`;
   return "—";
 }
