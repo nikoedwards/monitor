@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from server.db import SCHEMA
-from server.domains.hiring import hiring_org_estimate, hiring_org_radar
+from server.domains.hiring import hiring_org_estimate, hiring_org_radar, infer_city
 
 
 class HiringOrgRadarTests(unittest.TestCase):
@@ -18,6 +18,16 @@ class HiringOrgRadarTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    def test_city_is_inferred_from_provider_title_when_column_is_empty(self):
+        self.assertEqual(
+            infer_city("", "Senior Product Manager — Singapore | LinkedIn Jobs", ""),
+            "Singapore",
+        )
+        self.assertEqual(
+            infer_city(None, "Backend Engineer", "This role is based in Tokyo."),
+            "Tokyo",
+        )
 
     def test_aggregates_departments_locations_and_visible_people(self):
         self.conn.executemany(

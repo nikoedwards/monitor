@@ -69,6 +69,31 @@ _DEPARTMENT_RULES = (
     ("内容与编辑", ("内容", "编辑", "文案", "编导", "content", "editor", "copywriter")),
 )
 
+# Hiring providers often put the office in the title or description while
+# leaving the normalized city column empty. Keep this list deterministic and
+# ordered from the most specific names to shorter names that could overlap.
+_CITY_HINTS = (
+    "East Palo Alto",
+    "San Francisco",
+    "Palo Alto",
+    "Los Angeles",
+    "Bentonville",
+    "Singapore",
+    "Seattle",
+    "London",
+    "Tokyo",
+    "Shenzhen",
+    "New York",
+    "Toronto",
+    "Sydney",
+    "Taipei",
+    "Seoul",
+    "Berlin",
+    "Paris",
+    "Amsterdam",
+    "Remote",
+)
+
 
 def infer_department(department: str | None, title: str | None = None, jd_text: str | None = None) -> str:
     """Return an explicit department or infer a broad category from job text."""
@@ -84,6 +109,26 @@ def infer_department(department: str | None, title: str | None = None, jd_text: 
             if any(keyword.casefold() in haystack for keyword in keywords):
                 return label
     return "未分类"
+
+
+def infer_city(city: str | None, title: str | None = None, jd_text: str | None = None) -> str:
+    """Return an explicit city or infer one from provider text.
+
+    This is deliberately a conservative hint, rather than a geocoder: an
+    office city explicitly stored by the provider wins, then a city token in
+    the title, then one in the first part of the job description.
+    """
+    explicit = clean_text(city)
+    if explicit and explicit.casefold() not in {"未标注地区", "unknown", "n/a", "-"}:
+        return explicit
+    for value in (clean_text(title), clean_text(jd_text)[:4000]):
+        if not value:
+            continue
+        folded = value.casefold()
+        for hint in _CITY_HINTS:
+            if hint.casefold() in folded:
+                return hint
+    return "未标注地区"
 
 
 def infer_role_family(title: str | None, department: str | None = None) -> str:
@@ -144,7 +189,7 @@ def _window_posting_to_dict(posting: dict) -> dict:
         "url": posting.get("url"),
         "title": posting.get("title"),
         "department": infer_department(posting.get("department"), posting.get("title"), posting.get("jd_text")),
-        "city": posting.get("city"),
+        "city": infer_city(posting.get("city"), posting.get("title"), posting.get("jd_text")),
         "jd_text": (posting.get("jd_text") or "")[:16000],
         "status": posting.get("status"),
         "posted_at": posting.get("posted_at"),
@@ -712,7 +757,7 @@ def _radar_evidence(postings: list[dict], limit: int = 5) -> list[dict]:
             "url": posting.get("url"),
             "first_seen": posting.get("first_seen"),
             "closed_at": posting.get("closed_at"),
-            "city": posting.get("city"),
+            "city": infer_city(posting.get("city"), posting.get("title"), posting.get("jd_text")),
             "status": posting.get("status"),
         }
         for posting in postings[:limit]
@@ -774,7 +819,7 @@ def hiring_org_radar(
 
     for posting in postings:
         department = infer_department(posting.get("department"), posting.get("title"), posting.get("jd_text"))
-        city = clean_text(posting.get("city")) or "未标注地区"
+        city = infer_city(posting.get("city"), posting.get("title"), posting.get("jd_text"))
         title = clean_text(posting.get("title")) or "未命名职位"
         role = infer_role_family(title, department)
         is_open = posting.get("status") != "closed"
@@ -871,7 +916,7 @@ def hiring_org_radar(
         "trend": trend,
         "data_quality": {
             "postings_total": len(postings),
-            "with_city": sum(1 for item in postings if clean_text(item.get("city"))),
+            "with_city": sum(1 for item in postings if infer_city(item.get("city"), item.get("title"), item.get("jd_text")) != "未标注地区"),
             "with_department": sum(1 for item in postings if clean_text(item.get("department")) or infer_department(item.get("department"), item.get("title"), item.get("jd_text")) != "未分类"),
             "people_total": len(profiles),
             "limitations": ["招聘岗位数量代表招聘需求，不等于真实员工数。", "LinkedIn 企业员工为可见样本下界，平台可能不完整。"],
