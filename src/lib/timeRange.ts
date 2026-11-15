@@ -65,12 +65,33 @@ export function rangeParams(range?: TimeRange): { start_date?: string; end_date?
   return { start_date: range.start_date, end_date: range.end_date };
 }
 
+// Keep the selected range in sessionStorage so every browser tab owns its own
+// copy. localStorage is shared by all tabs and caused changing the picker in
+// one tab to overwrite the range shown by every other tab.
 const KEY = "monitor.timeRange";
 const EVENT = "monitor:timeRange";
 
+function readStoredRange(): string | null {
+  try {
+    const tabValue = sessionStorage.getItem(KEY);
+    if (tabValue) return tabValue;
+
+    // Migrate the old shared value once for existing sessions. After this
+    // snapshot, updates stay in this tab's sessionStorage only.
+    const legacyValue = localStorage.getItem(KEY);
+    if (legacyValue) {
+      sessionStorage.setItem(KEY, legacyValue);
+      return legacyValue;
+    }
+  } catch {
+    /* ignore unavailable storage */
+  }
+  return null;
+}
+
 export function loadRange(): TimeRange {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = readStoredRange();
     if (raw) {
       const parsed = JSON.parse(raw) as TimeRange;
       // Recompute relative presets so "最近30天" stays anchored to today across sessions.
@@ -83,20 +104,22 @@ export function loadRange(): TimeRange {
   return presetRange("30d");
 }
 
-/** Shared, localStorage-backed time range synced across all pages via a window event. */
+/** Tab-local time range synced across pages in the same tab via a window event. */
 export function useTimeRange(): [TimeRange, (r: TimeRange) => void] {
   const [range, setRange] = useState<TimeRange>(loadRange);
   useEffect(() => {
     const handler = () => setRange(loadRange());
     window.addEventListener(EVENT, handler);
-    window.addEventListener("storage", handler);
     return () => {
       window.removeEventListener(EVENT, handler);
-      window.removeEventListener("storage", handler);
     };
   }, []);
   const update = (r: TimeRange) => {
-    localStorage.setItem(KEY, JSON.stringify(r));
+    try {
+      sessionStorage.setItem(KEY, JSON.stringify(r));
+    } catch {
+      /* Keep the in-memory selection when storage is unavailable. */
+    }
     setRange(r);
     window.dispatchEvent(new Event(EVENT));
   };
