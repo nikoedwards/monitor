@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useMutationState, type UseMutationResult } from "@tanstack/react-query";
 
 export const PERSISTENT_TASK_EVENT = "monitor:persistent-task";
+// A browser tab can disappear while a model request is in flight. Treat an
+// old pending marker as stale so a later visit never spins indefinitely.
+export const PERSISTENT_TASK_PENDING_TTL_MS = 2 * 60_000;
 
 type StoredTask<T> = {
   status?: "pending" | "success" | "error";
@@ -111,7 +114,7 @@ export function usePersistentTaskMutation<TData, TVariables>(
   const result = useMemo(() => {
     const data = stored?.status === "success" ? stored.data : mutationMatchesKey ? mutation.data : cachedMutation?.data;
     const error = (mutationMatchesKey ? mutation.error : null) || cachedMutation?.error || (stored?.status === "error" && stored.error ? new Error(stored.error) : null);
-    const storedPending = stored?.status === "pending" && Date.now() - stored.updatedAt < 30 * 60_000;
+    const storedPending = stored?.status === "pending" && Date.now() - stored.updatedAt < PERSISTENT_TASK_PENDING_TTL_MS;
     return {
       data,
       error,

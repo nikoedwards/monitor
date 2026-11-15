@@ -23,7 +23,7 @@ import {
   type MarketingAdsSummary,
 } from "./api";
 import { rangeParams, type TimeRange } from "./timeRange";
-import { dailyPersistentTaskKey, persistTaskError, persistTaskPending, persistTaskValue, persistentTaskKey, readPersistentTask, usePersistentTaskMutation } from "./persistentTask";
+import { dailyPersistentTaskKey, persistTaskError, persistTaskPending, persistTaskValue, persistentTaskKey, PERSISTENT_TASK_PENDING_TTL_MS, readPersistentTask, usePersistentTaskMutation } from "./persistentTask";
 
 // ---------------------------------------------------------------- brands
 export function useBrands() {
@@ -140,7 +140,7 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
   const rp = rangeParams(range);
   const storageKey = dailyPersistentTaskKey("executive-summary-research-v3", [brandId, rp.start_date, rp.end_date, marketBrandIds?.join(",")]);
   const stored = readPersistentTask<any>(storageKey);
-  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 30 * 60_000;
+  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < PERSISTENT_TASK_PENDING_TTL_MS;
   return useQuery({
     queryKey: ["overview-summary-research-v3", brandId, rp, marketBrandIds, refreshKey],
     queryFn: async () => {
@@ -333,7 +333,7 @@ export function useMarketingOverviewSummary(brandId?: string, range?: TimeRange,
   const rp = rangeParams(range);
   const storageKey = dailyPersistentTaskKey("marketing-summary", [brandId, rp.start_date, rp.end_date]);
   const stored = readPersistentTask<any>(storageKey);
-  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < 30 * 60_000;
+  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < PERSISTENT_TASK_PENDING_TTL_MS;
   return useQuery({
     queryKey: ["marketing-overview-summary", brandId, rp, refreshKey],
     queryFn: async () => {
