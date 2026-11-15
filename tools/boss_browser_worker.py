@@ -8,12 +8,12 @@ visible job details, and sends the capture payload to ``/api/hiring/browser-capt
 The first run should be headed so the operator can log in manually.  Later runs
 can use the same profile headlessly.  Login pages, CAPTCHA/security checks, and
 empty/partial pages are reported to Monitor as ``page_status='blocked'`` or
-``page_status='ok'`` with zero jobs; the worker never guesses that missing jobs
+``page_status='partial'``; the worker never guesses that missing jobs
 are closed and never attempts to bypass a challenge.
 
 Example (first run)::
 
-    python -m tools.boss_browser_worker --headed --wait-for-login 180
+    python -m tools.boss_browser_worker --login-only --headed --wait-for-login 180
 
 Example (scheduled run)::
 
@@ -42,6 +42,7 @@ from urllib.request import Request, urlopen
 
 from server.config import ROOT
 from server.db import connect
+from server.util import utc_now
 
 
 DEFAULT_BASE_URL = os.environ.get("MONITOR_BASE_URL", "http://127.0.0.1:8790")
@@ -78,7 +79,8 @@ LOGIN_REQUIRED_LISTING_MARKERS = (
     "更多职位请登录",
 )
 LOGIN_PATH_MARKERS = ("/web/user/", "/login", "/register", "/security-check", "/safe-check")
-CLOSED_MARKERS = ("职位已下线", "停止招聘", "职位不存在", "已结束", "已关闭")
+ERROR_MARKERS = ("页面不存在", "页面出错", "系统异常", "访问异常", "服务异常", "网络异常", "出错了", "访问受限")
+CLOSED_MARKERS = ("职位已下线", "停止招聘", "职位不存在", "该职位已结束", "该职位已关闭")
 JOB_DETAIL_PATH = "/job_detail/"
 COMPANY_JOBS_PATH = "/gongsi/job/"
 # BOSS renders recommendation cards next to the company's own listings.  The
@@ -104,6 +106,10 @@ class _MonitorUnavailable(RuntimeError):
     """The configured Monitor endpoint could not be reached."""
 
 
+class _BrowserBlocked(RuntimeError):
+    """Stop all sources when browser identity or authentication is uncertain."""
+
+
 @dataclass(frozen=True)
 class HiringLink:
     id: str
@@ -120,6 +126,9 @@ class CaptureResult:
     page_status: str
     page_error: str
     jobs: list[dict[str, Any]]
+    failed_details: int = 0
+    skipped_details: int = 0
+    discovered_jobs: int = 0
 
 
 def _clean(value: Any, limit: int = 20_000) -> str:
@@ -146,16 +155,30 @@ def _is_boss_url(value: str) -> bool:
 
 def _looks_like_unavailable_boss_page(url: str) -> bool:
     """Return whether navigation no longer points at a usable BOSS page."""
-    if not url or url.startswith("about:") or not _is_boss_url(url):
+    if not url or not _canonical_url(url) or not _is_boss_url(url):
         return True
     path = (urlsplit(url).path or "").lower()
     return any(marker in path for marker in LOGIN_PATH_MARKERS)
 
 
 def _looks_like_blocked(url: str, title: str, body: str) -> bool:
-    path = (urlsplit(url).path or "").lower()
     haystack = f"{title}\n{body}".lower()
     return _looks_like_unavailable_boss_page(url) or any(marker.lower() in haystack for marker in LOGIN_MARKERS)
+
+
+async def _checked_page(page: Any) -> tuple[str, str, str]:
+    # Never substitute the requested URL for an unobservable browser URL.
+    url = getattr(page, "url", "") or ""
+    if _looks_like_unavailable_boss_page(url):
+        raise _BrowserBlocked("无法确认当前 BOSS 网址、页面未完成加载或已跳转登录/验证页。")
+    try:
+        title = _clean(await page.title(), 500)
+        body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
+    except Exception as exc:
+        raise _BrowserBlocked("无法确认当前 BOSS 页面内容；本轮已停止。") from exc
+    if _looks_like_blocked(url, title, body) or _looks_like_login_required_listing(body):
+        raise _BrowserBlocked("当前 BOSS 页面要求登录、安全验证或验证码；本轮已停止。")
+    return url, title, body
 
 
 def _looks_like_login_required_listing(body: str) -> bool:
@@ -290,6 +313,9 @@ def _post_capture(base_url: str, capture: CaptureResult, brand_id: str) -> dict[
         "page_status": capture.page_status,
         "page_error": capture.page_error,
         "jobs": capture.jobs,
+        "failed_details": capture.failed_details,
+        "skipped_details": capture.skipped_details,
+        "discovered_jobs": capture.discovered_jobs,
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
@@ -298,7 +324,7 @@ def _post_capture(base_url: str, capture: CaptureResult, brand_id: str) -> dict[
             text = response.read().decode("utf-8", errors="replace")
             result = json.loads(text or "{}")
             if not isinstance(result, dict):
-                return {"status": "ok", "raw": result}
+                raise RuntimeError("Monitor API 返回格式不正确，无法确认入库结果。")
             return result
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -328,6 +354,9 @@ def _post_capture(base_url: str, capture: CaptureResult, brand_id: str) -> dict[
                         page_status=capture.page_status,
                         page_error=capture.page_error,
                         jobs=capture.jobs,
+                        failed_details=capture.failed_details,
+                        skipped_details=capture.skipped_details,
+                        discovered_jobs=capture.discovered_jobs,
                     )
                     conn.commit()
                     return {**result, "delivery": "direct_db"}
@@ -368,11 +397,15 @@ async def _first_text(page: Any, selectors: Iterable[str], root: Any = None) -> 
 
 async def _extract_detail(page: Any, url: str, source_title: str = "") -> dict[str, Any]:
     await page.wait_for_timeout(1200)
-    title = _clean(await page.title(), 500)
-    body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
-    final_url = page.url or url
-    if _looks_like_blocked(final_url, title, body):
-        return {"blocked": True, "title": title, "body": body, "url": final_url}
+    try:
+        final_url, title, body = await _checked_page(page)
+    except _BrowserBlocked as exc:
+        return {"blocked": True, "error": str(exc)}
+    if (_canonical_url(final_url) != _canonical_url(url)
+            or not re.fullmatch(r"/job_detail/[^/]+\.html", urlsplit(final_url).path)):
+        return {"error": "详情页跳转到了其他页面，未采集。"}
+    if any(marker in f"{title}\n{body}" for marker in ERROR_MARKERS):
+        return {"error": "详情页显示错误信息，未采集。"}
 
     job_title = await _first_text(page, ("h1", ".job-name", "[class*='job-name']"))
     city = await _first_text(
@@ -384,6 +417,9 @@ async def _extract_detail(page: Any, url: str, source_title: str = "") -> dict[s
         page,
         (".job-sec-text", ".job-detail", ".job-detail-section", "[class*='job-detail']"),
     )
+    is_open = _is_open(body)
+    if not job_title and not (is_open is False):
+        return {"error": "详情页缺少可识别的职位标题，未采集。"}
     # An unknown layout must not turn navigation/footer text into a changed JD.
     # A missing description is preserved as partial by browser-capture.
     return {
@@ -394,8 +430,8 @@ async def _extract_detail(page: Any, url: str, source_title: str = "") -> dict[s
             "city": city,
             "department": department,
             "jd_text": jd,
-            "is_open": _is_open(body),
-            "raw": {"capture_type": "detail", "source_title": source_title},
+            "is_open": is_open,
+            "raw": {"capture_type": "detail", "source_title": source_title, "captured_at": utc_now()},
         },
     }
 
@@ -483,8 +519,7 @@ async def _collect_company_listing_pages(page: Any, url: str, initial_url: str) 
     ``failed`` means a pagination target could not be rendered or was sent to
     a login/security page, so callers can preserve the blocked safeguard.
     """
-    final_url = page.url or initial_url or url
-    body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
+    final_url, _, body = await _checked_page(page)
     advertised_count = _advertised_listing_count(body)
     detail_urls = await _detail_urls_on_page(page, final_url)
     if not _is_company_jobs_url(final_url) or advertised_count is None:
@@ -514,21 +549,20 @@ async def _collect_company_listing_pages(page: Any, url: str, initial_url: str) 
                 anchor = page.locator(f"a[ka='{token}']").first
                 await anchor.click(timeout=30_000)
             await page.wait_for_timeout(1000)
-            current = page.url or target
-            page_title = _clean(await page.title(), 500)
-            page_body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
-            if _looks_like_blocked(current, page_title, page_body) or _looks_like_login_required_listing(page_body):
-                failed = True
-                break
+            current, _, _ = await _checked_page(page)
             current_urls = await _detail_urls_on_page(page, current)
             for detail_url in current_urls:
                 if detail_url not in seen:
                     seen.add(detail_url)
                     detail_urls.append(detail_url)
+        except _BrowserBlocked:
+            raise
         except Exception:
+            # A timeout may have left a challenge or an unknown URL visible.
+            await _checked_page(page)
             failed = True
             break
-    return page.url or final_url, detail_urls, advertised_count, failed
+    return page.url, detail_urls, advertised_count, failed
 
 
 async def _extract_listing(
@@ -536,27 +570,14 @@ async def _extract_listing(
     url: str,
 ) -> tuple[CaptureResult, list[str]]:
     await page.wait_for_timeout(1500)
-    title = _clean(await page.title(), 500)
-    body = _clean(await page.locator("body").inner_text(timeout=5_000), 50_000)
-    final_url = page.url or url
-    if _looks_like_blocked(final_url, title, body):
-        return CaptureResult(url, title, "blocked", "当前 BOSS 页面要求登录、安全验证或未完成加载。", []), []
+    try:
+        final_url, title, body = await _checked_page(page)
+    except _BrowserBlocked as exc:
+        return CaptureResult(url, "", "blocked", str(exc), []), []
+    if any(marker in f"{title}\n{body}" for marker in ERROR_MARKERS):
+        return CaptureResult(url, title, "partial", "列表页显示错误信息。", [], failed_details=1), []
 
     detail_urls = await _detail_urls_on_page(page, final_url)
-
-    # A logged-out company page may expose a handful of cards before showing
-    # a "登录后查看更多职位" gate.  Do not treat those visible cards as a
-    # complete source: ingesting them would make the next run close every
-    # hidden job as if it had disappeared.  The explicit gate wins even when
-    # the page does not expose a total count.
-    if _looks_like_login_required_listing(body):
-        return CaptureResult(
-            url,
-            title,
-            "blocked",
-            "BOSS 公司职位页只显示部分职位，请先登录后重试。",
-            [],
-        ), []
 
     # Company pages advertise their total in the tab label (usually
     # ``招聘职位(15)``).  If the worker sees fewer detail links than that
@@ -571,26 +592,35 @@ async def _extract_listing(
                 url,
                 final_url,
             )
+        except _BrowserBlocked as exc:
+            return CaptureResult(url, title, "blocked", str(exc), [], discovered_jobs=len(detail_urls)), []
         except Exception:
             pagination_failed = True
-    if _is_company_jobs_url(final_url) and advertised_count is not None and len(detail_urls) < advertised_count:
+    if advertised_count is not None and len(detail_urls) < advertised_count:
         reason = "分页未完整加载" if pagination_failed else "只加载了部分职位"
         return CaptureResult(
             url,
             title,
             "blocked",
-            f"BOSS 公司职位页{reason}（已发现 {len(detail_urls)}/{advertised_count}），请先登录后重试。",
+            f"BOSS 职位列表{reason}（已发现 {len(detail_urls)}/{advertised_count}），请人工检查页面后重试。",
             [],
+            skipped_details=advertised_count - len(detail_urls),
+            discovered_jobs=len(detail_urls),
         ), []
 
     # A direct detail URL is a valid source link and should still be captured.
     direct_url = _canonical_url(final_url)
-    if JOB_DETAIL_PATH in (urlsplit(final_url).path or "") and direct_url and direct_url not in detail_urls:
-        detail_urls.insert(0, direct_url)
+    if JOB_DETAIL_PATH in (urlsplit(final_url).path or "") and direct_url:
+        # Recommendations on a detail page are not jobs from this source.
+        detail_urls = [direct_url]
 
     status = "ok" if detail_urls else "partial"
     error = "" if detail_urls else "当前页面没有发现可识别的 Boss 职位链接。"
-    return CaptureResult(url, title, status, error, []), detail_urls
+    # Search/company overview pages do not prove full enumeration. Company
+    # job pages with a matching advertised total and direct details do.
+    if detail_urls and JOB_DETAIL_PATH not in urlsplit(final_url).path and advertised_count is None:
+        status, error = "partial", "列表未提供可核对的职位总数，无法确认已完整采集。"
+    return CaptureResult(url, title, status, error, [], discovered_jobs=len(detail_urls)), detail_urls
 
 
 async def _collect_link(
@@ -599,6 +629,7 @@ async def _collect_link(
     max_jobs: int,
     detail_delay_ms: int,
 ) -> CaptureResult:
+    listing = None
     try:
         page = await context.new_page()
     except Exception as exc:
@@ -614,45 +645,51 @@ async def _collect_link(
         listing, detail_urls = await _extract_listing(page, link.url)
         if listing.page_status == "blocked":
             return listing
-        jobs: list[dict[str, Any]] = []
-        detail_blocked = False
-        for detail_url in detail_urls[:max_jobs]:
-            detail_page = await context.new_page()
+        listing.skipped_details = max(0, len(detail_urls) - max_jobs)
+        partial_details = 0
+        for index, detail_url in enumerate(detail_urls[:max_jobs]):
+            detail_page = None
             try:
+                detail_page = await context.new_page()
                 await detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=30_000)
                 result = await _extract_detail(detail_page, detail_url, listing.source_title)
                 if result.get("blocked"):
-                    # Login expiry while traversing details should be reported
-                    # as blocked, preserving jobs already captured this run.
-                    if not jobs:
-                        return CaptureResult(
-                            listing.source_url,
-                            listing.source_title,
-                            "blocked",
-                            "访问职位详情时遇到登录或安全验证。",
-                            [],
-                        )
-                    detail_blocked = True
-                    break
+                    raise _BrowserBlocked(result.get("error") or "访问职位详情时遇到登录或安全验证。")
                 job = result.get("job") or {}
                 if job.get("url"):
-                    jobs.append(job)
-            except Exception:
-                # Keep the successful details from this run. A later scheduled
-                # run can retry transient detail navigation failures.
-                continue
+                    listing.jobs.append(job)
+                    if not job.get("jd_text") and job.get("is_open") is not False:
+                        partial_details += 1
+                else:
+                    listing.failed_details += 1
+            except Exception as exc:
+                listing.failed_details += 1
+                # Navigation failures can conceal a challenge. Continue only
+                # after positively observing a known, readable BOSS page.
+                blocked_reason = str(exc) if isinstance(exc, _BrowserBlocked) else ""
+                if not blocked_reason:
+                    try:
+                        if detail_page is None:
+                            raise _BrowserBlocked("BOSS 浏览器不可用，无法确认当前网址。")
+                        await _checked_page(detail_page)
+                    except _BrowserBlocked as blocked:
+                        blocked_reason = str(blocked)
+                if blocked_reason:
+                    listing.page_status = "blocked"
+                    listing.page_error = blocked_reason
+                    listing.skipped_details = len(detail_urls) - index - 1
+                    return listing
             finally:
-                await detail_page.close()
+                if detail_page is not None:
+                    await _close_page(detail_page)
             if detail_delay_ms:
                 await page.wait_for_timeout(detail_delay_ms)
-        listing.jobs = jobs
-        if detail_blocked:
-            listing.page_status = "blocked"
-            listing.page_error = "访问职位详情时遇到登录或安全验证；已保留本次成功采集的职位。"
-            return listing
-        if not jobs and listing.page_status == "ok":
+        if listing.failed_details or listing.skipped_details or partial_details or not listing.jobs:
             listing.page_status = "partial"
-            listing.page_error = "列表页可访问，但详情页没有成功采集职位。"
+            listing.page_error = (
+                f"{listing.page_error} 详情失败 {listing.failed_details}，未采集 {listing.skipped_details}，"
+                f"缺少 JD {partial_details}。"
+            ).strip()
         return listing
     except Exception as exc:
         title = ""
@@ -660,14 +697,48 @@ async def _collect_link(
             title = _clean(await page.title(), 500)
         except Exception:
             pass
+        if listing is not None:
+            listing.page_status = "blocked"
+            listing.page_error = f"BOSS 页面访问失败：{str(exc)[:300]}"
+            return listing
         return CaptureResult(link.url, title, "blocked", f"BOSS 页面访问失败：{str(exc)[:300]}", [])
     finally:
+        await _close_page(page)
+
+
+async def _close_page(page: Any) -> None:
+    try:
         await page.close()
+    except Exception:
+        # A browser closed by the operator must not erase the capture result.
+        pass
+
+
+async def _collect_sources(context: Any, links: list[HiringLink], args: argparse.Namespace) -> int:
+    incomplete = False
+    for link in links:
+        try:
+            capture = await _collect_link(context, link, args.max_jobs, args.detail_delay_ms)
+        except Exception as exc:
+            capture = CaptureResult(link.url, "", "blocked", f"BOSS 浏览器不可用：{str(exc)[:300]}", [])
+        result = _post_capture(args.base_url, capture, link.brand_id)
+        print(json.dumps({
+            "link_id": link.id, "brand_id": link.brand_id,
+            "source_url": capture.source_url, "page_status": capture.page_status,
+            "page_error": capture.page_error, "jobs": len(capture.jobs),
+            "failed_details": capture.failed_details, "skipped_details": capture.skipped_details,
+            "discovered_jobs": capture.discovered_jobs, "api": result,
+        }, ensure_ascii=False))
+        incomplete = incomplete or capture.page_status != "ok" or result.get("status") != "ok"
+        if capture.page_status == "blocked" or result.get("status") == "blocked":
+            print("BOSS 本轮全局停止；剩余来源未访问，请人工检查登录/验证或浏览器状态。", file=sys.stderr)
+            return 1
+    return 1 if incomplete else 0
 
 
 async def _run(args: argparse.Namespace) -> int:
     try:
-        links = _read_links(args.base_url, args.brand_id, args.link_id)
+        links = [] if args.login_only else _read_links(args.base_url, args.brand_id, args.link_id)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -684,17 +755,12 @@ async def _run(args: argparse.Namespace) -> int:
 
     profile_dir = Path(args.profile_dir).expanduser().resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
-    had_blocked = False
     async with async_playwright() as playwright:
         try:
             launch_options = {
                 "headless": not args.headed,
                 "viewport": {"width": 1440, "height": 1100},
                 "locale": "zh-CN",
-                "user_agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
             }
             # Set BOSS_BROWSER_CHANNEL=chrome to use the installed Chrome
             # binary for a headed login.  Leaving it unset preserves the
@@ -716,46 +782,20 @@ async def _run(args: argparse.Namespace) -> int:
                 try:
                     login_target = links[0].url if links else DEFAULT_LOGIN_URL
                     await login_page.goto(login_target, wait_until="domcontentloaded", timeout=30_000)
-                    print(f"请在打开的 BOSS 浏览器中人工登录。等待 {args.wait_for_login} 秒后开始采集…", file=sys.stderr)
+                    action = "保存 profile 并退出，不采集" if args.login_only else "开始采集"
+                    print(f"请在打开的 BOSS 浏览器中人工登录/验证。等待 {args.wait_for_login} 秒后{action}…", file=sys.stderr)
                     await asyncio.sleep(args.wait_for_login)
                 finally:
-                    await login_page.close()
+                    await _close_page(login_page)
+            if args.login_only:
+                print("BOSS 专用 profile 已保存；登录是否成功需用户确认，本次未采集。", file=sys.stderr)
+                return 0
             if not links:
                 print("BOSS 登录 profile 已保存；当前没有 active 招聘链接，本次不采集。", file=sys.stderr)
                 return 0
-            for link in links:
-                try:
-                    capture = await _collect_link(context, link, args.max_jobs, args.detail_delay_ms)
-                except Exception as exc:
-                    # A headed browser can be closed by the operator while the
-                    # fixed login wait is running. Convert that lifecycle race
-                    # into the same blocked state used for security checks.
-                    capture = CaptureResult(
-                        link.url,
-                        "",
-                        "blocked",
-                        f"BOSS 浏览器窗口已关闭或不可用：{str(exc)[:300]}",
-                        [],
-                    )
-                result = _post_capture(args.base_url, capture, link.brand_id)
-                link_blocked = capture.page_status == "blocked"
-                print(
-                    json.dumps(
-                        {
-                            "link_id": link.id,
-                            "brand_id": link.brand_id,
-                            "source_url": capture.source_url,
-                            "page_status": capture.page_status,
-                            "jobs": len(capture.jobs),
-                            "api": result,
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-                had_blocked = had_blocked or link_blocked
+            return await _collect_sources(context, links, args)
         finally:
             await context.close()
-    return 1 if had_blocked else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -767,6 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headed", action="store_true", help="显示浏览器；首次登录或人工验证时使用")
     parser.add_argument("--headless", action="store_true", help="显式使用无头模式（默认也是无头）")
     parser.add_argument("--wait-for-login", type=int, default=0, metavar="SECONDS", help="先打开 BOSS 页面等待人工登录，再开始采集；需 --headed")
+    parser.add_argument("--login-only", action="store_true", help="只打开专用 profile 等待人工登录并保存，不采集；需 --headed --wait-for-login")
     parser.add_argument("--max-jobs", type=int, default=100, help="每个源最多采集多少个职位详情")
     parser.add_argument("--detail-delay-ms", type=int, default=900, help="职位详情之间的等待毫秒数")
     return parser
@@ -779,6 +820,9 @@ def main() -> int:
         return 2
     if args.wait_for_login and not args.headed:
         print("--wait-for-login 需要与 --headed 一起使用。", file=sys.stderr)
+        return 2
+    if args.login_only and (not args.headed or args.wait_for_login <= 0):
+        print("--login-only 需要 --headed 和大于零的 --wait-for-login。", file=sys.stderr)
         return 2
     args.max_jobs = max(1, min(args.max_jobs, 200))
     args.detail_delay_ms = max(0, min(args.detail_delay_ms, 30_000))
