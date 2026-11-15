@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections import defaultdict
 from datetime import date, timedelta
 
@@ -12,6 +13,47 @@ from .domains.insights import _overview_payload
 
 
 _MAX_HISTORY_DAYS = 3650
+_STRATEGIC_SIGNALS_VERSION = "strategic-signals-v2"
+_CACHE_LOCK = threading.Lock()
+_IN_FLIGHT: dict[str, threading.Lock] = {}
+
+
+def _data_revision(conn: sqlite3.Connection, brand_id: str) -> str:
+    """Return a cheap revision token so same-day imports invalidate the cache."""
+    sources = (
+        ("records", "occurred_at", "updated_at"),
+        ("job_postings", "first_seen", "updated_at"),
+        ("sales_metrics", "snapshot_date", "created_at"),
+        ("web_snapshots", "snapshot_date", "created_at"),
+        ("ad_entities", "first_seen_at", "updated_at"),
+    )
+    parts = []
+    for table, date_column, updated_column in sources:
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count, MAX(substr(COALESCE({updated_column}, {date_column}), 1, 19)) AS latest "
+                f"FROM {table} WHERE brand_id = ?",
+                (brand_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        parts.append(f"{table}:{row['count']}:{row['latest'] or ''}")
+    return ";".join(parts)
+
+
+def _cache_key(brand_id: str, scope: str, start: str, end: str, revision: str) -> str:
+    return "strategic-signals:" + "|".join((_STRATEGIC_SIGNALS_VERSION, brand_id, scope, start, end, revision))
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _CACHE_LOCK:
+        return _IN_FLIGHT.setdefault(key, threading.Lock())
+
+
+def _release_lock(key: str, lock: threading.Lock) -> None:
+    with _CACHE_LOCK:
+        if _IN_FLIGHT.get(key) is lock:
+            _IN_FLIGHT.pop(key, None)
 
 
 def _table_history(conn: sqlite3.Connection, table: str, column: str, brand_id: str) -> tuple[str | None, str | None]:
@@ -124,68 +166,95 @@ def build_strategic_signals(
         start, end = resolve_window(365 if scope == "all_history" else 30, start_date, end_date)
         scope = "range"
 
-    payload = _overview_payload(conn, brand_id, start, end, None)
-    packet = build_overview_evidence(conn, brand_id, payload)
-    result = None
-    if ai.is_configured(conn):
-        try:
-            result = ai.summarize_overview(conn, packet)
-        except ai.LlmError:
+    cache_key = _cache_key(brand_id, scope, start, end, _data_revision(conn, brand_id))
+    if not refresh:
+        cached = ai.get_cached_summary(conn, cache_key)
+        if isinstance(cached, dict):
+            return {**cached, "cached": True, "refresh": False}
+
+    # React can issue the initial query and a refetch close together. Serialize
+    # only identical keys so one slow model request populates the shared cache
+    # and the followers return immediately instead of multiplying the timeout.
+    lock = _lock_for(cache_key)
+    try:
+        with lock:
+            if not refresh:
+                cached = ai.get_cached_summary(conn, cache_key)
+                if isinstance(cached, dict):
+                    return {**cached, "cached": True, "refresh": False}
+
+            payload = _overview_payload(conn, brand_id, start, end, None)
+            packet = build_overview_evidence(conn, brand_id, payload)
             result = None
-    if not isinstance(result, dict):
-        result = {"summary": "当前证据尚不足以形成完整战略研判。", "deep_insights": [], "priority_alerts": [], "caveats": ["大模型未配置或暂时不可用。"]}
+            model_succeeded = False
+            if ai.is_configured(conn):
+                try:
+                    result = ai.summarize_overview(conn, packet)
+                    model_succeeded = isinstance(result, dict)
+                except ai.LlmError:
+                    result = None
+            if not isinstance(result, dict):
+                result = {"summary": "当前证据尚不足以形成完整战略研判。", "deep_insights": [], "priority_alerts": [], "caveats": ["大模型未配置或暂时不可用。"]}
 
-    raw_signals = result.get("deep_insights") or result.get("insights") or []
-    signals = [item for item in raw_signals if isinstance(item, dict)][:3]
-    if not signals:
-        signals = _fallback_signals(payload, packet)
-    evidence_by_id = {item.get("id"): item for item in packet.get("evidence", [])}
-    clean_signals = []
-    for item in signals:
-        ids = [value for value in item.get("evidence_ids", []) if value in evidence_by_id]
-        refs = [evidence_by_id[value] for value in ids]
-        domains = sorted({ref.get("domain") for ref in refs if ref.get("domain")})
-        groups = {ref.get("independence_group") for ref in refs if ref.get("kind") != "module" and ref.get("independence_group") not in {None, "derived"}}
-        if len(groups) < 2:
-            # Keep single-board observations visible but label them clearly.
-            item = {**item, "title": f"单板块观察：{item.get('title') or '待核查信号'}", "confidence": "low"}
-        clean_signals.append({
-            "id": item.get("id") or f"signal-{len(clean_signals) + 1}",
-            "title": str(item.get("title") or "待核查业务信号")[:180],
-            "direction": item.get("direction") or item.get("polarity") or "watch",
-            "priority": item.get("priority") if item.get("priority") in {"high", "medium", "low"} else "medium",
-            "confidence": item.get("confidence") if item.get("confidence") in {"low", "medium", "high"} else "low",
-            "observation": str(item.get("observation") or "")[:900],
-            "inference": str(item.get("inference") or "")[:900],
-            "business_impact": str(item.get("business_impact") or item.get("why_it_matters") or "")[:900],
-            "alternative": str(item.get("alternative") or "")[:900],
-            "next_signal": str(item.get("next_signal") or "")[:900],
-            "time_horizon": str(item.get("time_horizon") or "")[:180],
-            "domains": domains,
-            "evidence_ids": [ref.get("id") for ref in refs],
-            "evidence": refs,
-        })
+            raw_signals = result.get("deep_insights") or result.get("insights") or []
+            signals = [item for item in raw_signals if isinstance(item, dict)][:3]
+            if not signals:
+                signals = _fallback_signals(payload, packet)
+            evidence_by_id = {item.get("id"): item for item in packet.get("evidence", [])}
+            clean_signals = []
+            for item in signals:
+                ids = [value for value in item.get("evidence_ids", []) if value in evidence_by_id]
+                refs = [evidence_by_id[value] for value in ids]
+                domains = sorted({ref.get("domain") for ref in refs if ref.get("domain")})
+                groups = {ref.get("independence_group") for ref in refs if ref.get("kind") != "module" and ref.get("independence_group") not in {None, "derived"}}
+                if len(groups) < 2:
+                    # Keep single-board observations visible but label them clearly.
+                    item = {**item, "title": f"单板块观察：{item.get('title') or '待核查信号'}", "confidence": "low"}
+                clean_signals.append({
+                    "id": item.get("id") or f"signal-{len(clean_signals) + 1}",
+                    "title": str(item.get("title") or "待核查业务信号")[:180],
+                    "direction": item.get("direction") or item.get("polarity") or "watch",
+                    "priority": item.get("priority") if item.get("priority") in {"high", "medium", "low"} else "medium",
+                    "confidence": item.get("confidence") if item.get("confidence") in {"low", "medium", "high"} else "low",
+                    "observation": str(item.get("observation") or "")[:900],
+                    "inference": str(item.get("inference") or "")[:900],
+                    "business_impact": str(item.get("business_impact") or item.get("why_it_matters") or "")[:900],
+                    "alternative": str(item.get("alternative") or "")[:900],
+                    "next_signal": str(item.get("next_signal") or "")[:900],
+                    "time_horizon": str(item.get("time_horizon") or "")[:180],
+                    "domains": domains,
+                    "evidence_ids": [ref.get("id") for ref in refs],
+                    "evidence": refs,
+                })
 
-    headline = str(result.get("summary") or "当前证据尚不足以形成完整战略研判。")[:1200]
-    return {
-        "schema_version": "strategic-signals-v1",
-        "brand": packet.get("brand") or brand_id,
-        "window": {"scope": scope, "start": start, "end": end},
-        "headline": {"posture": _posture(clean_signals), "summary": headline, "confidence": "medium" if clean_signals else "low"},
-        "signals": clean_signals,
-        "coverage": packet.get("coverage") or {},
-        "source_coverage": packet.get("source_coverage") or {},
-        "timeline": _timeline(packet.get("evidence") or []),
-        "details": {
-            "organization_estimate": {
-                "status": "available",
-                "href": f"/api/hiring/org-estimate?brand_id={brand_id}&start_date={start}&end_date={end}",
-                "note": "人数、部门和地区区间估算在二级详情加载。",
-            },
-            "evidence_chain": [],
-            "method": {"scope": scope, "max_history_days": _MAX_HISTORY_DAYS, "independent_source_groups": 2},
-        },
-        "caveats": list(dict.fromkeys((result.get("caveats") if isinstance(result.get("caveats"), list) else []) + packet.get("caveats", []))),
-        "cached": False,
-        "refresh": refresh,
-    }
+            headline = str(result.get("summary") or "当前证据尚不足以形成完整战略研判。")[:1200]
+            response = {
+                "schema_version": "strategic-signals-v1",
+                "brand": packet.get("brand") or brand_id,
+                "window": {"scope": scope, "start": start, "end": end},
+                "headline": {"posture": _posture(clean_signals), "summary": headline, "confidence": "medium" if clean_signals else "low"},
+                "signals": clean_signals,
+                "coverage": packet.get("coverage") or {},
+                "source_coverage": packet.get("source_coverage") or {},
+                "timeline": _timeline(packet.get("evidence") or []),
+                "details": {
+                    "organization_estimate": {
+                        "status": "available",
+                        "href": f"/api/hiring/org-estimate?brand_id={brand_id}&start_date={start}&end_date={end}",
+                        "note": "人数、部门和地区区间估算在二级详情加载。",
+                    },
+                    "evidence_chain": [],
+                    "method": {"scope": scope, "max_history_days": _MAX_HISTORY_DAYS, "independent_source_groups": 2},
+                },
+                "caveats": list(dict.fromkeys((result.get("caveats") if isinstance(result.get("caveats"), list) else []) + packet.get("caveats", []))),
+                "cached": False,
+                "refresh": refresh,
+            }
+            if model_succeeded:
+                # Cache the complete evidence-resolved response, so later requests skip
+                # both the cross-board scans and the model call. The cache helper owns
+                # the 24-hour TTL and is safe to use with the existing SQLite schema.
+                ai.put_cached_summary(conn, cache_key, response)
+    finally:
+        _release_lock(cache_key, lock)
+    return response

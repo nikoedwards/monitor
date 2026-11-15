@@ -261,6 +261,11 @@ function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: s
       {(manualResult || analyze.data) && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>
           <p style={{ color: "var(--ink)" }}>{(manualResult || analyze.data).summary}</p>
+          {(manualResult || analyze.data).analysis_status === "fallback" && (
+            <p className="text-[12px]" style={{ color: "var(--warning)" }}>
+              大模型暂时不可用，当前展示基于岗位数量和部门的确定性统计；稍后可重新生成语义分析。
+            </p>
+          )}
           {!!(manualResult || analyze.data).business_directions?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>推导业务方向</div>

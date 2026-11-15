@@ -1,11 +1,25 @@
 const BASE = "";
+const REQUEST_TIMEOUT_MS = 120_000;
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      ...options,
+      signal: options.signal || controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时，请稍后重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
