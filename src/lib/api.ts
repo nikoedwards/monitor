@@ -362,6 +362,50 @@ export interface HiringOrgEstimate {
   model?: string;
 }
 
+export interface HiringStrategicSignalEvidence {
+  id: string;
+  domain: string;
+  kind: string;
+  at?: string;
+  title?: string;
+  detail?: string;
+  url?: string;
+  independence_group?: string;
+  metrics?: Record<string, unknown>;
+}
+
+export interface HiringStrategicSignal {
+  id: string;
+  title: string;
+  direction: string;
+  priority: "high" | "medium" | "low";
+  confidence: string;
+  observation: string;
+  inference: string;
+  business_impact: string;
+  alternative: string;
+  next_signal: string;
+  time_horizon: string;
+  domains: string[];
+  evidence_ids: string[];
+  evidence: HiringStrategicSignalEvidence[];
+}
+
+export interface HiringStrategicSignals {
+  schema_version: string;
+  brand: string;
+  window: { scope: string; start: string; end: string };
+  headline: { posture: string; summary: string; confidence: string };
+  signals: HiringStrategicSignal[];
+  coverage: Record<string, any>;
+  source_coverage: Record<string, any>;
+  timeline: { date: string; events: { domain: string; event_type: string; label: string; evidence_ids: string[] }[] }[];
+  details: { organization_estimate?: { status: string; href: string; note: string }; evidence_chain?: any[]; method?: Record<string, any> };
+  caveats: string[];
+  cached?: boolean;
+  refresh?: boolean;
+}
+
 export interface LinkedInEmployee {
   id: string;
   brand_id: string;

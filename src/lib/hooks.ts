@@ -671,6 +671,14 @@ export function useHiringOrgEstimate() {
   });
 }
 
+export function useHiringStrategicSignals(brandId?: string) {
+  return useQuery({
+    queryKey: ["hiring-strategic-signals", brandId],
+    queryFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history" })}`),
+    enabled: !!brandId,
+  });
+}
+
 export function useJobPostings(brandId?: string, platform?: string, status?: string) {
   return useQuery({
     queryKey: ["job-postings", brandId, platform, status],

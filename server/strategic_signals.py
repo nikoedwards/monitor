@@ -50,12 +50,12 @@ def history_window(conn: sqlite3.Connection, brand_id: str) -> tuple[str, str]:
 
 
 def _posture(signals: list[dict]) -> str:
-    directions = {str(item.get("polarity") or "").lower() for item in signals}
-    if "mixed" in directions or ("positive" in directions and "negative" in directions):
+    directions = {str(item.get("direction") or item.get("polarity") or "").lower() for item in signals}
+    if "pivot" in directions or "mixed" in directions or ("expansion" in directions and "pressure" in directions) or ("positive" in directions and "negative" in directions):
         return "pivot"
-    if "negative" in directions:
+    if "pressure" in directions or "negative" in directions:
         return "pressure"
-    if "positive" in directions:
+    if "expansion" in directions or "positive" in directions:
         return "expansion"
     return "watch"
 
