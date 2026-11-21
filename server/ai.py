@@ -37,9 +37,9 @@ class LlmError(RuntimeError):
 
 SUMMARY_CACHE_TTL = timedelta(hours=24)
 try:
-    JD_ANALYSIS_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_JD_ANALYSIS_TIMEOUT_SECONDS", "30")))
+    JD_ANALYSIS_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_JD_ANALYSIS_TIMEOUT_SECONDS", "180")))
 except (TypeError, ValueError):
-    JD_ANALYSIS_TIMEOUT_SECONDS = 30.0
+    JD_ANALYSIS_TIMEOUT_SECONDS = 180.0
 
 
 def get_cached_summary(conn: sqlite3.Connection, cache_key: str) -> dict | None:
@@ -583,8 +583,11 @@ def analyze_jd(conn: sqlite3.Connection, postings: list[dict], context: dict) ->
         postings=json.dumps(items, ensure_ascii=False),
     )
     text = call_llm(cfg, JD_SYSTEM, prompt, timeout=JD_ANALYSIS_TIMEOUT_SECONDS)
-    parsed = _extract_json(text)
-    if not isinstance(parsed, dict):
+    try:
+        parsed = _extract_json(text)
+    except (ValueError, TypeError) as exc:
+        raise LlmError("大模型未返回完整有效的岗位分析 JSON") from exc
+    if not isinstance(parsed, dict) or not parsed.get("summary"):
         raise LlmError("大模型未返回有效的分析对象")
     parsed.setdefault("summary", "")
     for key in ("business_directions", "team_focus", "hot_roles", "strategic_signals", "risks"):

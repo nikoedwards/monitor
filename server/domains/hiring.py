@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import hashlib
 from collections import defaultdict
 from datetime import date, timedelta
 from io import BytesIO
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from .. import ai
+from ..analysis_jobs import analysis_job
 from ..config import ROOT
 from ..connectors.hiring.runner import (
     discover_linkedin_people_candidates,
@@ -32,14 +34,11 @@ from ..schemas import (
     LinkedInProfileIn,
     LinkedInProfileUpdate,
 )
-from ..strategic_signals import build_strategic_signals
+from ..strategic_signals import build_strategic_signals, _data_revision
 from ..util import canonical_url, clean_text, new_id, normalize_url, utc_now
 from .common import fetch_brand, get_conn, resolve_window
 
 router = APIRouter(prefix="/api/hiring", tags=["hiring"])
-
-_HIRING_ANALYSIS_CACHE: dict[tuple, tuple[float, dict]] = {}
-_HIRING_ANALYSIS_TTL_SECONDS = 24 * 60 * 60
 
 PLATFORM_LABEL = {"boss": "Boss 直聘", "linkedin": "LinkedIn", "linkedin_people": "LinkedIn 企业员工"}
 _AUTHWALL_ACTIVITY_MARKERS = (
@@ -886,6 +885,7 @@ def hiring_strategic_signals(
     start_date: str | None = None,
     end_date: str | None = None,
     refresh: bool = False,
+    background: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     """Return the cross-board strategic signal card for the hiring surface.
@@ -897,6 +897,17 @@ def hiring_strategic_signals(
     if scope not in {"all_history", "range"}:
         raise HTTPException(status_code=400, detail="scope must be all_history or range")
     fetch_brand(conn, brand_id)
+    if background:
+        baseline = build_strategic_signals(conn, brand_id, scope=scope, start_date=start_date, end_date=end_date)
+        key = "strategy:" + json.dumps([brand_id, baseline["window"], _data_revision(conn, brand_id)], sort_keys=True)
+        job = analysis_job(
+            conn, key,
+            lambda worker: build_strategic_signals(worker, brand_id, scope=scope, start_date=start_date, end_date=end_date, refresh=True),
+            start=refresh or not baseline.get("cached"), refresh=refresh,
+        )
+        if job.get("generation", {}).get("status") == "failed" and not baseline.get("cached"):
+            baseline["headline"]["summary"] = "战略研判生成失败，点击刷新可重试。"
+        return {**baseline, **job}
     return build_strategic_signals(
         conn,
         brand_id,
@@ -1004,6 +1015,7 @@ def analyze_hiring(
     status: str | None = None,
     refresh: bool = False,
     cached_only: bool = False,
+    background: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     brand = fetch_brand(conn, brand_id)
@@ -1023,17 +1035,26 @@ def analyze_hiring(
     postings = [dict(r) for r in rows]
     if not postings:
         raise HTTPException(status_code=400, detail="该时间窗内暂无职位数据，请先采集。")
-    cache_key = (brand_id, start, end, platform or "", status or "")
-    cached = _HIRING_ANALYSIS_CACHE.get(cache_key)
-    now = __import__("time").monotonic()
+    revision = hashlib.sha256(json.dumps(postings, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:20]
+    if background:
+        baseline = analyze_hiring(brand_id, days=days, start_date=start, end_date=end, platform=platform,
+                                  status=status, cached_only=True, conn=conn)
+        key = "jd:" + json.dumps([brand_id, start, end, platform or "", status or "", revision], ensure_ascii=False)
+        if not cached_only and not ai.is_configured(conn):
+            raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
+        job = analysis_job(
+            conn, key,
+            lambda worker: analyze_hiring(brand_id, days=days, start_date=start, end_date=end, platform=platform,
+                                          status=status, refresh=True, conn=worker),
+            start=not cached_only and (refresh or baseline.get("cache_miss", False)), refresh=refresh,
+        )
+        return {**baseline, **job, "cache_miss": not bool(job.get("summary") or baseline.get("summary"))}
+    cache_key = (brand_id, start, end, platform or "", status or "", revision)
     persistent_key = "hiring-analysis:" + "|".join(cache_key)
     if not refresh:
         persistent = ai.get_cached_summary(conn, persistent_key)
         if persistent is not None:
-            _HIRING_ANALYSIS_CACHE[cache_key] = (now, persistent)
             return {**persistent, "cached": True}
-    if not refresh and cached and now - cached[0] < _HIRING_ANALYSIS_TTL_SECONDS:
-        return {**cached[1], "cached": True}
     if cached_only:
         return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
     if not ai.is_configured(conn):
@@ -1044,6 +1065,5 @@ def analyze_hiring(
         result = _fallback_jd_analysis(postings, start, end, str(exc))
     result = {**result, "cached": False, "range": {"start": start, "end": end}, "filters": {"platform": platform, "status": status}}
     if result.get("analysis_status") != "fallback":
-        _HIRING_ANALYSIS_CACHE[cache_key] = (now, result)
         ai.put_cached_summary(conn, persistent_key, result)
     return result

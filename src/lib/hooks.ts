@@ -676,11 +676,12 @@ export function useHiringStrategicSignals(brandId?: string) {
   const queryKey = ["hiring-strategic-signals", brandId];
   const query = useQuery({
     queryKey,
-    queryFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history" })}`),
+    queryFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history", background: true })}`),
     enabled: !!brandId,
+    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 2000 : false,
   });
   const refresh = useMutation({
-    mutationFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history", refresh: true })}`),
+    mutationFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history", refresh: true, background: true })}`),
     onSuccess: (data) => qc.setQueryData(queryKey, data),
   });
   return { ...query, refresh };
@@ -822,20 +823,20 @@ export function useAnalyzeJd(brandId?: string, range?: TimeRange, filters: { pla
   const rp = rangeParams(range);
   const filterParams = { platform: filters.platform && filters.platform !== "all" ? filters.platform : undefined, status: filters.status && filters.status !== "all" ? filters.status : undefined };
   const queryKey = ["hiring-analysis", brandId, rp, filterParams];
-  const storageKey = persistentTaskKey("hiring-analysis", [brandId, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
   const query = useQuery({
     queryKey,
-    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, ...filterParams, ...rp })}`),
+    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, background: true, ...filterParams, ...rp })}`),
     enabled: !!brandId,
     staleTime: 24 * 60 * 60 * 1000,
+    refetchOnMount: "always",
     retry: false,
+    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 2000 : false,
   });
-  const generate = usePersistentTaskMutation<any, { refresh?: boolean }>(
-    storageKey,
-    ({ refresh = false }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, ...filterParams, ...rp })}`),
-    (data) => qc.setQueryData(queryKey, data),
-  );
-  return { ...query, data: generate.data || (query.data?.cache_miss ? undefined : query.data), generate };
+  const generate = useMutation({
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, background: true, ...filterParams, ...rp })}`),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+  });
+  return { ...query, generate, isGenerating: generate.isPending || query.data?.generation?.status === "running" };
 }
 
 // ---------------------------------------------------------------- web

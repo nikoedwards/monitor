@@ -31,12 +31,13 @@ function domainLabel(value: string) {
 }
 
 export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
-  const { data, isLoading, isError, refresh } = useHiringStrategicSignals(brandId);
+  const { data, isLoading, isError, error, refetch, refresh } = useHiringStrategicSignals(brandId);
   const [selected, setSelected] = useState<HiringStrategicSignal>();
 
   if (isLoading) return <Card><Spinner /></Card>;
-  if (isError) return <EmptyState title="组织推演台暂时不可用" hint="跨板块证据正在准备中，可稍后重试。" />;
+  if (isError && !data) return <EmptyState title="组织推演台暂时不可用" hint={error?.message || "加载失败，请重试。"} action={<Button onClick={() => refetch()}>重试</Button>} />;
   if (!data) return <EmptyState title="暂无组织推演" hint="完成招聘采集后，系统会结合全量历史和其他业务信号形成研判。" />;
+  const generating = refresh.isPending || data.generation?.status === "running";
 
   return (
     <Card className="overflow-hidden p-0">
@@ -44,8 +45,11 @@ export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
         <SectionTitle
           title="组织推演台"
           subtitle="基于全量历史的跨板块组织与战略研判"
-          action={<div className="flex items-center gap-2"><Badge tone={tone(data.headline.posture)}>{POSTURE_LABEL[data.headline.posture] || "观察"}</Badge><Badge tone="neutral">全量历史</Badge><Button size="sm" onClick={() => refresh.mutate()} disabled={refresh.isPending}>{refresh.isPending ? "研判中…" : "刷新"}</Button></div>}
+          action={<div className="flex items-center gap-2"><Badge tone={tone(data.headline.posture)}>{POSTURE_LABEL[data.headline.posture] || "观察"}</Badge><Badge tone="neutral">全量历史</Badge><Button size="sm" onClick={() => refresh.mutate()} disabled={generating}>{generating ? "研判中…" : "刷新"}</Button></div>}
         />
+        {generating && <p role="status" className="mt-3 text-[12px]" style={{ color: "var(--mute)" }}>正在后台整理证据和生成研判，完成后自动更新，可离开页面后回来查看。</p>}
+        {(refresh.error || isError || data.generation?.status === "failed") && <p role="alert" className="mt-3 text-[12px]" style={{ color: "var(--danger)" }}>{refresh.error?.message || error?.message || data.generation?.error}</p>}
+        {data.analysis_status === "fallback" && <p role="alert" className="mt-3 text-[12px]" style={{ color: "var(--warning)" }}>{data.caveats.join("；")} 点击刷新可重新生成。</p>}
         <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
           <div className="max-w-3xl">
             <div className="text-[20px] leading-7 font-semibold" style={{ color: "var(--ink)" }}>{data.headline.summary}</div>
@@ -68,7 +72,7 @@ export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
               <div className="mt-1 text-[12px] leading-5 line-clamp-2" style={{ color: "var(--body)" }}>{signal.observation || signal.inference}</div>
               <div className="flex flex-wrap gap-1 mt-2">{signal.domains.map((domain) => <span key={domain} className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "var(--panel)", color: "var(--mute)" }}>{domainLabel(domain)}</span>)}<span className="text-[10px] ml-auto" style={{ color: "var(--mute)" }}>{signal.evidence_ids.length} 条证据 · 详情</span></div>
             </button>
-          )) : <div className="rounded-xl p-4 text-[12px]" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>当前只能形成单板块观察，尚不足以形成战略研判。</div>}
+          )) : <div className="rounded-xl p-4 text-[12px]" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>{generating ? "正在关联各板块证据…" : data.generation?.status === "failed" ? "研判生成失败，请点击刷新重试。" : "当前证据尚不足以形成战略研判。"}</div>}
         </div>
       </div>
 
