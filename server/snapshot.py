@@ -3,7 +3,7 @@
 Capture strategy (first that works wins):
   1. Playwright Chromium: full-page PNG plus a self-contained HTML archive.
   2. Installed Edge/Chrome: PNG plus a limited HTML fallback.
-  3. Rasterized text fallback so a snapshot always has a visual artifact.
+  Failed browser captures raise SnapshotCaptureError so the scheduler can retry.
 """
 from __future__ import annotations
 
@@ -1597,21 +1597,13 @@ def _capture_artifacts_unlocked(
         return png_filename, html_filename, pw_result
 
     # When isolation is enabled, never retry browser work in the API process.
-    # A failed or timed-out worker is already evidence that this capture is
-    # unsafe for the current host; return a cheap artifact instead.
+    # A failed worker must stay a failure. A rasterized error message is not
+    # a screenshot and would poison change analysis and reset retry backoff.
     if CAPTURE_ISOLATED:
         png_path.unlink(missing_ok=True)
         html_path.unlink(missing_ok=True)
         error = (pw_result or {}).get("error", "") or "隔离截图进程不可用"
-        logger.warning("Using isolated raster fallback for %s: %s", url, error)
-        _write_raster_fallback(png_filename, url, title, text, error)
-        _write_fallback_archive(html_filename, url, title, html, text, error)
-        return png_filename, html_filename, {
-            "method": "raster_fallback",
-            "resource_guard": "isolated_worker_error",
-            "error": error,
-            "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
-        }
+        raise SnapshotCaptureError(f"浏览器截图失败：{error}")
 
     if prefetch_error:
         png_path.unlink(missing_ok=True)
@@ -1628,15 +1620,9 @@ def _capture_artifacts_unlocked(
         return png_filename, html_filename, sub_result
 
     error = (pw_result or {}).get("error", "") or (sub_result or {}).get("error", "") or "No headless browser available"
-    logger.warning("Falling back to raster snapshot for %s: %s", url, error)
-    png_filename = f"{base_name}.png"
-    _write_raster_fallback(png_filename, url, title, text, error)
-    _write_fallback_archive(html_filename, url, title, html, text, error)
-    return png_filename, html_filename, {
-        "method": "raster_fallback",
-        "error": error,
-        "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
-    }
+    png_path.unlink(missing_ok=True)
+    html_path.unlink(missing_ok=True)
+    raise SnapshotCaptureError(f"浏览器截图失败：{error}")
 
 
 def capture_artifacts(
