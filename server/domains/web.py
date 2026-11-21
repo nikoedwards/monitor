@@ -23,6 +23,7 @@ from ..snapshot import (
     analyze_change,
     capture_artifacts,
     compare_visuals,
+    SnapshotCaptureError,
     SnapshotCaptureBusy,
     text_hash,
     visual_comparison_image,
@@ -52,6 +53,15 @@ SNAPSHOT_CIRCUIT_BREAKER_AFTER = 8
 SNAPSHOT_CIRCUIT_BREAKER_MINUTES = 1440
 SNAPSHOT_CIRCUIT_PROBE_MINUTES = 60
 SHARED_CAPTURE_REUSE_MINUTES = 30
+# Retain legacy failure records on disk for diagnosis, but keep them out of
+# successful-snapshot timelines, statistics, and window-function baselines.
+_VALID_CAPTURE_SQL = """CASE
+    WHEN raw_json IS NULL OR raw_json = '' THEN 1
+    WHEN json_valid(raw_json) THEN
+        json_type(raw_json) = 'object'
+        AND COALESCE(json_extract(raw_json, '$.error'), '') = ''
+        AND COALESCE(json_extract(raw_json, '$.method'), '') != 'raster_fallback'
+    ELSE 0 END"""
 _RATE_LIMIT_ERROR_RE = re.compile(r"(?:\b429\b|too many requests|rate.?limit|local_rate_limited)", re.IGNORECASE)
 _BROWSER_FALLBACK_NETWORK_ERRORS = (
     "timed out",
@@ -63,6 +73,25 @@ _BROWSER_FALLBACK_NETWORK_ERRORS = (
     "temporary failure in name resolution",
     "name or service not known",
 )
+
+
+def _failed_capture_metadata(raw_json: str | None) -> bool:
+    """Recognize legacy error images, including ones copied by another monitor."""
+    try:
+        meta = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        return True
+    return not isinstance(meta, dict) or bool(meta.get("error")) or meta.get("method") == "raster_fallback"
+
+
+def _latest_valid_snapshot(conn: sqlite3.Connection, monitor_id: str, page_key: str):
+    for row in conn.execute(
+        "SELECT * FROM web_snapshots WHERE monitor_id = ? AND page_key = ? ORDER BY created_at DESC",
+        (monitor_id, page_key),
+    ):
+        if not _failed_capture_metadata(dict(row).get("raw_json")):
+            return row
+    return None
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -214,7 +243,7 @@ def _has_meaningful_change(snapshot: dict) -> bool:
 def monitor_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     monitor = dict(row)
     last = conn.execute(
-        "SELECT COUNT(*) AS c, MAX(snapshot_date) AS d FROM web_snapshots WHERE monitor_id = ?",
+        f"SELECT COUNT(*) AS c, MAX(snapshot_date) AS d FROM web_snapshots WHERE monitor_id = ? AND ({_VALID_CAPTURE_SQL})",
         (monitor["id"],),
     ).fetchone()
     monitor["snapshot_count"] = last["c"]
@@ -311,6 +340,8 @@ def _reuse_recent_shared_capture(
     root = SNAPSHOT_DIR.resolve()
     for candidate_row in candidates:
         candidate = dict(candidate_row)
+        if _failed_capture_metadata(candidate.get("raw_json")):
+            continue
         screenshot_source = (SNAPSHOT_DIR / Path(candidate["screenshot_path"]).name).resolve()
         archive_source = (SNAPSHOT_DIR / Path(candidate["html_path"]).name).resolve()
         if (
@@ -377,15 +408,14 @@ def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
             base_name,
             prefetch_error=prefetch_error,
         )
+        if _failed_capture_metadata(json.dumps(capture_meta)):
+            raise SnapshotCaptureError(capture_meta.get("error") or "截图引擎未生成真实网页截图")
         rendered_page = capture_meta.pop("page", {}) or {}
         page["final_url"] = rendered_page.get("final_url") or page.get("final_url") or url
         page["title"] = rendered_page.get("title") or page.get("title") or host_key(url) or url
         page["text"] = (rendered_page.get("text") or page.get("text") or "").strip()
     key = canonical_url(page.get("final_url") or url)
-    previous_row = conn.execute(
-        "SELECT * FROM web_snapshots WHERE monitor_id = ? AND page_key = ? ORDER BY created_at DESC LIMIT 1",
-        (monitor["id"], key),
-    ).fetchone()
+    previous_row = _latest_valid_snapshot(conn, monitor["id"], key)
     previous = dict(previous_row) if previous_row else None
     current = {
         "title": page.get("title"),
@@ -508,10 +538,7 @@ def check_monitor(conn: sqlite3.Connection, monitor: dict) -> dict:
         try:
             page = fetch_page(url)
             key = canonical_url(page.get("final_url") or url)
-            previous = conn.execute(
-                "SELECT * FROM web_snapshots WHERE monitor_id = ? AND page_key = ? ORDER BY created_at DESC LIMIT 1",
-                (monitor["id"], key),
-            ).fetchone()
+            previous = _latest_valid_snapshot(conn, monitor["id"], key)
             current = {
                 "title": page.get("title"),
                 "text": page.get("text"),
@@ -552,7 +579,7 @@ def _query_snapshots(
     descending: bool = True,
     limit: int = 1000,
 ) -> list[dict]:
-    source_clauses = []
+    source_clauses = [f"({_VALID_CAPTURE_SQL})"]
     source_params: list = []
     if brand_id:
         source_clauses.append("ws.brand_id = ?")
@@ -796,12 +823,15 @@ def snapshot_comparison(snapshot_id: str, region: int = 0, conn: sqlite3.Connect
     if not row:
         raise HTTPException(status_code=404, detail="快照不存在")
     current = dict(row)
+    if _failed_capture_metadata(current.get("raw_json")):
+        raise HTTPException(status_code=422, detail="截图失败记录不能用于网页变化对比")
     if not current.get("screenshot_path"):
         raise HTTPException(status_code=404, detail="当前快照没有截图")
     previous = conn.execute(
-        """
+        f"""
         SELECT * FROM web_snapshots
         WHERE monitor_id = ? AND page_key = ? AND created_at < ? AND screenshot_path IS NOT NULL
+          AND ({_VALID_CAPTURE_SQL})
         ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         (current.get("monitor_id"), current.get("page_key"), current.get("created_at")),
@@ -915,9 +945,10 @@ def analyze_snapshots(
     events = []
     for snapshot in candidates:
         previous = conn.execute(
-            """
+            f"""
             SELECT * FROM web_snapshots
             WHERE monitor_id = ? AND page_key = ? AND created_at < ?
+              AND ({_VALID_CAPTURE_SQL})
             ORDER BY created_at DESC LIMIT 1
             """,
             (snapshot["monitor_id"], canonical_url(snapshot.get("final_url") or snapshot.get("url") or ""), snapshot["created_at"]),

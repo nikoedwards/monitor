@@ -126,12 +126,14 @@ class VisualDiffTests(unittest.TestCase):
                 patch("server.snapshot._isolated_playwright_capture", return_value={"error": "worker timeout"}),
                 patch("server.snapshot._subprocess_capture") as subprocess_capture,
             ):
-                screenshot, archive, meta = capture_artifacts(
-                    "https://example.com", "Example", "text", "<p>text</p>", "isolated-error",
-                )
-            self.assertEqual(meta["resource_guard"], "isolated_worker_error")
-            self.assertTrue((root / screenshot).is_file())
-            self.assertTrue((root / archive).is_file())
+                # A killed worker may have left partially written artifacts.
+                (root / "isolated-error.png").write_bytes(b"partial")
+                (root / "isolated-error.html").write_text("partial")
+                with self.assertRaisesRegex(SnapshotCaptureError, "worker timeout"):
+                    capture_artifacts(
+                        "https://example.com", "Example", "text", "<p>text</p>", "isolated-error",
+                    )
+            self.assertEqual(list(root.iterdir()), [])
             subprocess_capture.assert_not_called()
 
     def test_chunked_screenshot_stitches_a_long_page(self):
@@ -185,26 +187,20 @@ class VisualDiffTests(unittest.TestCase):
             self.assertGreater(result["score"], 0.1)
             self.assertTrue(result["regions"])
 
-    def test_capture_fallback_is_raster_png(self):
+    def test_all_browser_failures_raise_instead_of_generating_error_image(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with (
                 patch("server.snapshot.SNAPSHOT_DIR", root),
+                patch("server.snapshot.CAPTURE_ISOLATED", False),
                 patch("server.snapshot._playwright_capture", return_value=None),
                 patch("server.snapshot._subprocess_capture", return_value={"error": "browser unavailable"}),
             ):
-                screenshot, _archive, meta = capture_artifacts(
-                    "https://example.com",
-                    "示例页面",
-                    "中文内容\nReadable page text",
-                    "",
-                    "fallback",
-                )
-            self.assertEqual(screenshot, "fallback.png")
-            self.assertEqual(meta["method"], "raster_fallback")
-            with Image.open(root / screenshot) as image:
-                self.assertEqual(image.format, "PNG")
-                self.assertEqual(image.size, (1440, 1200))
+                with self.assertRaisesRegex(SnapshotCaptureError, "browser unavailable"):
+                    capture_artifacts(
+                        "https://example.com", "示例页面", "中文内容", "", "fallback",
+                    )
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_legacy_svg_fallbacks_are_migrated_to_png(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -273,16 +269,17 @@ class PeriodStatsTests(unittest.TestCase):
                   page_key TEXT,
                   created_at TEXT,
                   screenshot_path TEXT,
-                  visual_regions_json TEXT
+                  visual_regions_json TEXT,
+                  raw_json TEXT DEFAULT '{}'
                 )
                 """
             )
             conn.execute(
-                "INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO web_snapshots (id, monitor_id, page_key, created_at, screenshot_path, visual_regions_json) VALUES (?, ?, ?, ?, ?, ?)",
                 ("before", "monitor-1", "page-1", "2026-08-01T00:00:00+00:00", str(before), "[]"),
             )
             conn.execute(
-                "INSERT INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO web_snapshots (id, monitor_id, page_key, created_at, screenshot_path, visual_regions_json) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     "after",
                     "monitor-1",
@@ -345,6 +342,20 @@ class PeriodStatsTests(unittest.TestCase):
         self.assertEqual(latest["change_score"], 0.0)
         self.assertNotIn(phrase, [change.get("text") for change in latest["changes"]])
         self.assertEqual(latest["comparison_url"], "/api/web/snapshots/after/comparison")
+
+        # A legacy failure in between must neither appear as a snapshot nor
+        # become the preceding text baseline, even when copied to a monitor.
+        for method in ("raster_fallback", "shared_recent_capture"):
+            failed = list(rows[0])
+            failed[0] = "failed"
+            failed[9] = "Browser launch failed"
+            failed[13] = json.dumps({"method": method, "error": "launch timeout"})
+            failed[14] = "2026-08-01T12:00:00+00:00"
+            conn.execute("INSERT OR REPLACE INTO web_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", failed)
+            snapshots = _query_snapshots(conn, "2026-08-01", "2026-08-02", brand_id="brand-1")
+            self.assertEqual([item["id"] for item in snapshots], ["after", "before"])
+            self.assertEqual(snapshots[0]["previous_snapshot_id"], "before")
+            self.assertEqual(snapshots[0]["change_score"], 0)
         conn.close()
 
 
@@ -683,6 +694,44 @@ class ArchiveFallbackTests(unittest.TestCase):
 
 
 class SnapshotSchedulingTests(unittest.TestCase):
+    def test_error_images_are_neither_reused_nor_used_as_baseline(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""CREATE TABLE web_snapshots (
+            id TEXT, monitor_id TEXT, page_key TEXT, screenshot_path TEXT,
+            html_path TEXT, raw_json TEXT, created_at TEXT)""")
+        now = datetime.now(timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "error.png").write_bytes(b"error-image")
+            (root / "error.html").write_text("error archive")
+            for metadata in (
+                {"method": "raster_fallback"},
+                {"method": "shared_recent_capture", "error": "launch timeout"},
+            ):
+                with self.subTest(metadata=metadata):
+                    conn.execute("DELETE FROM web_snapshots")
+                    conn.execute("INSERT INTO web_snapshots VALUES (?,?,?,?,?,?,?)", (
+                        "failed", "other-monitor", "https://example.com", "error.png",
+                        "error.html", json.dumps(metadata), now,
+                    ))
+                    with patch("server.domains.web.SNAPSHOT_DIR", root):
+                        self.assertIsNone(web_domain._reuse_recent_shared_capture(
+                            conn, {"id": "current-monitor"}, "https://example.com/", "copy",
+                        ))
+                    self.assertIsNone(web_domain._latest_valid_snapshot(
+                        conn, "other-monitor", "https://example.com",
+                    ))
+                    conn.execute("INSERT INTO web_snapshots VALUES (?,?,?,?,?,?,?)", (
+                        "valid", "other-monitor", "https://example.com", "valid.png",
+                        "valid.html", '{"method":"playwright"}', "2020-01-01",
+                    ))
+                    self.assertEqual(web_domain._latest_valid_snapshot(
+                        conn, "other-monitor", "https://example.com",
+                    )["id"], "valid")
+            self.assertFalse((root / "copy.png").exists())
+        conn.close()
+
     def test_browser_fallback_only_handles_transient_or_blocking_http_errors(self):
         self.assertTrue(_should_use_browser_after_fetch_error("HTTP Error 429: Too Many Requests"))
         self.assertTrue(_should_use_browser_after_fetch_error("HTTP Error 503: Service Unavailable"))

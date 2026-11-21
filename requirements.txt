@@ -7,7 +7,8 @@ yt-dlp>=2026.7.4,<2027
 # Optional but recommended for reliable full-page screenshots:
 #   pip install playwright && python -m playwright install chromium
 # Without Playwright the snapshot engine falls back to an installed
-# Edge/Chrome browser, then to a rasterized text snapshot.
+# Edge/Chrome browser. Browser failures are reported and retried; they are
+# never stored as rasterized text snapshots.
 #
 # Hiring monitor (招聘监控) — Boss 直聘 / LinkedIn scraping requires Playwright
 # to render logged-in, JS-heavy pages with a session cookie:
