@@ -15,9 +15,9 @@ from .domains.insights import _overview_payload
 
 _MAX_HISTORY_DAYS = 3650
 try:
-    STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_STRATEGIC_SIGNALS_TIMEOUT_SECONDS", "10")))
+    STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_STRATEGIC_SIGNALS_TIMEOUT_SECONDS", "180")))
 except (TypeError, ValueError):
-    STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = 10.0
+    STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = 180.0
 _STRATEGIC_SIGNALS_VERSION = "strategic-signals-v2"
 _CACHE_LOCK = threading.Lock()
 _IN_FLIGHT: dict[str, threading.Lock] = {}
@@ -182,7 +182,7 @@ def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: st
         "window": {"scope": scope, "start": start, "end": end},
         "headline": {
             "posture": "watch",
-            "summary": "跨板块战略研判正在准备中，当前先展示确定性数据覆盖；点击刷新后生成完整证据链。",
+            "summary": "正在整理跨板块证据并生成战略研判，完成后将自动展示结果。",
             "confidence": "low",
         },
         "signals": [],
@@ -194,7 +194,7 @@ def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: st
             "evidence_chain": [],
             "method": {"scope": scope, "fast_path": True, "ready_domains": ready},
         },
-        "caveats": ["冷请求使用轻量确定性覆盖统计；完整跨板块证据链需点击刷新生成。"],
+        "caveats": ["证据整理期间先展示数据覆盖。"],
         "cached": False,
         "refresh": False,
     }
@@ -241,14 +241,19 @@ def build_strategic_signals(
             packet = build_overview_evidence(conn, brand_id, payload)
             result = None
             model_succeeded = False
+            model_error = "尚未配置大模型，请先在设置中配置。"
             if ai.is_configured(conn):
                 try:
                     result = ai.summarize_overview(conn, packet, timeout=STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS)
-                    model_succeeded = isinstance(result, dict)
-                except ai.LlmError:
+                    model_succeeded = isinstance(result, dict) and bool(result.get("summary"))
+                    if not model_succeeded:
+                        result = None
+                        model_error = "大模型未返回有效的研判结果。"
+                except (ai.LlmError, TimeoutError, OSError) as exc:
+                    model_error = str(exc)[:200]
                     result = None
             if not isinstance(result, dict):
-                result = {"summary": "当前证据尚不足以形成完整战略研判。", "deep_insights": [], "priority_alerts": [], "caveats": ["大模型未配置或暂时不可用。"]}
+                result = {"summary": "语义研判暂未生成，以下展示已采集证据与板块观察，可点击刷新重试。", "deep_insights": [], "priority_alerts": [], "caveats": [model_error]}
 
             raw_signals = result.get("deep_insights") or result.get("insights") or []
             signals = [item for item in raw_signals if isinstance(item, dict)][:3]
@@ -302,6 +307,7 @@ def build_strategic_signals(
                 },
                 "caveats": list(dict.fromkeys((result.get("caveats") if isinstance(result.get("caveats"), list) else []) + packet.get("caveats", []))),
                 "cached": False,
+                "analysis_status": "complete" if model_succeeded else "fallback",
                 "refresh": refresh,
             }
             if model_succeeded:

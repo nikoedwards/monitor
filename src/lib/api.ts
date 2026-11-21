@@ -414,6 +414,8 @@ export interface HiringStrategicSignal {
 }
 
 export interface HiringStrategicSignals {
+  generation?: { status: "running" | "completed" | "failed"; error?: string };
+  analysis_status?: "complete" | "fallback";
   schema_version: string;
   brand: string;
   window: { scope: string; start: string; end: string };

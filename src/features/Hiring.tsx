@@ -215,7 +215,7 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
         </Card>
       </div>
 
-      <BusinessAnalysisCard brandId={brandId} range={range} platform={platform} status={status} />
+      <BusinessAnalysisCard key={JSON.stringify([brandId, range, platform, status])} brandId={brandId} range={range} platform={platform} status={status} />
       <HiringStrategicSignals brandId={brandId} />
 
       <Card>
@@ -264,19 +264,10 @@ function JobsTab({ brandId, platform, setPlatform, summary, loading, range }: { 
 function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: string; range: any; platform: string; status: string }) {
   const { data: settings } = useSettings();
   const analyze = useAnalyzeJd(brandId, range, { platform, status });
-  const [manualResult, setManualResult] = useState<any>(null);
-  const [error, setError] = useState("");
-
-  const run = async () => {
-    setError("");
-    setManualResult(null);
-    try {
-      const res = await analyze.generate.mutateAsync({ refresh: !!(manualResult || analyze.data) });
-      setManualResult(res);
-    } catch (e: any) {
-      setError(e?.message || "分析失败");
-    }
-  };
+  const result = analyze.data;
+  const generating = analyze.isGenerating;
+  const error = analyze.generate.error?.message || analyze.error?.message || result?.generation?.error;
+  const run = () => analyze.generate.mutate({ refresh: true });
 
   return (
     <Card>
@@ -285,28 +276,28 @@ function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: s
         subtitle="用大模型从近期 JD 反推对方内部在推进的业务与团队重点"
         action={
           <div className="flex flex-col items-end">
-            <Button onClick={run} disabled={analyze.generate.isPending || analyze.isLoading || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
-              {analyze.generate.isPending ? "分析中…" : "生成分析"}
+            <Button onClick={run} disabled={generating || analyze.isLoading || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
+              {generating ? "分析中…" : "生成分析"}
             </Button>
-            <AsyncProgress active={analyze.generate.isPending} label="正在分析岗位数据" />
+            <AsyncProgress active={generating} label="正在后台分析岗位数据，完成后自动更新" />
           </div>
         }
       />
       {!settings?.configured && <p className="text-[13px]" style={{ color: "var(--mute)" }}>未配置大模型 Token，请在右上角设置中填写后再生成。</p>}
       {error && <p className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
-      {(manualResult || analyze.data) && (
+      {result?.summary && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>
-          <p style={{ color: "var(--ink)" }}>{(manualResult || analyze.data).summary}</p>
-          {(manualResult || analyze.data).analysis_status === "fallback" && (
+          <p style={{ color: "var(--ink)" }}>{result.summary}</p>
+          {result.analysis_status === "fallback" && (
             <p className="text-[12px]" style={{ color: "var(--warning)" }}>
               大模型暂时不可用，当前展示基于岗位数量和部门的确定性统计；稍后可重新生成语义分析。
             </p>
           )}
-          {!!(manualResult || analyze.data).business_directions?.length && (
+          {!!result.business_directions?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>推导业务方向</div>
               <div className="space-y-1.5">
-                {(manualResult || analyze.data).business_directions.map((d: any, i: number) => (
+                {result.business_directions.map((d: any, i: number) => (
                   <div key={i} className="p-2 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
                     <div className="flex items-center gap-2">
                       <Badge tone="accent">{d.direction}</Badge>
@@ -318,17 +309,17 @@ function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: s
               </div>
             </div>
           )}
-          {!!(manualResult || analyze.data).strategic_signals?.length && (
+          {!!result.strategic_signals?.length && (
             <div>
               <div className="font-medium mb-1" style={{ color: "var(--ink)" }}>战略信号</div>
               <ul className="list-disc pl-5 space-y-0.5">
-                {(manualResult || analyze.data).strategic_signals.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                {result.strategic_signals.map((s: string, i: number) => <li key={i}>{s}</li>)}
               </ul>
             </div>
           )}
-          {!!(manualResult || analyze.data).risks?.length && (
+          {!!result.risks?.length && (
             <div className="text-[12px]" style={{ color: "var(--mute)" }}>
-              解读说明：{(manualResult || analyze.data).risks.join("；")}
+              解读说明：{result.risks.join("；")}
             </div>
           )}
         </div>
