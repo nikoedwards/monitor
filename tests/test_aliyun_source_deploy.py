@@ -209,6 +209,9 @@ class SourceDeploymentTests(unittest.TestCase):
             {"DOCKER_BUILDKIT": "1"},
         )
         self.assertTrue(build_call.kwargs["stream_output"])
+        self.assertNotIn("BUILDKIT_INLINE_CACHE=1", build_call.args[0])
+        self.assertNotIn("--cache-from", build_call.args[0])
+        self.assertIn(f"BASE_IMAGE={self.deployer.stable_image}", build_call.args[0])
 
     def test_run_timeout_terminates_the_command_process_group(self):
         with self.assertRaises(module.CommandTimedOut):
