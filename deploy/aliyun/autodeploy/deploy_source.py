@@ -208,8 +208,6 @@ class SourceDeployer:
         command = [
             "docker",
             "build",
-            "--build-arg",
-            "BUILDKIT_INLINE_CACHE=1",
             "--label",
             f"org.opencontainers.image.revision={self.revision}",
             "--label",
@@ -228,9 +226,10 @@ class SourceDeployer:
             # Debian runtime packages. Reusing it avoids a slow CDN download
             # on every release; the Dockerfile falls back to a full install if
             # the cached runtime is incomplete.
+            # Reuse installed dependencies as the base, without recursively
+            # importing/exporting its inline cache. Cache metadata export can
+            # stall for minutes on the small production host.
             command += [
-                "--cache-from",
-                self.stable_image,
                 "--build-arg",
                 f"BASE_IMAGE={self.stable_image}",
                 "--build-arg",
