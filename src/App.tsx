@@ -12,7 +12,8 @@ import Web from "./features/Web";
 import Sources from "./features/Sources";
 import Compare from "./features/Compare";
 import Brands from "./features/Brands";
-import MarketShare, { MarketShareDetail } from "./features/MarketShare";
+import MarketShare from "./features/MarketShare";
+import { MarketShareDetail } from "./features/MarketShareObservations";
 import McpCli from "./features/McpCli";
 
 function RootRedirect() {

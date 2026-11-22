@@ -7,6 +7,9 @@ import {
   type CommunityPostSummary,
   type Link,
   type MarketObservationsResponse,
+  type MarketShareModelKey,
+  type MarketShareResponse,
+  type MarketShareTrendResponse,
   type Product,
   type RecordItem,
   type SalesMetric,
@@ -166,6 +169,24 @@ export function useCompare(range?: TimeRange) {
   });
 }
 
+export function useMarketShare(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["market-share", brandIds, model, country, rp],
+    queryFn: () => api.get<MarketShareResponse>(`/api/market-share${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
+    enabled: brandIds.length >= 2,
+  });
+}
+
+export function useMarketShareTrend(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
+  const rp = rangeParams(range);
+  return useQuery({
+    queryKey: ["market-share-trend", brandIds, model, country, rp],
+    queryFn: () => api.get<MarketShareTrendResponse>(`/api/market-share/trend${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
+    enabled: brandIds.length >= 2,
+  });
+}
+
 export function useMarketObservations(brandIds: string[], country: string, range: TimeRange, includeHistory = false) {
   const rp = rangeParams(range);
   const params = { brand_ids: brandIds.join(","), country, include_history: includeHistory, ...rp };
@@ -187,6 +208,8 @@ export function useRefreshMarketShareData() {
       return result;
     },
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market-share"] });
+      qc.invalidateQueries({ queryKey: ["market-share-trend"] });
       qc.invalidateQueries({ queryKey: ["records"] });
       qc.invalidateQueries({ queryKey: ["sources"] });
     },

@@ -1,357 +1,445 @@
-import { useState, type ReactNode } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, ChevronRight, ExternalLink, Plus, RefreshCw } from "lucide-react";
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { AlertTriangle, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { Button, Card, EmptyState, Modal, SectionTitle, Select, Spinner } from "../components/ui";
-import type { AppMetric, AppObservation, Brand, BrandMetric, BrandObservations } from "../lib/api";
-import { useBrands, useMarketObservations, useRefreshMarketShareData } from "../lib/hooks";
+import { MultiLineChart } from "../components/charts";
+import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
+import { fmtNum } from "../lib/format";
+import { useBrands, useMarketShare, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
+import { BrandObservationsCard } from "./MarketShareObservations";
 
 const STORAGE_KEY = "monitor.marketShare.brandIds";
-const MAX_BRANDS = 12;
-const BRAND_METRICS: ReadonlyArray<{ key: BrandMetric; label: string }> = [
-  { key: "app_store_ratings", label: "App Store 评分数" },
-  { key: "google_play_ratings", label: "Google Play 全球评分数" },
-  { key: "product_reviews", label: "商品评论量" },
-  { key: "mentions", label: "公开提及" },
-  { key: "comments", label: "评论 / 回复" },
-  { key: "engagement", label: "互动" },
-  { key: "views", label: "播放 / 浏览" },
-];
-const APP_METRICS: ReadonlyArray<{ key: AppMetric; label: string }> = [
-  { key: "rating_count", label: "累计评分数" },
-  { key: "rating", label: "平均评分" },
-  { key: "downloads", label: "下载量" },
-  { key: "installs", label: "安装量" },
-];
-const AXIS_STYLE = { fontSize: 11, fill: "var(--mute)" };
-const DAY_MS = 86_400_000;
-const numberFormat = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 5 });
-const regionNames = new Intl.DisplayNames(["zh-CN"], { type: "region", fallback: "none" });
+const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280", "#ef4444", "#14b8a6"];
+const SIGNALS = [
+  { key: "app", label: "真实下载量" },
+  { key: "conversation", label: "应用商店评分数" },
+] as const;
 
-function countryLabel(code: string) {
-  const name = /^[a-z]{2}$/i.test(code) ? regionNames.of(code) : undefined;
-  return name ? `${name}（${code}）` : code;
+const COUNTRY_LABELS: Record<string, string> = {
+  AU: "澳大利亚", BR: "巴西", CA: "加拿大", CN: "中国", DE: "德国", ES: "西班牙",
+  FR: "法国", GB: "英国", HK: "中国香港", ID: "印度尼西亚", IN: "印度", IT: "意大利",
+  JP: "日本", KR: "韩国", MX: "墨西哥", NL: "荷兰", SG: "新加坡", TH: "泰国",
+  TW: "中国台湾", US: "美国", VN: "越南",
+};
+
+function countryLabel(code: string): string {
+  return COUNTRY_LABELS[code] ? `${COUNTRY_LABELS[code]}（${code}）` : code;
 }
 
-function numberText(value?: number | null) {
-  return value == null ? "—" : numberFormat.format(value);
-}
-
-function appMetricText(app: AppObservation, key: AppMetric) {
-  const value = app[key];
-  return key === "rating" && value != null ? `${numberText(value)} / 5` : numberText(value);
-}
-
-function appScope(app: AppObservation) {
-  if (app.platform === "google_play") return "Google Play · 全球";
-  return `App Store · ${app.scope ? countryLabel(app.scope) : "地区未记录"}`;
-}
-
-function savedBrands(): string[] {
+function initialSavedBrands(): string[] {
   try {
-    const ids: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-    return Array.isArray(ids) ? [...new Set(ids.filter((id): id is string => typeof id === "string"))] : [];
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch {
     return [];
   }
 }
 
-function ObservationTable({ headers, rows }: {
-  headers: string[];
-  rows: Array<{ key: string; values: ReactNode[]; selected?: boolean }>;
-}) {
-  return (
-    <div className="overflow-auto max-h-[28rem]">
-      <table className="w-full text-[13px] tabular-nums">
-        <thead className="sticky top-0 z-10" style={{ background: "var(--panel)", color: "var(--mute)" }}>
-          <tr>
-            {headers.map((heading, index) => (
-              <th key={heading} scope="col" className={`whitespace-nowrap font-medium px-3 py-2.5 ${index === 0 ? "text-left" : "text-right"}`} style={{ borderBottom: "1px solid var(--hairline)" }}>
-                {heading}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody style={{ color: "var(--body)" }}>
-          {rows.map(({ key, values, selected }) => (
-            <tr key={key} style={{ borderBottom: "1px solid var(--hairline)", background: selected ? "var(--bg-soft-2)" : undefined }}>
-              {values.map((value, index) => (
-                <td key={headers[index]} className={`px-3 py-3 ${index === 0 ? "text-left" : "text-right whitespace-nowrap"}`}>{value}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ObservationTrend({ dates, metrics, hint }: {
-  dates: string[];
-  metrics: Array<{ key: string; label: string; values: Array<number | null | undefined> }>;
-  hint: string;
-}) {
-  const [metricKey, setMetricKey] = useState("");
-  const available = metrics.filter((metric) => metric.values.some((value) => value != null));
-  const metric = available.find((item) => item.key === metricKey) ?? available[0];
-  if (!metric) return null;
-  const observations = dates.map((date, index) => ({
-    time: Date.parse(date),
-    value: metric.values[index] ?? null,
-  })).reverse();
-  const points = observations.flatMap((point, index) => {
-    const lastDay = observations[index - 1]?.time;
-    return point.time - lastDay > DAY_MS ? [{ time: lastDay + DAY_MS, value: null }, point] : [point];
-  });
-  const dateLabel = (value: number) => new Date(value).toISOString().slice(0, 10);
-  return (
-    <Card>
-      <SectionTitle
-        title="每日趋势"
-        subtitle={hint}
-        action={
-          <Select value={metric.key} onChange={(event) => setMetricKey(event.target.value)} aria-label="趋势指标">
-            {available.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
-          </Select>
-        }
-      />
-      <ResponsiveContainer width="100%" height={240}>
-        <LineChart data={points} margin={{ top: 12, right: 16, left: 18, bottom: 4 }}>
-          <CartesianGrid stroke="var(--hairline)" strokeDasharray="3 3" vertical={false} />
-          <XAxis type="number" dataKey="time" scale="utc" domain={["dataMin", "dataMax"]} tickFormatter={(value) => dateLabel(value).slice(5)} tick={AXIS_STYLE} />
-          <YAxis width={68} tickFormatter={numberText} tick={AXIS_STYLE} />
-          <Tooltip labelFormatter={(value) => typeof value === "number" ? dateLabel(value) : value} formatter={(value) => numberText(Number(value))} />
-          <Line dataKey="value" name={metric.label} stroke="var(--accent)" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    </Card>
-  );
-}
-
-function RangeFilters({ countries }: { countries: string[] }) {
-  const [params, setParams] = useSearchParams();
-  const country = params.get("country") || "all";
-  const options = [...new Set([...countries, ...(country !== "all" ? [country] : [])])].sort();
-  return (
-    <div className="flex flex-wrap items-center justify-end gap-2">
-      <Select value={country} aria-label="国家" onChange={(event) => {
-        const next = new URLSearchParams(params);
-        if (event.target.value === "all") next.delete("country");
-        else next.set("country", event.target.value);
-        setParams(next, { replace: true });
-      }}>
-        <option value="all">全部地区</option>
-        {options.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
-      </Select>
-      <TimeRangePicker />
-    </div>
-  );
-}
-
-function BrandPicker({ brands, selected, onApply }: { brands: Brand[]; selected: string[]; onApply: (ids: string[]) => void }) {
-  const [draft, setDraft] = useState<string[]>(selected);
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <Button size="sm" onClick={() => { setDraft(selected); setOpen(true); }}><Plus size={14} /> 选择品牌</Button>
-      <Modal open={open} onClose={() => setOpen(false)} title="选择分析品牌" width={480}>
-        <div className="space-y-2 max-h-[52vh] overflow-y-auto pr-1">
-          {brands.map((brand) => {
-            const checked = draft.includes(brand.id);
-            return (
-              <label key={brand.id} className="flex items-center gap-3 p-3 rounded-md" style={{ border: "1px solid var(--hairline)", background: checked ? "var(--bg-soft-2)" : undefined }}>
-                <input type="checkbox" checked={checked} disabled={!checked && draft.length >= MAX_BRANDS} onChange={() => {
-                  setDraft((ids) => checked ? ids.filter((id) => id !== brand.id) : [...ids, brand.id]);
-                }} />
-                {brand.name}
-              </label>
-            );
-          })}
-        </div>
-        <div className="flex justify-end items-center gap-2 mt-4">
-          <span className="text-[12px]" style={{ color: "var(--mute)" }}>已选 {draft.length} / {MAX_BRANDS}</span>
-          <Button onClick={() => setOpen(false)}>取消</Button>
-          <Button variant="primary" disabled={!draft.length} onClick={() => { onApply(draft); setOpen(false); }}>应用</Button>
-        </div>
-      </Modal>
-    </>
-  );
+function confidenceTone(label?: string): "positive" | "warning" | "negative" {
+  if (label === "高") return "positive";
+  if (label === "中") return "warning";
+  return "negative";
 }
 
 export default function MarketShare() {
   const { brandId } = useParams();
-  const [params] = useSearchParams();
+  const navigate = useNavigate();
   const [range] = useTimeRange();
-  const [preferred, setPreferred] = useState(savedBrands);
-  const { data: brands = [], isLoading, isError } = useBrands();
-  const valid = preferred.filter((id) => brands.some((brand) => brand.id === id)).slice(0, MAX_BRANDS);
-  const defaults = brands.filter((brand) => brand.id === brandId || brand.is_primary || brand.is_competitor);
-  const selected = valid.length ? valid : [...new Set([...defaults, ...brands].map((brand) => brand.id))].slice(0, 6);
-  const country = params.get("country") || "all";
-  const query = useMarketObservations(selected, country, range);
-  const refresh = useRefreshMarketShareData();
-  const base = `/brand/${brandId}/market-share`;
-  if (isLoading) return <Spinner />;
-  if (isError) return <EmptyState title="品牌加载失败" />;
-  if (!brands.length) return <EmptyState title="暂无品牌" action={<Link to="/brands">管理品牌</Link>} />;
-
-  return (
-    <div className="space-y-5">
-      <SectionTitle title="市占分析" action={<RangeFilters countries={query.data?.countries ?? []} />} />
-      <Card>
-        <SectionTitle
-          title="品牌原始数据"
-          subtitle="评分数和商品评论量取期间各 App 商店口径与商品链接的最新快照。传播指标按所选期间汇总。"
-          hint="App Store 按国家或地区汇总，Google Play 全球评分在全部地区下单列。横线表示所选期间缺少对应记录。"
-          action={
-            <div className="flex flex-wrap justify-end gap-2 shrink-0">
-              <BrandPicker brands={brands} selected={selected} onApply={(ids) => {
-                setPreferred(ids);
-                try { localStorage.setItem(STORAGE_KEY, JSON.stringify(ids)); } catch { /* Keep the selection in memory. */ }
-              }} />
-              <Button size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate(selected)}>
-                <RefreshCw size={14} className={refresh.isPending ? "animate-spin" : ""} />
-                {refresh.isPending ? "采集中" : "刷新 App 数据"}
-              </Button>
-            </div>
-          }
-        />
-        {refresh.isError && <p role="alert" className="mb-3 text-[13px]" style={{ color: "var(--danger)" }}>App 数据获取失败，{refresh.error.message}</p>}
-        {query.isLoading && <Spinner />}
-        {query.isError && <EmptyState title="品牌数据加载失败" hint={query.error.message} />}
-        {query.data && <ObservationTable
-          headers={["品牌", ...BRAND_METRICS.map(({ label }) => label)]}
-          rows={query.data.brands.map((brand) => ({
-            key: brand.brand_id,
-            values: [
-              <Link to={{ pathname: `${base}/brands/${encodeURIComponent(brand.brand_id)}`, search: params.toString() }} className="inline-flex items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: "var(--accent)" }}>
-                {brand.name} <ChevronRight size={14} />
-              </Link>,
-              ...BRAND_METRICS.map(({ key }) => numberText(brand.metrics[key])),
-            ],
-          }))}
-        />}
-      </Card>
-    </div>
-  );
-}
-
-export function MarketShareDetail({ view }: { view: "brand" | "apps" }) {
-  const { brandId, detailBrandId } = useParams();
+  const { data: brands = [], isLoading: brandsLoading } = useBrands();
+  const [selected, setSelected] = useState<string[]>(initialSavedBrands);
+  const [draft, setDraft] = useState<string[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [params, setParams] = useSearchParams();
-  const [range] = useTimeRange();
-  const { data: brands = [], isLoading: brandsLoading, isError: brandsError } = useBrands();
   const country = params.get("country") || "all";
-  const requestedBrand = params.get("brand") || brandId;
-  const activeBrand = view === "brand" ? detailBrandId : brands.find((brand) => brand.id === requestedBrand)?.id ?? brands[0]?.id;
-  const query = useMarketObservations(activeBrand ? [activeBrand] : [], country, range, true);
-  const brand = query.data?.brands[0];
-  const base = `/brand/${brandId}/market-share`;
-  const filter = country === "all" ? "" : new URLSearchParams({ country }).toString();
-  const appFilter = new URLSearchParams(filter);
-  if (activeBrand) appFilter.set("brand", activeBrand);
-  const daily = brand?.daily ?? [];
+  const setCountry = (code: string) => {
+    const next = new URLSearchParams(params);
+    if (code === "all") next.delete("country");
+    else next.set("country", code);
+    setParams(next, { replace: true });
+  };
+  const [trendFocus, setTrendFocus] = useState("all");
+  const autoRefreshKeys = useRef(new Set<string>());
+  const refreshAppData = useRefreshMarketShareData();
+
+  useEffect(() => {
+    if (!brands.length) return;
+    const validIds = new Set(brands.map((brand) => brand.id));
+    setSelected((current) => {
+      const valid = current.filter((id) => validIds.has(id));
+      if (valid.length >= 2) return valid;
+      const preferred = brands
+        .filter((brand) => brand.id === brandId || brand.is_primary || brand.is_competitor)
+        .map((brand) => brand.id);
+      return Array.from(new Set([...preferred, ...brands.map((brand) => brand.id)])).slice(0, Math.min(6, brands.length));
+    });
+  }, [brands, brandId]);
+
+  useEffect(() => {
+    if (selected.length) localStorage.setItem(STORAGE_KEY, JSON.stringify(selected));
+  }, [selected]);
+
+  const selectedBrands = useMemo(
+    () => selected.map((id) => brands.find((brand) => brand.id === id)).filter(Boolean),
+    [brands, selected],
+  );
+  const query = useMarketShare(selected, "balanced", country, range);
+  const trendQuery = useMarketShareTrend(selected, "balanced", country, range);
+  const result = query.data;
+  const selectedKey = useMemo(() => [...selected].sort().join(","), [selected]);
+  const appDataMissing = Boolean(result?.brands.some(
+    (row) => row.raw.app_download_basis === "unavailable",
+  ));
+
+  useEffect(() => {
+    if (!appDataMissing || selected.length < 2 || refreshAppData.isPending || autoRefreshKeys.current.has(selectedKey)) return;
+    autoRefreshKeys.current.add(selectedKey);
+    refreshAppData.mutate(selected);
+  }, [appDataMissing, refreshAppData, selected, selectedKey]);
+
+  useEffect(() => {
+    if (trendFocus !== "all" && !selected.includes(trendFocus)) setTrendFocus("all");
+  }, [selected, trendFocus]);
+
+  const countryOptions = useMemo(
+    () => Array.from(new Set([...(result?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
+    [result?.countries, country],
+  );
+  const leader = result?.brands.find((row) => row.share > 0);
+  const appRatingCount = result?.brands.reduce((sum, row) => sum + row.raw.app_reviews, 0) || 0;
+  const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0).length : 0;
+  const trendData = useMemo(
+    () => (trendQuery.data?.points || []).map((point) => ({ date: point.date, ...point.shares })),
+    [trendQuery.data?.points],
+  );
+  const trendKeys = useMemo(
+    () => selectedBrands
+      .map((brand, index) => ({ brand, color: COLORS[index % COLORS.length] }))
+      .filter(({ brand }) => brand && (trendFocus === "all" || brand.id === trendFocus))
+      .map(({ brand, color }) => ({ key: brand!.id, name: brand!.name, color })),
+    [selectedBrands, trendFocus],
+  );
+  const trendSummary = useMemo(
+    () => (trendQuery.data?.summary || []).filter((row) => trendFocus === "all" || row.brand_id === trendFocus),
+    [trendFocus, trendQuery.data?.summary],
+  );
+
+  if (brandsLoading) return <Spinner />;
+  if (brands.length < 2) {
+    return (
+      <EmptyState
+        title="至少需要 2 个已配置品牌"
+        hint="市占分析只从品牌管理中的品牌选择，请先补充自家品牌和竞品。"
+        action={<Button variant="primary" onClick={() => navigate("/brands")}>去品牌管理</Button>}
+      />
+    );
+  }
 
   return (
-    <div className="space-y-5">
-      <Link to={{ pathname: base, search: filter }} className="inline-flex items-center gap-1.5 text-[13px] hover:underline" style={{ color: "var(--accent)" }}>
-        <ArrowLeft size={14} /> 品牌原始数据
-      </Link>
+    <div className="space-y-6">
       <SectionTitle
-        title={view === "brand" ? (brand ? `${brand.name} · 品牌详情` : "品牌详情") : "App 明细"}
-        action={<RangeFilters countries={query.data?.countries ?? []} />}
+        title="市占分析"
+        subtitle="按国家使用 应用商店累计评分据，并结合下载量估算计算相对份额"
+        hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
+        action={
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <Select value={country} onChange={(event) => setCountry(event.target.value)} aria-label="国家">
+              <option value="all">全部国家</option>
+              {countryOptions.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
+            </Select>
+            <TimeRangePicker />
+          </div>
+        }
       />
-      {view === "apps" && brands.length > 0 && (
-        <Select aria-label="品牌" value={activeBrand} onChange={(event) => {
-          const next = new URLSearchParams(params);
-          next.set("brand", event.target.value);
-          setParams(next);
-        }}>
-          {brands.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </Select>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] uppercase tracking-wide mr-1" style={{ color: "var(--mute)" }}>分析品牌</span>
+        {selectedBrands.map((brand) => brand && (
+          <span key={brand.id} className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[13px]" style={{ background: "var(--bg-soft-2)", color: "var(--ink)", border: "1px solid var(--hairline)" }}>
+            {brand.name}
+            {brand.is_primary ? <Badge tone="positive">自家</Badge> : brand.is_competitor ? <Badge tone="warning">竞品</Badge> : null}
+            {selected.length > 2 && (
+              <button onClick={() => setSelected((ids) => ids.filter((id) => id !== brand.id))} title="移除" className="cursor-pointer" style={{ color: "var(--mute)" }}>
+                <X size={13} />
+              </button>
+            )}
+          </span>
+        ))}
+        <Button
+          size="sm"
+          onClick={() => {
+            setDraft(selected);
+            setPickerOpen(true);
+          }}
+        >
+          <Plus size={14} /> 添加分析品牌
+        </Button>
+        <Button
+          size="sm"
+          disabled={selected.length < 2 || refreshAppData.isPending}
+          onClick={() => refreshAppData.mutate(selected)}
+        >
+          <RefreshCw size={14} className={refreshAppData.isPending ? "animate-spin" : ""} />
+          {refreshAppData.isPending ? "正在获取 App 数据" : "刷新 App 数据"}
+        </Button>
+      </div>
+
+      {query.isLoading && <Spinner />}
+      {refreshAppData.isError && (
+        <Card>
+          <div className="text-[13px]" style={{ color: "var(--danger)" }}>
+            App 数据获取失败：{refreshAppData.error?.message || "请稍后重试"}
+          </div>
+        </Card>
       )}
-      {(brandsLoading || query.isLoading) && <Spinner />}
-      {(brandsError || query.isError) && <EmptyState title="明细加载失败" hint={query.error?.message} />}
-      {view === "apps" && !brandsLoading && !brandsError && !activeBrand && <EmptyState title="暂无品牌" />}
-      {view === "apps" && brand && <AppObservations key={brand.brand_id} apps={brand.apps ?? []} />}
-      {view === "brand" && brand && (
+      {query.isError && (
+        <Card>
+          <div className="text-[14px]" style={{ color: "var(--danger)" }}>{query.error?.message || "市占估算失败"}</div>
+        </Card>
+      )}
+
+      {result && (
         <>
-          <ObservationTrend
-            dates={daily.map(({ date }) => date)}
-            metrics={BRAND_METRICS.map(({ key, label }) => ({ key, label, values: daily.map(({ metrics }) => metrics[key]) }))}
-            hint="仅绘制有采集记录的日期。每天参与汇总的商店和商品可能不同。"
-          />
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
+            <StatCard
+              label="模型置信度"
+              labelHint={<InfoHint align="right" symbol="!" label="查看模型置信度说明" text="这不是预测准确率，而是当前估算的证据完整度。系统综合可用信号覆盖、品牌间可比性、证据数量和下载估算占比；数据越完整、口径越一致，置信度越高。" />}
+              value={`${result.confidence.score}%`}
+              hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`}
+            />
+            <StatCard
+              label="可用信号"
+              labelHint={<InfoHint align="right" symbol="!" label="查看可用信号说明" text="表示本次实际参与计算的基础信号数量。2 类信号是 App 下载信号和 App Store 累计评分数；缺失信号不会按 0 强行计入，而是重新分配剩余权重。" />}
+              value={`${activeSignals}/2`}
+              hint="App 下载信号 + App Store 累计评分数"
+            />
+            <StatCard label="应用商店评分数" value={appRatingCount ? fmtNum(appRatingCount) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 商店累计值；非所选期间新增`} />
+          </div>
+
+          {result.warnings.length > 0 && (
+            <div className="rounded-lg px-4 py-3 flex items-start gap-2.5" style={{ background: "var(--warning-soft)", color: "var(--body)", border: "1px solid var(--hairline)" }}>
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" style={{ color: "var(--warning)" }} />
+              <div className="text-[13px] space-y-1">
+                {result.warnings.map((warning) => <div key={warning}>{warning}</div>)}
+              </div>
+            </div>
+          )}
+
           <Card>
-            <SectionTitle title="每日统计" action={
-              <Link to={{ pathname: `${base}/apps`, search: appFilter.toString() }} className="inline-flex items-center gap-1 text-[13px] hover:underline" style={{ color: "var(--accent)" }}>
-                查看品牌 App 明细 <ChevronRight size={14} />
-              </Link>
-            } />
-            {daily.length ? <ObservationTable
-              headers={["日期", ...BRAND_METRICS.map(({ label }) => label)]}
-              rows={daily.map(({ date, metrics }) => ({
-                key: date,
-                values: [date, ...BRAND_METRICS.map(({ key }) => numberText(metrics[key]))],
-              }))}
-            /> : <EmptyState title="所选期间暂无采集记录" hint="可调整日期或地区查看已有记录。" />}
+            <SectionTitle
+              title="每日样本份额趋势"
+              subtitle={trendQuery.data?.latest_date
+                ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 已记录至 ${trendQuery.data.latest_date}`
+                : "每天采集 App 数据后生成国家 × 品牌快照"}
+              action={
+                <Select value={trendFocus} onChange={(event) => setTrendFocus(event.target.value)} aria-label="趋势品牌">
+                  <option value="all">全部品牌趋势</option>
+                  {selectedBrands.map((brand) => brand && <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+                </Select>
+              }
+            />
+            {trendQuery.isLoading ? <Spinner /> : trendQuery.isError ? (
+              <div className="text-[13px]" style={{ color: "var(--danger)" }}>{trendQuery.error?.message || "市占趋势加载失败"}</div>
+            ) : trendData.length ? (
+              <>
+                <MultiLineChart data={trendData} keys={trendKeys} valueFormatter={(value) => `${Number(value).toFixed(1)}%`} />
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-3">
+                  {trendSummary.map((row) => {
+                    const positive = row.change_pp > 0;
+                    const negative = row.change_pp < 0;
+                    return (
+                      <div key={row.brand_id} className="rounded-md p-3" style={{ background: "var(--bg-soft)", border: "1px solid var(--hairline)" }}>
+                        <div className="text-[12px] truncate" style={{ color: "var(--mute)" }}>{row.name}</div>
+                        <div className="flex items-baseline justify-between gap-2 mt-1">
+                          <span className="text-[20px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{row.latest_share.toFixed(1)}%</span>
+                          <span className="text-[12px] font-medium tabular-nums" style={{ color: positive ? "var(--accent)" : negative ? "var(--danger)" : "var(--mute)" }}>
+                            {positive ? "+" : ""}{row.change_pp.toFixed(1)}pp
+                          </span>
+                        </div>
+                        <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>
+                          期初 {row.start_share.toFixed(1)}% · 公开评分 {fmtNum(row.latest_rating_count)}
+                          {row.rating_count_change > 0 ? `（+${fmtNum(row.rating_count_change)}）` : ""}
+                          {row.latest_average_rating ? ` · ${row.latest_average_rating.toFixed(2)} / 5` : ""}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="text-[11px] mt-3" style={{ color: "var(--mute)" }}>
+                  每日自动刷新；某天未获得新商店数据时沿用最近一次快照，并在下一次成功采集后更新当天值。
+                </div>
+              </>
+            ) : (
+              <div className="text-[13px] py-8 text-center" style={{ color: "var(--mute)" }}>尚无历史快照，完成首次每日采集或点击“刷新 App 数据”后开始记录趋势。</div>
+            )}
           </Card>
+
+          <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4">
+            <Card>
+              <SectionTitle title="App 评分样本份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
+              <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-5 items-center">
+                <div className="h-[260px] relative">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={result.brands} dataKey="share" nameKey="name" innerRadius={66} outerRadius={100} paddingAngle={2} stroke="none">
+                        {result.brands.map((row, index) => <Cell key={row.brand_id} fill={COLORS[index % COLORS.length]} />)}
+                      </Pie>
+                      <Tooltip formatter={(value) => [`${Number(value).toFixed(2)}%`, "估算份额"]} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 pointer-events-none grid place-items-center text-center">
+                    <div>
+                      <div className="text-[12px]" style={{ color: "var(--mute)" }}>领先份额</div>
+                      <div className="text-[30px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{leader ? `${leader.share.toFixed(1)}%` : "—"}</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {result.brands.map((row, index) => (
+                    <div key={row.brand_id}>
+                      <div className="flex items-center justify-between gap-3 text-[13px] mb-1.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
+                          <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.rank}. {row.name}</span>
+                        </div>
+                        <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{row.raw.app_download_basis === "unavailable" ? "缺数据" : `${row.share.toFixed(2)}%`}</span>
+                      </div>
+                      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+                        <div className="h-full rounded-full" style={{ width: `${Math.max(row.share, 0.5)}%`, background: COLORS[index % COLORS.length] }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <SectionTitle
+                title="份额拆解"
+                hintSymbol="!"
+                hint="先把每类信号在当前所选品牌内归一化为相对份额，再按当前模型的有效权重合成。它表示样本内相对位置，不等于真实市场占有率；缺失信号会被重新分配权重。"
+                subtitle="每列先在所选品牌内归一化，再按模型权重合成"
+              />
+              <div className="overflow-x-auto">
+                <table className="w-full text-[13px] min-w-[620px]">
+                  <thead>
+                    <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
+                      <th className="text-left font-medium py-2.5 px-2">品牌</th>
+                      <th className="text-right font-medium py-2.5 px-2">综合份额</th>
+                      {SIGNALS.map((signal) => (
+                        <th key={signal.key} className="text-right font-medium py-2.5 px-2">
+                          {signal.label}
+                          <div className="text-[10px] font-normal">权重 {(result.model.active_weights[signal.key] * 100).toFixed(0)}%</div>
+                        </th>
+                      ))}
+                      <th className="text-right font-medium py-2.5 px-2">覆盖度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.brands.map((row) => (
+                      <tr key={row.brand_id} style={{ borderBottom: "1px solid var(--hairline)", color: "var(--body)" }}>
+                        <td className="py-3 px-2 font-medium" style={{ color: "var(--ink)" }}>{row.name}</td>
+                        <td className="py-3 px-2 text-right font-semibold tabular-nums" style={{ color: "var(--accent)" }}>{row.share.toFixed(2)}%</td>
+                        {SIGNALS.map((signal) => (
+                          <td key={signal.key} className="py-3 px-2 text-right tabular-nums">
+                            {result.model.active_weights[signal.key] ? `${row.signal_shares[signal.key].toFixed(1)}%` : "—"}
+                          </td>
+                        ))}
+                        <td className="py-3 px-2 text-right"><Badge tone={row.coverage >= 75 ? "positive" : row.coverage >= 50 ? "warning" : "negative"}>{row.coverage}%</Badge></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          </div>
+
         </>
       )}
-    </div>
-  );
-}
 
-function AppObservations({ apps }: { apps: NonNullable<BrandObservations["apps"]> }) {
-  const [appKey, setAppKey] = useState("");
-  const app = apps.find((item) => item.key === appKey) ?? apps[0];
-  if (!app) return <EmptyState title="所选期间暂无 App 商店数据" hint="可切换品牌、调整日期或选择全部地区。" />;
-  const metrics = APP_METRICS.filter(({ key }) => key === "rating" || key === "rating_count" ||
-    apps.some((item) => item.daily.some((point) => point[key] != null)));
-  const sourceLink = (item: AppObservation) => item.url && /^https?:\/\//i.test(item.url) ? (
-    <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline" style={{ color: "var(--accent)" }}>
-      商店页面 <ExternalLink size={12} />
-    </a>
-  ) : "—";
-  return (
-    <>
-      <Card>
-        <SectionTitle title="应用商店数据" subtitle="每行展示所选期间内该 App 在对应商店口径下的最新采集值。点击应用查看每日记录。" />
-        <ObservationTable
-          headers={["应用", "商店 / 地区", ...metrics.map(({ label }) => label), "采集日期", "来源"]}
-          rows={apps.map((item) => ({
-            key: item.key,
-            selected: item.key === app.key,
-            values: [
-              <div className="min-w-40">
-                <button type="button" aria-pressed={item.key === app.key} onClick={() => setAppKey(item.key)} className="text-left font-semibold cursor-pointer hover:underline" style={{ color: "var(--accent)" }}>{item.name}</button>
-                <div className="text-[12px] break-all" style={{ color: "var(--mute)" }}>{[item.publisher, item.app_id, item.version && `版本 ${item.version}`].filter(Boolean).join(" · ")}</div>
-              </div>,
-              appScope(item),
-              ...metrics.map(({ key }) => appMetricText(item, key)),
-              item.date,
-              sourceLink(item),
-            ],
-          }))}
-        />
-      </Card>
-      <ObservationTrend
-        key={app.key}
-        dates={app.daily.map(({ date }) => date)}
-        metrics={metrics.map(({ key, label }) => ({ key, label, values: app.daily.map((point) => point[key]) }))}
-        hint={`${app.name} · ${appScope(app)}。图中标记对应实际采集日期。`}
-      />
-      <Card>
-        <SectionTitle title="App 每日记录" subtitle={`${app.name} · ${appScope(app)}`} />
-        <ObservationTable
-          headers={["采集日期", ...metrics.map(({ label }) => label), "版本", "来源"]}
-          rows={app.daily.map((point) => ({
-            key: point.date,
-            values: [point.date, ...metrics.map(({ key }) => appMetricText(point, key)), point.version || "—", sourceLink(point)],
-          }))}
-        />
-      </Card>
-    </>
+      {selected.length > 0 && <BrandObservationsCard brandIds={selected} country={country} range={range} />}
+
+      {result && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <Card>
+            <SectionTitle title="估算模型" subtitle={result.model.description} />
+            <div className="space-y-3">
+              {SIGNALS.map((signal) => {
+                const base = result.model.base_weights[signal.key] * 100;
+                const active = result.model.active_weights[signal.key] * 100;
+                return (
+                  <div key={signal.key}>
+                    <div className="flex justify-between text-[13px] mb-1">
+                      <span style={{ color: "var(--body)" }}>{signal.label}</span>
+                      <span className="tabular-nums" style={{ color: "var(--ink)" }}>{active.toFixed(0)}%{Math.abs(active - base) > 0.1 ? `（原 ${base.toFixed(0)}%）` : ""}</span>
+                    </div>
+                    <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+                      <div className="h-full rounded-full" style={{ width: `${active}%`, background: "var(--accent)" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
+              算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，应用商店累计评分权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。评分数来自应用商店累计值；Google Play 全球评分仅在“全部国家”中计入一次。评分推算的下载量仅供参考，不作为独立证据计权。销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
+            </div>
+          </Card>
+
+          <Card>
+            <SectionTitle title="数据完整性" subtitle="补齐这些数据可明显提升估算可信度" />
+            <div className="space-y-4">
+              {result.brands.map((row) => (
+                <div key={row.brand_id} className="pb-4 last:pb-0" style={{ borderBottom: "1px solid var(--hairline)" }}>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="font-medium text-[13px]" style={{ color: "var(--ink)" }}>{row.name}</span>
+                    <Badge tone={row.gaps.length <= 1 ? "positive" : row.gaps.length <= 2 ? "warning" : "negative"}>{row.coverage}% 覆盖</Badge>
+                  </div>
+                  {row.gaps.length ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {row.gaps.map((gap) => <span key={gap} className="text-[12px] px-2 py-1 rounded" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>{gap}</span>)}
+                    </div>
+                  ) : (
+                    <div className="text-[12px]" style={{ color: "var(--accent)" }}>核心信号已覆盖</div>
+                  )}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </div>
+      )}
+
+      <Modal open={pickerOpen} onClose={() => setPickerOpen(false)} title="选择市占分析品牌" width={520}>
+        <div className="space-y-2 max-h-[52vh] overflow-y-auto pr-1">
+          {brands.map((brand) => {
+            const checked = draft.includes(brand.id);
+            return (
+              <label key={brand.id} className="flex items-center gap-3 p-3 rounded-md cursor-pointer" style={{ background: checked ? "var(--bg-soft-2)" : "transparent", border: "1px solid var(--hairline)" }}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => setDraft((ids) => checked ? ids.filter((id) => id !== brand.id) : [...ids, brand.id])}
+                />
+                <span className="h-8 w-8 rounded-md grid place-items-center text-[13px] font-semibold" style={{ background: "var(--ink)", color: "var(--bg)" }}>{brand.name.slice(0, 1).toUpperCase()}</span>
+                <span className="flex-1 min-w-0">
+                  <span className="block font-medium truncate" style={{ color: "var(--ink)" }}>{brand.name}</span>
+                  <span className="block text-[12px] truncate" style={{ color: "var(--mute)" }}>{brand.category || "未设置品类"}</span>
+                </span>
+                {brand.is_primary ? <Badge tone="positive">自家</Badge> : brand.is_competitor ? <Badge tone="warning">竞品</Badge> : null}
+              </label>
+            );
+          })}
+        </div>
+        <div className="flex items-center justify-between gap-3 mt-4 pt-4" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <Button variant="ghost" onClick={() => navigate("/brands")}><SlidersHorizontal size={14} /> 管理品牌</Button>
+          <div className="flex items-center gap-2">
+            <span className="text-[12px]" style={{ color: draft.length < 2 ? "var(--danger)" : "var(--mute)" }}>已选 {draft.length} 个，至少 2 个</span>
+            <Button onClick={() => setPickerOpen(false)}>取消</Button>
+            <Button variant="primary" disabled={draft.length < 2} onClick={() => { setSelected(draft); setPickerOpen(false); }}>应用</Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
   );
 }
