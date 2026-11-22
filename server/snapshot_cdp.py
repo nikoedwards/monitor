@@ -72,6 +72,14 @@ def _stop_browser(browser, owns_browser_group):
     browser._monitor_stopped = True
 
 
+def _has_browser_shared_memory() -> bool:
+    try:
+        filesystem = os.statvfs("/dev/shm")
+        return filesystem.f_bavail * filesystem.f_frsize >= 128 * 1024**2
+    except (AttributeError, OSError):
+        return False
+
+
 def _browser_binary() -> str:
     explicit = os.environ.get("SNAPSHOT_BROWSER", "").strip()
     if explicit:
@@ -192,7 +200,7 @@ class _Page:
             raise SnapshotCaptureError('Page still displays a full-screen loading overlay')
         return result
 
-    def screenshot(self, path, **_options):
+    def screenshot(self, **_options):
         available = _available_memory_mb()
         if available is not None and available < 160:
             # Discard decoded images/JS garbage from previous tiles before
@@ -202,8 +210,9 @@ class _Page:
             self.wait_for_timeout(500)
         result = self.call("Page.captureScreenshot", {
             "format": "png", "captureBeyondViewport": False, "fromSurface": True,
+            "optimizeForSpeed": True,
         }, timeout=15)
-        Path(path).write_bytes(base64.b64decode(result["data"], validate=True))
+        return base64.b64decode(result["data"], validate=True)
 
     def navigate(self, url):
         self.status = None
@@ -278,13 +287,15 @@ def capture(
             with tempfile.TemporaryFile() as browser_log:
                 browser_args = [
                     _browser_binary(), "--headless", "--no-sandbox", "--disable-gpu",
-                    "--disable-dev-shm-usage", "--disable-background-networking",
+                    "--disable-background-networking",
                     "--disable-extensions", "--disable-sync", "--no-first-run", "--mute-audio",
                     "--renderer-process-limit=1", "--disk-cache-size=16777216",
                     "--num-raster-threads=1",
                     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
                     f"--user-data-dir={profile}", f"--window-size={width},{height}", "about:blank",
                 ]
+                if not _has_browser_shared_memory():
+                    browser_args.append("--disable-dev-shm-usage")
                 if constrained:
                     browser_args.append("--js-flags=--max-old-space-size=128 --optimize-for-size")
                 browser = subprocess.Popen(
@@ -296,14 +307,12 @@ def capture(
                     deadline = time.monotonic() + CDP_STARTUP_TIMEOUT_SECONDS
                     while True:
                         try:
-                            port_lines = port_file.read_text().splitlines()
-                            if len(port_lines) >= 2:
-                                port, endpoint = port_lines[:2]
-                                break
+                            address = port_file.read_text().splitlines()
                         except OSError:
-                            # Chromium may have created the port file before
-                            # finishing its write (or releasing its Windows lock).
-                            pass
+                            address = []
+                        if len(address) >= 2 and address[0].isdigit() and address[1].startswith("/"):
+                            port, endpoint = address[:2]
+                            break
                         if browser.poll() is not None:
                             browser_log.seek(0)
                             raise RuntimeError(f'Chromium exited {browser.returncode}: '+browser_log.read().decode(errors="replace")[-500:])

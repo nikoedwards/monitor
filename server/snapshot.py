@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from html import escape as html_escape
+from itertools import chain
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
 
@@ -676,72 +677,55 @@ def _capture_chunked_screenshot(
     page, png_path: Path, chunk_height: int, *, max_height: int | None = None,
     on_tiles_captured=None,
 ) -> dict:
-    """Capture a long page one viewport at a time and stitch it on disk."""
+    """Spool compressed tiles, release Chromium, then assemble the final PNG."""
     from PIL import Image
 
-    dimensions = page.evaluate(
-        """() => ({
-          width: window.innerWidth,
-          height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, window.innerHeight),
-          viewport: window.innerHeight
-        })"""
-    )
-    width = max(1, min(int(dimensions.get("width") or 1440), 1440))
-    document_height = max(1, int(dimensions.get("height") or chunk_height))
-    max_height = max(1, max_height if max_height is not None else CAPTURE_MAX_STITCH_HEIGHT)
-    scale = min(1.0, max_height / document_height)
-    output_width = max(1, int(round(width * scale)))
-    output_height = max(1, int(round(document_height * scale)))
-    viewport_height = max(1, min(chunk_height, int(dimensions.get("viewport") or chunk_height)))
-    positions = list(range(0, max(1, document_height - viewport_height + 1), viewport_height))
-    bottom = max(0, document_height - viewport_height)
-    if not positions or positions[-1] != bottom:
-        positions.append(bottom)
-
-    with tempfile.TemporaryDirectory(prefix=f".{png_path.stem}.", dir=str(png_path.parent)) as temp_dir:
-        previous_end = 0
-        pieces = []
-        for index, y in enumerate(dict.fromkeys(positions)):
-            page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
+    dimensions = page.evaluate("""() => ({
+      width:window.innerWidth,
+      height:Math.max(document.documentElement.scrollHeight,document.body?.scrollHeight||0,window.innerHeight),
+      viewport:window.innerHeight
+    })""")
+    width=max(1,min(int(dimensions.get('width') or 1440),1440))
+    document_height=max(1,int(dimensions.get('height') or chunk_height))
+    max_height=max(1,max_height if max_height is not None else CAPTURE_MAX_STITCH_HEIGHT)
+    scale=min(1.0,max_height/document_height)
+    output_width=max(1,int(round(width*scale)))
+    output_height=max(1,int(round(document_height*scale)))
+    viewport_height=max(1,min(chunk_height,int(dimensions.get('viewport') or chunk_height)))
+    positions=range(0,max(1,document_height-viewport_height+1),viewport_height)
+    bottom=max(0,document_height-viewport_height)
+    tail=(bottom,) if positions[-1]!=bottom else ()
+    # Most pages stay in a small RAM buffer. Larger captures spill to a single
+    # anonymous temporary file, avoiding dozens of PNG re-encodes and fsyncs.
+    with tempfile.SpooledTemporaryFile(max_size=4*1024*1024,dir=png_path.parent) as spool:
+        pieces=[]
+        previous_end=0
+        for y in chain(positions,tail):
+            page.evaluate('(scrollY) => window.scrollTo(0, scrollY)',y)
             page.wait_for_timeout(80)
-            chunk_path = Path(temp_dir) / f"chunk-{index}.png"
-            page.screenshot(path=str(chunk_path), full_page=False, animations="disabled", caret="hide")
-            source_top = max(0, previous_end - y)
-            visible_height = min(viewport_height - source_top, document_height - y)
-            with Image.open(chunk_path) as chunk:
-                piece = chunk.convert("RGB").crop((0, source_top, width, source_top + visible_height))
-                if scale < 1.0:
-                    piece = piece.resize(
-                        (output_width, max(1, int(round(visible_height * scale)))),
-                        Image.Resampling.LANCZOS,
-                    )
-                piece_path = Path(temp_dir) / f"piece-{index}.png"
-                piece.save(piece_path)
-                piece.close()
-                pieces.append((piece_path, int(round((y + source_top) * scale))))
-            chunk_path.unlink()
-            previous_end = max(previous_end, y + viewport_height)
-        page.evaluate("window.scrollTo(0, 0)")
-        # Do not hold a full-page canvas alongside a busy Chromium renderer.
-        # CDP captures can release the renderer before assembling the PNG.
+            data=page.screenshot(full_page=False,animations='disabled',caret='hide')
+            offset=spool.tell()
+            spool.write(data)
+            source_top=max(0,previous_end-y)
+            visible_height=min(viewport_height-source_top,document_height-y)
+            pieces.append((offset,len(data),y,source_top,visible_height))
+            previous_end=max(previous_end,y+viewport_height)
+        page.evaluate('window.scrollTo(0, 0)')
         if on_tiles_captured:
             on_tiles_captured()
-        canvas = Image.new("RGB", (output_width, output_height), (255, 255, 255))
-        for piece_path, top in pieces:
-            with Image.open(piece_path) as piece:
-                canvas.paste(piece, (0, top))
-        canvas.save(png_path, format="PNG", optimize=False)
-        canvas.close()
-    return {
-        "width": width,
-        "output_width": output_width,
-        "height": output_height,
-        "document_height": document_height,
-        "chunk_height": viewport_height,
-        "chunks": len(dict.fromkeys(positions)),
-        "scaled": scale < 1.0,
-        "scale": round(scale, 4),
-    }
+        with Image.new('RGB',(output_width,output_height),'white') as canvas:
+            for offset,length,y,source_top,visible_height in pieces:
+                spool.seek(offset)
+                with Image.open(io.BytesIO(spool.read(length))) as chunk:
+                    piece=chunk.convert('RGB').crop((0,source_top,width,source_top+visible_height))
+                    if scale<1.0:
+                        piece=piece.resize((output_width,max(1,int(round(visible_height*scale)))),Image.Resampling.LANCZOS)
+                    canvas.paste(piece,(0,int(round((y+source_top)*scale))))
+                    piece.close()
+            canvas.save(png_path,format='PNG',optimize=False)
+    return dict(width=width,output_width=output_width,height=output_height,
+                document_height=document_height,chunk_height=viewport_height,
+                chunks=len(positions)+len(tail),scaled=scale<1.0,scale=round(scale,4))
 
 
 def _resource_url_allowed(url: str) -> bool:
@@ -1347,6 +1331,16 @@ def _run_snapshot_worker(
     low_water = available
     outcome = "worker_error"
     stderr = b""
+
+    def last_stage():
+        stages = re.findall(rb"(?m)^SNAPSHOT_STAGE=([a-z_]+)\r?$", stderr)
+        return stages[-1].decode("ascii") if stages else "-"
+
+    def stage_hint():
+        names = {"launch": "启动浏览器", "navigation": "打开网页", "prepare": "准备页面",
+                 "screenshot": "渲染截图", "archive": "写入归档"}
+        label = names.get(last_stage())
+        return f"（{label}）" if label else ""
     logger.warning(
         "Snapshot start host=%s safe_mode=%s scriptless=%s available_mib=%s",
         target, request["safe_mode"], request["scriptless"], available,
@@ -1372,7 +1366,7 @@ def _run_snapshot_worker(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 outcome = "deadline"
-                return {"error": "隔离截图进程超过本次渲染时限，已强制终止", "retry_reason": "deadline"}
+                return {"error": f"隔离截图进程超过本次渲染时限{stage_hint()}，已强制终止", "retry_reason": "deadline"}
             try:
                 stdout, stderr = communication.result(timeout=min(0.5, remaining))
                 break
@@ -1425,7 +1419,7 @@ def _run_snapshot_worker(
         stage = stages[-1].decode("ascii") if stages else "-"
         logger.warning(
             "Snapshot finish host=%s pid=%s outcome=%s stage=%s elapsed_s=%.1f min_available_mib=%s exit=%s",
-            target, process.pid, outcome, stage, time.monotonic() - started, low_water, process.returncode,
+            target, process.pid, outcome, last_stage(), time.monotonic() - started, low_water, process.returncode,
         )
 
 

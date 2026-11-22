@@ -318,8 +318,11 @@ print(json.dumps({'method':'test','input_length':len(request['source_html'])}))
             def wait_for_timeout(self, _milliseconds):
                 return None
 
-            def screenshot(self, path, **_kwargs):
-                Image.new("RGB", (1440, 600), (self.scroll_y % 255, 0, 0)).save(path)
+            def screenshot(self, **_kwargs):
+                encoded = io.BytesIO()
+                with Image.new("RGB", (1440, 600), (self.scroll_y % 255, 0, 0)) as image:
+                    image.save(encoded, format="PNG")
+                return encoded.getvalue()
 
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "stitched.png"
@@ -328,6 +331,7 @@ print(json.dumps({'method':'test','input_length':len(request['source_html'])}))
                 self.assertEqual(image.size, (1440, 1700))
             self.assertEqual(result["chunks"], 3)
             self.assertFalse(result["scaled"])
+            self.assertEqual(list(output.parent.iterdir()), [output])
 
     def test_identical_images_have_no_visual_change(self):
         with tempfile.TemporaryDirectory() as tmp:
