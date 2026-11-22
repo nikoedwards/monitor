@@ -315,9 +315,23 @@ export function useVocMutations() {
 
 // ---------------------------------------------------------------- marketing
 export function useCommunitySummaries(records: RecordItem[]) {
+  return useFeedbackSummaries(
+    records.filter((record) => record.channel === "community"),
+    "/api/records/community-summaries",
+  );
+}
+
+export function useVoiceFeedbackSummaries(evidence: { record_id: string; title: string; text: string }[]) {
+  const records = Array.from(new Map(evidence.map((item) => [item.record_id, item])).values());
+  return useFeedbackSummaries(
+    records.map((item) => ({ id: item.record_id, title: item.title, body: item.text })),
+    "/api/voc/record-summaries",
+  );
+}
+
+function useFeedbackSummaries(targets: { id: string; title?: string; body: string }[], endpoint: string) {
   const qc = useQueryClient();
-  const targets = records.filter((record) => record.channel === "community");
-  const queryKey = ["community-post-summaries", targets.map((record) => [record.id, record.title, record.body])];
+  const queryKey = ["feedback-summaries", endpoint, targets.map((record) => [record.id, record.title, record.body])];
   return useQuery({
     queryKey,
     enabled: targets.length > 0,
@@ -332,7 +346,7 @@ export function useCommunitySummaries(records: RecordItem[]) {
         const batch = targets.slice(index, index + 12);
         try {
           const response = await api.post<{ summaries: Record<string, CommunityPostSummary> }>(
-            "/api/records/community-summaries", { record_ids: batch.map((record) => record.id) },
+            endpoint, { record_ids: batch.map((record) => record.id) },
           );
           Object.assign(summaries, response.summaries);
           if (Object.values(response.summaries).some((item) => item.status === "unconfigured")) {

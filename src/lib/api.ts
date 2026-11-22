@@ -106,6 +106,29 @@ export interface Link {
 export interface CommunityPostSummary {
   status: "ready" | "unavailable" | "unconfigured" | "error";
   summary: string | null;
+  headline?: string;
+}
+
+export interface VoiceEvidence {
+  record_id: string;
+  title: string;
+  text: string;
+  excerpt: string;
+  highlights: string[];
+  source_key?: string;
+  platform?: string;
+  author?: string;
+  occurred_at?: string;
+  rating?: number | string | null;
+  url?: string;
+  url_kind?: "source" | "review" | "store" | "thread";
+}
+
+export interface VoiceIssuePreview {
+  key: string;
+  title: string;
+  summary: string;
+  evidence: VoiceEvidence;
 }
 
 export interface RecordItem {
@@ -123,6 +146,7 @@ export interface RecordItem {
   url?: string;
   occurred_at?: string;
   voice_source?: string;
+  voice_issue?: VoiceIssuePreview;
   sentiment?: string;
   sentiment_score?: number;
   sentiment_explanation?: {

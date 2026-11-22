@@ -582,11 +582,12 @@ CREATE TABLE IF NOT EXISTS linkedin_profile_snapshots (
   created_at TEXT NOT NULL
 );
 
--- Chinese summaries keyed to the current community post title/body.
+-- Chinese summaries keyed to the current feedback title/body.
 CREATE TABLE IF NOT EXISTS community_post_summaries (
   record_id TEXT PRIMARY KEY REFERENCES records(id) ON DELETE CASCADE,
   source_hash TEXT NOT NULL,
   summary TEXT NOT NULL,
+  headline TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -767,6 +768,7 @@ MIGRATIONS = [
     ("sources", "item_count", "INTEGER NOT NULL DEFAULT 0"),
     ("voc_actions", "brand_id", "TEXT"),
     ("voc_actions", "updated_at", "TEXT"),
+    ("community_post_summaries", "headline", "TEXT"),
     ("brands", "is_competitor", "INTEGER NOT NULL DEFAULT 0"),
     ("brands", "is_primary", "INTEGER NOT NULL DEFAULT 0"),
     ("brands", "slug", "TEXT"),

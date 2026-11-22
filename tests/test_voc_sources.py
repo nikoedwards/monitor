@@ -1,9 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from server.domains.content import _highlight_terms, _issue_impact, _issue_priority, _load_voice_records, _p0_summary, _problem_summary, _topic_breakdown, _voice_source_key
+from server.domains.content import _issue_impact, _issue_priority, _load_voice_records, _p0_summary, _topic_breakdown, _voice_source_key
 from server.domains.common import build_trend
 from server.domains.insights import _summary_records
+from server.voc_issues import analyze_issue
 
 
 class VocSourceTests(unittest.TestCase):
@@ -56,11 +57,50 @@ class VocSourceTests(unittest.TestCase):
             "sentiment": "negative",
             "topics": ["support"],
         }
-        self.assertEqual(
-            "磁吸保护壳与 iPhone Duo 尺寸不兼容，保护壳过大并影响手机折叠。",
-            _problem_summary(record),
-        )
-        self.assertIn("too big", _highlight_terms(record))
+        issue = analyze_issue(record)
+        self.assertEqual("磁吸保护壳与 iPhone Duo 尺寸不匹配", issue["title"])
+        self.assertIn("too big", issue["evidence"]["excerpt"])
+        self.assertTrue(all(text in record["body"] for text in issue["evidence"]["highlights"]))
+
+    def test_separates_issue_titles_and_keeps_multiple_original_reviews(self):
+        reviews = [
+            {"id": "apple", "sentiment": "negative", "topics": ["experience"], "voice_source": "app_reviews",
+             "body": "Excellent tool except how come this app has no dark mode! It is a pain to read long summaries at night.",
+             "url": "https://apps.apple.com/us/app/example/id123"},
+            {"id": "play", "sentiment": "negative", "topics": ["feature"], "voice_source": "app_reviews",
+             "body": "Please add dark mode for reading.", "external_id": "US:8ff5eb30-fbac-431f-b852-0754ff9f039f",
+             "url": "https://play.google.com/store/apps/details?id=com.example&gl=us"},
+            {"id": "manual", "sentiment": "negative", "topics": ["experience"],
+             "body": "Cannot log in after resetting my password."},
+            {"id": "legacy-play", "sentiment": "negative", "topics": ["experience"],
+             "body": "Cannot connect to Wi-Fi.", "external_id": "US:com.example:US:feedback",
+             "url": "https://play.google.com/store/apps/details?id=com.example&gl=us"},
+        ]
+        issues = {issue["id"]: issue for issue in _topic_breakdown(reviews)}
+        self.assertEqual({"dark_mode", "login", "wifi"}, set(issues))
+        dark = issues["dark_mode"]
+        self.assertEqual("App 缺少深色模式", dark["title"])
+        self.assertIn("夜间阅读长篇摘要", dark["problem_summary"])
+        self.assertEqual(2, dark["total"])
+        apple, play = dark["evidence"]
+        self.assertEqual("how come this app has no dark mode!", apple["highlights"][0])
+        self.assertIn("read long summaries at night", apple["excerpt"])
+        self.assertEqual("store", apple["url_kind"])
+        self.assertEqual("review", play["url_kind"])
+        self.assertIn("reviewId=8ff5eb30-fbac-431f-b852-0754ff9f039f", play["url"])
+        self.assertEqual("store", issues["wifi"]["evidence"][0]["url_kind"])
+
+    def test_french_feature_requests_surface_from_neutral_feedback(self):
+        feedback = [
+            {"id": "template", "sentiment": "neutral", "title": "Petites icones pour les modèles personnalisés",
+             "body": "Présenter les modèles personnalisés en petites icones ou en liste, pour pouvoir en voir plus d'un coup, au lieu de devoir défiler"},
+            {"id": "vocabulary", "sentiment": "neutral", "title": "Créer plusieurs vocabulaires personnalisés à affecter à chaque dossier",
+             "body": "Créer plusieurs vocabulaires personnalisés à affecter à chaque dossier, que l'on pourrait activer et désactiver selon le dossier."},
+        ]
+        issues = {issue["id"]: issue for issue in _topic_breakdown(feedback)}
+        self.assertIn("减少逐个滚动", issues["template_view"]["problem_summary"])
+        self.assertIn("按文件夹启用或停用", issues["folder_vocabulary"]["problem_summary"])
+        self.assertEqual(0, issues["folder_vocabulary"]["negative"])
 
     def test_insights_summary_records_include_marketing_voice_sources(self):
         records_by_filter = {
