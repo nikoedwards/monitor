@@ -149,22 +149,23 @@ class MarketShareTests(unittest.TestCase):
         summary = market_observations("a,b", **options)
         self.assertEqual(summary["countries"], ["US"])
         self.assertEqual(summary["brands"][0]["metrics"], {
-            "app_store_ratings": 12, "google_play_ratings": 50, "product_reviews": 0,
+            "app_store_ratings": 12, "google_play_ratings": 50, "app_downloads": 0,
         })
         self.assertEqual(summary["brands"][1]["metrics"], {})
 
         detail = market_observations("a", include_history=True, **options)["brands"][0]
         self.assertEqual([point["date"] for point in detail["daily"]], ["2026-07-17", "2026-07-15"])
-        self.assertEqual(detail["daily"][1]["metrics"], {"app_store_ratings": 15, "product_reviews": 20})
+        self.assertEqual(detail["daily"][1]["metrics"], {"app_store_ratings": 15})
         self.assertEqual(len(detail["apps"]), 2)
         ios = next(app for app in detail["apps"] if app["platform"] == "app_store")
+        self.assertNotIn("rating", ios)
         self.assertEqual([point["rating_count"] for point in ios["daily"]], [12, 15])
         self.assertEqual([point["downloads"] for point in ios["daily"]], [0, None])
         regional = market_observations("a", "US", include_history=True, **options)["brands"][0]
         self.assertEqual([app["app_id"] for app in regional["apps"]], ["123"])
         self.assertNotIn("google_play_ratings", regional["metrics"])
 
-    def test_combines_signals_and_estimates_app_download_range(self):
+    def test_balanced_model_uses_app_inputs_without_calculating_sales_or_estimates(self):
         self.add_record("a-app-1", "a", dimension="voc", channel="app", platform="app_store", source_id="app_store_reviews", metrics={"rating": 5})
         self.add_record("a-app-2", "a", dimension="voc", channel="app", platform="app_store", source_id="app_store_reviews", metrics={"rating": 4})
         self.add_record("b-app-1", "b", dimension="voc", channel="app", platform="app_store", source_id="app_store_reviews", metrics={"rating": 4})
@@ -175,21 +176,22 @@ class MarketShareTests(unittest.TestCase):
             [("sa", "sale-a", "a", "2026-07-15", 1000, 100, 20), ("sb", "sale-b", "b", "2026-07-15", 500, 50, 10)],
         )
 
-        result = market_share(
-            brand_ids="a,b",
-            model="balanced",
-            start_date="2026-07-01",
-            end_date="2026-07-31",
-            conn=self.conn,
-        )
+        with patch("server.domains.market_share._sales_signals") as sales:
+            result = market_share(
+                brand_ids="a,b",
+                model="balanced",
+                start_date="2026-07-01",
+                end_date="2026-07-31",
+                conn=self.conn,
+            )
+        sales.assert_not_called()
 
         self.assertAlmostEqual(sum(row["share"] for row in result["brands"]), 100.0, places=1)
         alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
         self.assertGreater(alpha["share"], 50)
-        self.assertEqual(alpha["raw"]["app_downloads_est"], 200)
-        self.assertEqual(alpha["raw"]["app_downloads_low"], 100)
-        self.assertEqual(alpha["raw"]["app_downloads_high"], 400)
-        self.assertEqual(alpha["raw"]["app_download_basis"], "review_proxy")
+        self.assertEqual(alpha["raw"]["app_downloads"], 0)
+        self.assertFalse({"app_downloads_est", "app_rating", "sales_revenue", "product_reviews",
+                          "mentions", "comments", "engagement", "views"} & alpha["raw"].keys())
         self.assertEqual(
             result["model"]["base_weights"],
             {"sales": 0.0, "app": 0.65, "conversation": 0.35, "engagement": 0.0},
@@ -254,8 +256,8 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual(result["countries"], ["GB", "US"])
         alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
         beta = next(row for row in result["brands"] if row["brand_id"] == "b")
-        self.assertEqual(alpha["raw"]["app_downloads_est"], 1000)
-        self.assertEqual(beta["raw"]["app_downloads_est"], 500)
+        self.assertEqual(alpha["raw"]["app_downloads"], 1000)
+        self.assertEqual(beta["raw"]["app_downloads"], 500)
         self.assertEqual(alpha["raw"]["app_reviews"], 1)
         self.assertGreater(alpha["share"], beta["share"])
 
@@ -269,7 +271,7 @@ class MarketShareTests(unittest.TestCase):
                 conn=self.conn,
             )
 
-    def test_app_metric_rating_count_drives_review_and_download_estimates(self):
+    def test_app_metric_rating_count_drives_share_without_downloads(self):
         self.add_record(
             "a-metric",
             "a",
@@ -301,12 +303,9 @@ class MarketShareTests(unittest.TestCase):
 
         alpha = next(row for row in result["brands"] if row["brand_id"] == "a")
         self.assertEqual(21000, alpha["raw"]["app_reviews"])
-        self.assertEqual(4.8, alpha["raw"]["app_rating"])
-        self.assertEqual(1, alpha["raw"]["app_store_apps"])
         self.assertTrue(alpha["raw"]["app_rating_count_observed"])
-        self.assertEqual(2100000, alpha["raw"]["app_downloads_est"])
-        self.assertEqual("review_proxy", alpha["raw"]["app_download_basis"])
-        self.assertEqual(1.0, result["confidence"]["download_proxy_ratio"])
+        self.assertEqual(0, alpha["raw"]["app_downloads"])
+        self.assertEqual(1.0, result["confidence"]["ratings_only_ratio"])
         self.assertEqual(2, result["confidence"]["evidence_total"])
         self.assertLessEqual(result["confidence"]["score"], 70)
 
@@ -395,6 +394,14 @@ class MarketShareTests(unittest.TestCase):
         synced = sync_market_share_snapshots(self.conn, brand_ids=["a", "b"], include_history=True)
         self.assertIn("2026-07-14", synced["captured_dates"])
         self.assertIn("2026-07-15", synced["captured_dates"])
+        snapshot = self.conn.execute(
+            "SELECT app_downloads_est, app_downloads_low, app_downloads_high, app_rating "
+            "FROM market_share_snapshots WHERE brand_id = 'a' AND country = 'all' AND snapshot_date = '2026-07-15'"
+        ).fetchone()
+        self.assertEqual((0, 0, 0, None), tuple(snapshot))
+        self.conn.execute(
+            "UPDATE market_share_snapshots SET app_downloads_est = 9999, app_download_basis = 'review_proxy'"
+        )
 
         result = market_share_trend(
             brand_ids="a,b",
@@ -408,7 +415,7 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual(50.0, result["points"][0]["shares"]["a"])
         self.assertAlmostEqual(66.67, result["points"][1]["shares"]["a"], places=2)
         self.assertEqual(200, result["points"][1]["public_metrics"]["a"]["rating_count"])
-        self.assertEqual(4.6, result["points"][1]["public_metrics"]["a"]["average_rating"])
+        self.assertEqual({"rating_count": 200}, result["points"][1]["public_metrics"]["a"])
         self.assertEqual(result["points"][1]["shares"], result["points"][2]["shares"])
         self.assertTrue(result["points"][2]["is_carried_forward"])
         alpha = next(row for row in result["summary"] if row["brand_id"] == "a")
@@ -456,7 +463,7 @@ class MarketShareTests(unittest.TestCase):
         result = market_share(brand_ids="a,b,c", start_date="2026-07-01", end_date="2026-07-31", conn=self.conn)
         gamma = next(row for row in result["brands"] if row["brand_id"] == "c")
         self.assertEqual(0, gamma["signal_shares"]["app"])
-        self.assertEqual(10000000, gamma["raw"]["app_downloads_est"])
+        self.assertEqual(0, gamma["raw"]["app_downloads"])
         self.assertEqual(0.65, result["model"]["active_weights"]["app"])
 
     def test_latest_app_count_can_decrease_and_duplicate_links_do_not_double_count(self):

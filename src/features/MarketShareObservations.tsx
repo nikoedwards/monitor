@@ -11,17 +11,11 @@ import { useTimeRange, type TimeRange } from "../lib/timeRange";
 const BRAND_METRICS: ReadonlyArray<{ key: BrandMetric; label: string }> = [
   { key: "app_store_ratings", label: "App Store 评分数" },
   { key: "google_play_ratings", label: "Google Play 全球评分数" },
-  { key: "product_reviews", label: "商品评论量" },
-  { key: "mentions", label: "公开提及" },
-  { key: "comments", label: "评论 / 回复" },
-  { key: "engagement", label: "互动" },
-  { key: "views", label: "播放 / 浏览" },
+  { key: "app_downloads", label: "实采下载 / 安装量" },
 ];
 const APP_METRICS: ReadonlyArray<{ key: AppMetric; label: string }> = [
   { key: "rating_count", label: "累计评分数" },
-  { key: "rating", label: "平均评分" },
-  { key: "downloads", label: "下载量" },
-  { key: "installs", label: "安装量" },
+  { key: "downloads", label: "实采下载 / 安装量" },
 ];
 const AXIS_STYLE = { fontSize: 11, fill: "var(--mute)" };
 const DAY_MS = 86_400_000;
@@ -35,11 +29,6 @@ function countryLabel(code: string) {
 
 function numberText(value?: number | null) {
   return value == null ? "—" : numberFormat.format(value);
-}
-
-function appMetricText(app: AppObservation, key: AppMetric) {
-  const value = app[key];
-  return key === "rating" && value != null ? `${numberText(value)} / 5` : numberText(value);
 }
 
 function appScope(app: AppObservation) {
@@ -148,24 +137,25 @@ export function BrandObservationsCard({ brandIds, country, range }: {
   const [params] = useSearchParams();
   const query = useMarketObservations(brandIds, country, range);
   const base = `/brand/${brandId}/market-share`;
+  const metrics = BRAND_METRICS.filter(({ key }) => key !== "app_downloads" || query.data?.brands.some((brand) => brand.metrics[key] != null));
   return (
     <Card>
       <SectionTitle
         title="品牌原始数据"
-        subtitle="评分数和商品评论量取期间各 App 商店口径与商品链接的最新快照。传播指标按所选期间汇总。"
+        subtitle="每个 App 按商店和地区取所选期间内最新的累计评分数及实采下载量。"
         hint="App Store 按国家或地区汇总，Google Play 全球评分在全部地区下单列。横线表示所选期间缺少对应记录。"
       />
       {query.isLoading && <Spinner />}
       {query.isError && <EmptyState title="品牌数据加载失败" hint={query.error.message} />}
       {query.data && <ObservationTable
-        headers={["品牌", ...BRAND_METRICS.map(({ label }) => label)]}
+        headers={["品牌", ...metrics.map(({ label }) => label)]}
         rows={query.data.brands.map((brand) => ({
           key: brand.brand_id,
           values: [
             <Link to={{ pathname: `${base}/brands/${encodeURIComponent(brand.brand_id)}`, search: params.toString() }} className="inline-flex items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: "var(--accent)" }}>
               {brand.name} <ChevronRight size={14} />
             </Link>,
-            ...BRAND_METRICS.map(({ key }) => numberText(brand.metrics[key])),
+            ...metrics.map(({ key }) => numberText(brand.metrics[key])),
           ],
         }))}
       />}
@@ -188,6 +178,7 @@ export function MarketShareDetail({ view }: { view: "brand" | "apps" }) {
   const appFilter = new URLSearchParams(filter);
   if (activeBrand) appFilter.set("brand", activeBrand);
   const daily = brand?.daily ?? [];
+  const brandMetrics = BRAND_METRICS.filter(({ key }) => key !== "app_downloads" || daily.some(({ metrics }) => metrics[key] != null));
 
   return (
     <div className="space-y-5">
@@ -215,8 +206,8 @@ export function MarketShareDetail({ view }: { view: "brand" | "apps" }) {
         <>
           <ObservationTrend
             dates={daily.map(({ date }) => date)}
-            metrics={BRAND_METRICS.map(({ key, label }) => ({ key, label, values: daily.map(({ metrics }) => metrics[key]) }))}
-            hint="仅绘制有采集记录的日期。每天参与汇总的商店和商品可能不同。"
+            metrics={brandMetrics.map(({ key, label }) => ({ key, label, values: daily.map(({ metrics }) => metrics[key]) }))}
+            hint="仅绘制有采集记录的日期。每天参与汇总的 App 和商店可能不同。"
           />
           <Card>
             <SectionTitle title="每日统计" action={
@@ -225,10 +216,10 @@ export function MarketShareDetail({ view }: { view: "brand" | "apps" }) {
               </Link>
             } />
             {daily.length ? <ObservationTable
-              headers={["日期", ...BRAND_METRICS.map(({ label }) => label)]}
+              headers={["日期", ...brandMetrics.map(({ label }) => label)]}
               rows={daily.map(({ date, metrics }) => ({
                 key: date,
-                values: [date, ...BRAND_METRICS.map(({ key }) => numberText(metrics[key]))],
+                values: [date, ...brandMetrics.map(({ key }) => numberText(metrics[key]))],
               }))}
             /> : <EmptyState title="所选期间暂无采集记录" hint="可调整日期或地区查看已有记录。" />}
           </Card>
@@ -242,8 +233,8 @@ function AppObservations({ apps }: { apps: NonNullable<BrandObservations["apps"]
   const [appKey, setAppKey] = useState("");
   const app = apps.find((item) => item.key === appKey) ?? apps[0];
   if (!app) return <EmptyState title="所选期间暂无 App 商店数据" hint="可切换品牌、调整日期或选择全部地区。" />;
-  const metrics = APP_METRICS.filter(({ key }) => key === "rating" || key === "rating_count" ||
-    apps.some((item) => item.daily.some((point) => point[key] != null)));
+  const latestMetrics = APP_METRICS.filter(({ key }) => key === "rating_count" || apps.some((item) => item[key] != null));
+  const historyMetrics = APP_METRICS.filter(({ key }) => key === "rating_count" || app.daily.some((point) => point[key] != null));
   const sourceLink = (item: AppObservation) => item.url && /^https?:\/\//i.test(item.url) ? (
     <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline" style={{ color: "var(--accent)" }}>
       商店页面 <ExternalLink size={12} />
@@ -254,17 +245,17 @@ function AppObservations({ apps }: { apps: NonNullable<BrandObservations["apps"]
       <Card>
         <SectionTitle title="应用商店数据" subtitle="每行展示所选期间内该 App 在对应商店口径下的最新采集值。点击应用查看每日记录。" />
         <ObservationTable
-          headers={["应用", "商店 / 地区", ...metrics.map(({ label }) => label), "采集日期", "来源"]}
+          headers={["应用", "商店 / 地区", ...latestMetrics.map(({ label }) => label), "采集日期", "来源"]}
           rows={apps.map((item) => ({
             key: item.key,
             selected: item.key === app.key,
             values: [
               <div className="min-w-40">
                 <button type="button" aria-pressed={item.key === app.key} onClick={() => setAppKey(item.key)} className="text-left font-semibold cursor-pointer hover:underline" style={{ color: "var(--accent)" }}>{item.name}</button>
-                <div className="text-[12px] break-all" style={{ color: "var(--mute)" }}>{[item.publisher, item.app_id, item.version && `版本 ${item.version}`].filter(Boolean).join(" · ")}</div>
+                <div className="text-[12px] break-all" style={{ color: "var(--mute)" }}>{item.app_id}</div>
               </div>,
               appScope(item),
-              ...metrics.map(({ key }) => appMetricText(item, key)),
+              ...latestMetrics.map(({ key }) => numberText(item[key])),
               item.date,
               sourceLink(item),
             ],
@@ -274,16 +265,16 @@ function AppObservations({ apps }: { apps: NonNullable<BrandObservations["apps"]
       <ObservationTrend
         key={app.key}
         dates={app.daily.map(({ date }) => date)}
-        metrics={metrics.map(({ key, label }) => ({ key, label, values: app.daily.map((point) => point[key]) }))}
+        metrics={historyMetrics.map(({ key, label }) => ({ key, label, values: app.daily.map((point) => point[key]) }))}
         hint={`${app.name} · ${appScope(app)}。图中标记对应实际采集日期。`}
       />
       <Card>
         <SectionTitle title="App 每日记录" subtitle={`${app.name} · ${appScope(app)}`} />
         <ObservationTable
-          headers={["采集日期", ...metrics.map(({ label }) => label), "版本", "来源"]}
+          headers={["采集日期", ...historyMetrics.map(({ label }) => label), "来源"]}
           rows={app.daily.map((point) => ({
             key: point.date,
-            values: [point.date, ...metrics.map(({ key }) => appMetricText(point, key)), point.version || "—", sourceLink(point)],
+            values: [point.date, ...historyMetrics.map(({ key }) => numberText(point[key])), sourceLink(point)],
           }))}
         />
       </Card>

@@ -679,25 +679,12 @@ export interface MarketShareBrand {
   signals: Record<"sales" | "app" | "conversation" | "engagement", number>;
   signal_shares: Record<"sales" | "app" | "conversation" | "engagement", number>;
   raw: {
-    mentions: number;
-    voc_records: number;
     app_reviews: number;
-    app_rating?: number | null;
-    app_store_apps: number;
+    app_downloads: number;
     app_rating_count_observed: boolean;
-    comments: number;
-    engagement: number;
-    views: number;
-    app_downloads_est: number;
-    app_downloads_low: number;
-    app_downloads_high: number;
-    app_download_basis: "observed" | "review_proxy" | "unavailable";
-    sales_revenue: number;
-    sales_units: number;
-    product_reviews: number;
-    sales_data_points: number;
-    sales_currency?: string | null;
-    sales_currency_mixed?: boolean;
+    app_evidence_count: number;
+    app_data_updated_at?: string | null;
+    excluded_app_records: number;
   };
   gaps: string[];
 }
@@ -720,7 +707,7 @@ export interface MarketShareResponse {
     available_weight: number;
     coverage_fairness: number;
     evidence_total: number;
-    download_proxy_ratio: number;
+    ratings_only_ratio: number;
   };
   brands: MarketShareBrand[];
   warnings: string[];
@@ -729,7 +716,7 @@ export interface MarketShareResponse {
 export interface MarketShareTrendPoint {
   date: string;
   shares: Record<string, number>;
-  public_metrics: Record<string, { rating_count: number; average_rating?: number | null; app_count: number }>;
+  public_metrics: Record<string, { rating_count: number }>;
   fresh_brand_count: number;
   is_carried_forward: boolean;
   data_as_of?: string | null;
@@ -744,7 +731,6 @@ export interface MarketShareTrendSummary {
   start_rating_count: number;
   latest_rating_count: number;
   rating_count_change: number;
-  latest_average_rating?: number | null;
 }
 
 export interface MarketShareTrendResponse {
@@ -759,17 +745,15 @@ export interface MarketShareTrendResponse {
   summary: MarketShareTrendSummary[];
 }
 
-export type BrandMetric = "app_store_ratings" | "google_play_ratings" | "product_reviews" | "mentions" | "comments" | "engagement" | "views";
-export type AppMetric = "rating_count" | "rating" | "downloads" | "installs";
+export type BrandMetric = "app_store_ratings" | "google_play_ratings" | "app_downloads";
+export type AppMetric = "rating_count" | "downloads";
 
 export interface AppObservation extends Record<AppMetric, number | null> {
   key: string;
   app_id: string;
   name: string;
-  publisher?: string | null;
   platform: "app_store" | "google_play";
   scope: string;
-  version?: string | null;
   date: string;
   observed_at: string;
   url?: string | null;
