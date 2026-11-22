@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from . import ai
-from .overview_evidence import build_overview_evidence
+from .overview_evidence import _diverse, build_overview_evidence
 from .domains.common import resolve_window
 from .domains.insights import _overview_payload
 
@@ -18,7 +18,7 @@ try:
     STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("MONITOR_STRATEGIC_SIGNALS_TIMEOUT_SECONDS", "180")))
 except (TypeError, ValueError):
     STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS = 180.0
-_STRATEGIC_SIGNALS_VERSION = "strategic-signals-v2"
+_STRATEGIC_SIGNALS_VERSION = "strategic-signals-v3"
 _CACHE_LOCK = threading.Lock()
 _IN_FLIGHT: dict[str, threading.Lock] = {}
 
@@ -26,7 +26,7 @@ _IN_FLIGHT: dict[str, threading.Lock] = {}
 def _data_revision(conn: sqlite3.Connection, brand_id: str) -> str:
     """Return a cheap revision token so same-day imports invalidate the cache."""
     sources = (
-        ("records", "occurred_at", "updated_at"),
+        ("records", "occurred_at", "created_at"),
         ("job_postings", "first_seen", "updated_at"),
         ("sales_metrics", "snapshot_date", "created_at"),
         ("web_snapshots", "snapshot_date", "created_at"),
@@ -182,7 +182,7 @@ def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: st
         "window": {"scope": scope, "start": start, "end": end},
         "headline": {
             "posture": "watch",
-            "summary": "正在整理跨板块证据并生成战略研判，完成后将自动展示结果。",
+            "summary": "已收集各板块数据，等待生成战略研判。",
             "confidence": "low",
         },
         "signals": [],
@@ -200,6 +200,30 @@ def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: st
     }
 
 
+def _model_packet(packet: dict) -> dict:
+    """Bound model input while retaining full citations for the final response."""
+    evidence = sorted(packet.get("evidence", []), key=lambda item: item.get("at") or "", reverse=True)
+    evidence = _diverse(evidence, 36, lambda item: (item.get("domain"), item.get("kind")))
+    model_evidence = []
+    for item in evidence:
+        metrics = item.get("metrics") or {}
+        model_evidence.append({
+            **{key: item[key] for key in ("id", "domain", "kind", "at", "title", "platform", "region", "product", "independence_group") if key in item},
+            "detail": (item.get("detail") or "")[:340],
+            "metrics": {key: value[:100] if isinstance(value, str) else value for key, value in metrics.items()
+                        if isinstance(value, (str, int, float))},
+        })
+    return {
+        **{key: packet[key] for key in ("brand", "range", "recent_window", "kpis", "coverage", "previous_modules", "caveats") if key in packet},
+        "evidence": model_evidence,
+        "source_coverage": {
+            source: {key: coverage[key] for key in ("loaded", "possibly_truncated", "max_records_at_identical_timestamp")
+                     if key in coverage}
+            for source, coverage in packet.get("source_coverage", {}).items()
+        },
+    }
+
+
 def build_strategic_signals(
     conn: sqlite3.Connection,
     brand_id: str,
@@ -208,6 +232,7 @@ def build_strategic_signals(
     start_date: str | None = None,
     end_date: str | None = None,
     refresh: bool = False,
+    revision: str | None = None,
 ) -> dict:
     if scope == "all_history" and not start_date and not end_date:
         start, end = history_window(conn, brand_id)
@@ -215,7 +240,7 @@ def build_strategic_signals(
         start, end = resolve_window(365 if scope == "all_history" else 30, start_date, end_date)
         scope = "range"
 
-    cache_key = _cache_key(brand_id, scope, start, end, _data_revision(conn, brand_id))
+    cache_key = _cache_key(brand_id, scope, start, end, revision if revision is not None else _data_revision(conn, brand_id))
     if not refresh:
         cached = ai.get_cached_summary(conn, cache_key)
         if isinstance(cached, dict):
@@ -237,20 +262,21 @@ def build_strategic_signals(
             # can dominate a cold request on large datasets. Strategic signals
             # already mark it as non-independent evidence; keep this endpoint
             # bounded by requesting the current brand only.
-            payload = _overview_payload(conn, brand_id, start, end, brand_id)
-            packet = build_overview_evidence(conn, brand_id, payload)
+            with ai.measure_preparation("hiring_strategy_evidence"):
+                payload = _overview_payload(conn, brand_id, start, end, brand_id)
+                packet = build_overview_evidence(conn, brand_id, payload)
             result = None
             model_succeeded = False
             model_error = "尚未配置大模型，请先在设置中配置。"
             if ai.is_configured(conn):
                 try:
-                    result = ai.summarize_overview(conn, packet, timeout=STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS)
+                    result = ai.summarize_overview(conn, _model_packet(packet), timeout=STRATEGIC_SIGNALS_LLM_TIMEOUT_SECONDS)
                     model_succeeded = isinstance(result, dict) and bool(result.get("summary"))
                     if not model_succeeded:
                         result = None
                         model_error = "大模型未返回有效的研判结果。"
-                except (ai.LlmError, TimeoutError, OSError) as exc:
-                    model_error = str(exc)[:200]
+                except (ai.LlmError, TimeoutError, OSError):
+                    model_error = "模型暂时未返回结果，可点击刷新重试。"
                     result = None
             if not isinstance(result, dict):
                 result = {"summary": "语义研判暂未生成，以下展示已采集证据与板块观察，可点击刷新重试。", "deep_insights": [], "priority_alerts": [], "caveats": [model_error]}

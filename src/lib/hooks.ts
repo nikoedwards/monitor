@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ApiError,
   api,
   qs,
   type Brand,
   type CommunityPostSummary,
+  type HiringStrategicSignals,
   type Link,
   type MarketObservationsResponse,
   type MarketShareModelKey,
@@ -683,17 +685,52 @@ export function useHiringOrgEstimate() {
   });
 }
 
+type HiringAnalysisRun = Pick<HiringStrategicSignals, "generation">;
+
+async function requestHiringAnalysis<T>(request: Promise<T>): Promise<T> {
+  try {
+    return await request;
+  } catch (error) {
+    if (error instanceof ApiError && [502, 503, 504].includes(error.status) &&
+        /^(bad gateway|service unavailable|gateway timeout|HTTP \d+)$/i.test(error.message)) {
+      throw new ApiError("分析服务暂时无法连接，请稍后重试。", error.status);
+    }
+    throw error;
+  }
+}
+
+function retryHiringAnalysis(failures: number, error: Error) {
+  return failures < 1 && (!(error instanceof ApiError) || [502, 503, 504].includes(error.status));
+}
+
+function mergeHiringAnalysisStatus<T extends HiringAnalysisRun>(previous: T, update: Partial<T>): T {
+  return {
+    ...previous,
+    ...update,
+    generation: update.generation ?? { status: "failed", error: "分析任务已中断，请重新生成。" },
+  };
+}
+
 export function useHiringStrategicSignals(brandId?: string) {
   const qc = useQueryClient();
   const queryKey = ["hiring-strategic-signals", brandId];
+  const params = { brand_id: brandId, scope: "all_history", background: true };
   const query = useQuery({
     queryKey,
-    queryFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history", background: true })}`),
+    queryFn: async () => {
+      const previous = qc.getQueryData<HiringStrategicSignals>(queryKey);
+      if (previous?.generation?.status === "running") {
+        const update = await requestHiringAnalysis(api.get<Partial<HiringStrategicSignals>>(`/api/hiring/strategic-signals${qs({ ...params, poll: true })}`));
+        return mergeHiringAnalysisStatus(previous, update);
+      }
+      return requestHiringAnalysis(api.get<HiringStrategicSignals>(`/api/hiring/strategic-signals${qs(params)}`));
+    },
     enabled: !!brandId,
-    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 2000 : false,
+    retry: retryHiringAnalysis,
+    refetchInterval: (query) => query.state.status !== "error" && query.state.data?.generation?.status === "running" ? 2000 : false,
   });
   const refresh = useMutation({
-    mutationFn: () => api.get<import("./api").HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ brand_id: brandId, scope: "all_history", refresh: true, background: true })}`),
+    mutationFn: () => requestHiringAnalysis(api.get<HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ ...params, refresh: true })}`)),
     onSuccess: (data) => qc.setQueryData(queryKey, data),
   });
   return { ...query, refresh };
@@ -835,20 +872,28 @@ export function useAnalyzeJd(brandId?: string, range?: TimeRange, filters: { pla
   const rp = rangeParams(range);
   const filterParams = { platform: filters.platform && filters.platform !== "all" ? filters.platform : undefined, status: filters.status && filters.status !== "all" ? filters.status : undefined };
   const queryKey = ["hiring-analysis", brandId, rp, filterParams];
+  const params = { brand_id: brandId, background: true, ...filterParams, ...rp };
   const query = useQuery({
     queryKey,
-    queryFn: () => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, cached_only: true, background: true, ...filterParams, ...rp })}`),
+    queryFn: async () => {
+      const previous = qc.getQueryData<any>(queryKey);
+      if (previous?.generation?.status === "running") {
+        const update = await requestHiringAnalysis(api.post<any>(`/api/hiring/analyze${qs({ ...params, poll: true })}`));
+        return { ...mergeHiringAnalysisStatus(previous, update), cache_miss: !(update.summary || previous.summary) };
+      }
+      return requestHiringAnalysis(api.post<any>(`/api/hiring/analyze${qs({ ...params, cached_only: true })}`));
+    },
     enabled: !!brandId,
     staleTime: 24 * 60 * 60 * 1000,
     refetchOnMount: "always",
-    retry: false,
-    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 2000 : false,
+    retry: retryHiringAnalysis,
+    refetchInterval: (query) => query.state.status !== "error" && query.state.data?.generation?.status === "running" ? 2000 : false,
   });
   const generate = useMutation({
-    mutationFn: ({ refresh = false }: { refresh?: boolean }) => api.post<any>(`/api/hiring/analyze${qs({ brand_id: brandId, refresh, background: true, ...filterParams, ...rp })}`),
+    mutationFn: ({ refresh = false }: { refresh?: boolean }) => requestHiringAnalysis(api.post<any>(`/api/hiring/analyze${qs({ ...params, refresh })}`)),
     onSuccess: (data) => qc.setQueryData(queryKey, data),
   });
-  return { ...query, generate, isGenerating: generate.isPending || query.data?.generation?.status === "running" };
+  return { ...query, generate, isGenerating: generate.isPending || (!query.isError && query.data?.generation?.status === "running") };
 }
 
 // ---------------------------------------------------------------- web

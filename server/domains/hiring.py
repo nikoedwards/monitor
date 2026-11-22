@@ -886,6 +886,7 @@ def hiring_strategic_signals(
     end_date: str | None = None,
     refresh: bool = False,
     background: bool = False,
+    poll: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     """Return the cross-board strategic signal card for the hiring surface.
@@ -898,12 +899,16 @@ def hiring_strategic_signals(
         raise HTTPException(status_code=400, detail="scope must be all_history or range")
     fetch_brand(conn, brand_id)
     if background:
-        baseline = build_strategic_signals(conn, brand_id, scope=scope, start_date=start_date, end_date=end_date)
-        key = "strategy:" + json.dumps([brand_id, baseline["window"], _data_revision(conn, brand_id)], sort_keys=True)
+        key = "strategy:" + json.dumps([brand_id, scope, start_date, end_date])
+        if poll:
+            return analysis_job(conn, key, start=False)
+        revision = _data_revision(conn, brand_id)
+        baseline = build_strategic_signals(conn, brand_id, scope=scope, start_date=start_date, end_date=end_date,
+                                          revision=revision)
         job = analysis_job(
             conn, key,
             lambda worker: build_strategic_signals(worker, brand_id, scope=scope, start_date=start_date, end_date=end_date, refresh=True),
-            start=refresh or not baseline.get("cached"), refresh=refresh,
+            start=refresh or not baseline.get("cached"), refresh=refresh, revision=revision,
         )
         if job.get("generation", {}).get("status") == "failed" and not baseline.get("cached"):
             baseline["headline"]["summary"] = "战略研判生成失败，点击刷新可重试。"
@@ -972,7 +977,7 @@ def _empty_trend(start: str, end: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------- LLM analysis
-def _fallback_jd_analysis(postings: list[dict], start: str, end: str, error: str = "") -> dict:
+def _fallback_jd_analysis(postings: list[dict], start: str, end: str) -> dict:
     """Return a deterministic, bounded result when the model is unavailable."""
     department_counts: dict[str, int] = defaultdict(int)
     role_counts: dict[str, int] = defaultdict(int)
@@ -1000,7 +1005,7 @@ def _fallback_jd_analysis(postings: list[dict], start: str, end: str, error: str
             "当前结果为确定性招聘统计，尚未形成跨板块战略研判。",
             "模型恢复后可重新生成包含 JD 语义的战略信号。",
         ],
-        "risks": ["大模型暂时不可用，以上内容不包含 JD 语义推断。"] + ([str(error)[:160]] if error else []),
+        "risks": ["大模型暂时不可用，以上内容不包含 JD 语义推断。"],
         "analysis_status": "fallback",
     }
 
@@ -1016,10 +1021,17 @@ def analyze_hiring(
     refresh: bool = False,
     cached_only: bool = False,
     background: bool = False,
+    poll: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    brand = fetch_brand(conn, brand_id)
     start, end = resolve_window(days, start_date, end_date)
+    platform = platform if platform and platform != "all" else None
+    status = status if status and status != "all" else None
+    scope = (brand_id, start, end, platform or "", status or "")
+    key = "jd:" + json.dumps(scope, ensure_ascii=False)
+    if background and poll:
+        return analysis_job(conn, key, start=False)
+    brand = fetch_brand(conn, brand_id)
     clauses = ["brand_id = ?", "substr(first_seen, 1, 10) >= ?", "substr(first_seen, 1, 10) <= ?"]
     params: list[str] = [brand_id, start, end]
     if platform and platform != "all":
@@ -1029,40 +1041,42 @@ def analyze_hiring(
         clauses.append("status = ?")
         params.append(status)
     rows = conn.execute(
-        f"SELECT title, department, city, platform, status, first_seen, jd_text FROM job_postings WHERE {' AND '.join(clauses)} ORDER BY first_seen DESC LIMIT 80",
+        f"SELECT title, department, city, platform, status, first_seen, jd_text FROM job_postings WHERE {' AND '.join(clauses)} ORDER BY first_seen DESC, id LIMIT 80",
         params,
     ).fetchall()
     postings = [dict(r) for r in rows]
     if not postings:
+        if cached_only:
+            return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
         raise HTTPException(status_code=400, detail="该时间窗内暂无职位数据，请先采集。")
     revision = hashlib.sha256(json.dumps(postings, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:20]
+    persistent_key = "hiring-analysis:" + "|".join((*scope, revision))
+    baseline = {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+    if background or not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent is not None:
+            baseline = {**persistent, "cached": True}
     if background:
-        baseline = analyze_hiring(brand_id, days=days, start_date=start, end_date=end, platform=platform,
-                                  status=status, cached_only=True, conn=conn)
-        key = "jd:" + json.dumps([brand_id, start, end, platform or "", status or "", revision], ensure_ascii=False)
         if not cached_only and not ai.is_configured(conn):
             raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
         job = analysis_job(
             conn, key,
-            lambda worker: analyze_hiring(brand_id, days=days, start_date=start, end_date=end, platform=platform,
-                                          status=status, refresh=True, conn=worker),
-            start=not cached_only and (refresh or baseline.get("cache_miss", False)), refresh=refresh,
+            lambda worker: _generate_jd(worker, brand, postings, start, end, platform, status, persistent_key),
+            start=not cached_only and (refresh or baseline.get("cache_miss", False)), refresh=refresh, revision=revision,
         )
         return {**baseline, **job, "cache_miss": not bool(job.get("summary") or baseline.get("summary"))}
-    cache_key = (brand_id, start, end, platform or "", status or "", revision)
-    persistent_key = "hiring-analysis:" + "|".join(cache_key)
-    if not refresh:
-        persistent = ai.get_cached_summary(conn, persistent_key)
-        if persistent is not None:
-            return {**persistent, "cached": True}
-    if cached_only:
-        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+    if cached_only or baseline.get("cached"):
+        return baseline
     if not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
+    return _generate_jd(conn, brand, postings, start, end, platform, status, persistent_key)
+
+
+def _generate_jd(conn, brand, postings, start, end, platform, status, persistent_key):
     try:
         result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end, "filters": {"platform": platform, "status": status}})
-    except (ai.LlmError, TimeoutError, OSError) as exc:
-        result = _fallback_jd_analysis(postings, start, end, str(exc))
+    except (ai.LlmError, TimeoutError, OSError):
+        result = _fallback_jd_analysis(postings, start, end)
     result = {**result, "cached": False, "range": {"start": start, "end": end}, "filters": {"platform": platform, "status": status}}
     if result.get("analysis_status") != "fallback":
         ai.put_cached_summary(conn, persistent_key, result)
