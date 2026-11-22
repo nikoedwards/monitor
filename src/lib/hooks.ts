@@ -456,22 +456,37 @@ export function useInsightsSummary(brandId?: string, dimension?: string, channel
   const rp = rangeParams(range);
   const filterParams = { ...filters, sources: filters.sources?.join(","), platforms: filters.platforms?.join(",") };
   const queryClient = useQueryClient();
-  const namespace = dimension === "voc" ? "insights-summary-voc-v2" : "insights-summary";
+  const background = dimension === "marketing";
+  const namespace = background ? "marketing-insights-summary" : dimension === "voc" ? "insights-summary-voc-v2" : "insights-summary";
   const queryKey = [namespace, brandId, dimension, channel, rp, filterParams];
   const storageKey = persistentTaskKey(namespace, [brandId, dimension, channel, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
+  const params = { brand_id: brandId, dimension, channel, background: background || undefined, ...filterParams, ...rp };
   const query = useQuery({
     queryKey,
-    queryFn: () => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, cached_only: true, ...filterParams, ...rp })}`),
+    queryFn: () => api.get<any>(`/api/insights/summary${qs({ ...params, cached_only: true })}`),
     enabled: !!brandId,
     staleTime: 24 * 60 * 60 * 1000,
     retry: false,
+    refetchOnMount: background ? "always" : true,
+    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 2000 : false,
   });
   const generate = usePersistentTaskMutation<any, { refresh?: boolean }>(
     storageKey,
-    ({ refresh = false }) => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, refresh, ...filterParams, ...rp })}`),
-    (data) => queryClient.setQueryData(queryKey, data),
+    ({ refresh = false }) => api.get<any>(`/api/insights/summary${qs({ ...params, refresh })}`),
+    async (data) => {
+      await queryClient.cancelQueries({ queryKey });
+      queryClient.setQueryData(queryKey, data);
+    },
   );
-  return { ...query, data: generate.data || (query.data?.cache_miss ? undefined : query.data), generate };
+  const generation = query.data?.generation as { status: "running" | "completed" | "failed"; error?: string } | undefined;
+  const cached = query.data?.cache_miss ? undefined : query.data;
+  return {
+    ...query,
+    data: background ? cached : generate.data || cached,
+    generate,
+    isGenerating: generate.isPending || generation?.status === "running",
+    generationError: generation?.error,
+  };
 }
 
 // ---------------------------------------------------------------- creators

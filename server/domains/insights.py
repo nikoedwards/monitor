@@ -410,7 +410,7 @@ def _generate_overview_summary(conn: sqlite3.Connection, brand_id: str, start: s
 
 
 @router.get("/insights/summary")
-def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, sources: str | None = None, sentiment: str | None = None, platform: str | None = None, platforms: str | None = None, publication_domain: str | None = None, publication_name: str | None = None, q: str | None = None, product_id: str | None = None, matched_product_id: str | None = None, intent: str | None = None, region: str | None = None, data_type: str | None = None, refresh: bool = False, cached_only: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+def insights_summary(brand_id: str | None = None, dimension: str | None = None, channel: str | None = None, start_date: str | None = None, end_date: str | None = None, sources: str | None = None, sentiment: str | None = None, platform: str | None = None, platforms: str | None = None, publication_domain: str | None = None, publication_name: str | None = None, q: str | None = None, product_id: str | None = None, matched_product_id: str | None = None, intent: str | None = None, region: str | None = None, data_type: str | None = None, refresh: bool = False, cached_only: bool = False, background: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(None, start_date, end_date)
     filters = {key: value for key, value in {
         "sources": sources, "sentiment": sentiment, "platform": platform, "platforms": platforms,
@@ -419,17 +419,33 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         "region": region, "data_type": data_type,
     }.items() if value not in (None, "")}
     filter_key = json.dumps(filters, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    is_voice = dimension == "voc"
-    namespace = "insights-voc-v2" if is_voice else "insights"
+    namespace = "insights-voc-v2" if dimension == "voc" else "insights"
     cache_key = namespace + ":" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
-    if not refresh:
-        cached = ai.get_cached_summary(conn, cache_key)
-        if cached is not None:
-            return {**cached, "cached": True}
-    if cached_only:
-        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
-    if not ai.is_configured(conn):
+    background = background and dimension == "marketing"
+    cached = ai.get_cached_summary(conn, cache_key) if background or not refresh else None
+    snapshot = {**cached, "cached": True} if cached is not None else {
+        "cache_miss": True, "cached": False, "range": {"start": start, "end": end},
+    }
+    should_generate = not cached_only and (refresh or cached is None)
+    if should_generate and not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
+    if background:
+        job = analysis_job(
+            conn, cache_key,
+            lambda worker: _generate_insights_summary(worker, brand_id, dimension, channel, start, end, filters, cache_key),
+            start=should_generate, refresh=True,
+        )
+        if job.get("generation", {}).get("status") == "completed":
+            return job
+        return {**snapshot, **job}
+    if should_generate:
+        return _generate_insights_summary(conn, brand_id, dimension, channel, start, end, filters, cache_key)
+    return snapshot
+
+
+def _generate_insights_summary(conn: sqlite3.Connection, brand_id: str | None, dimension: str | None,
+                               channel: str | None, start: str, end: str, filters: dict, cache_key: str) -> dict:
+    is_voice = dimension == "voc"
     with ai.measure_preparation("insights"):
         records = _summary_records(conn, brand_id, dimension, channel, start, end, filters)
     if not records and not is_voice:
