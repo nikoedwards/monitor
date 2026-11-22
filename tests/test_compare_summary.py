@@ -1,6 +1,10 @@
 import json
 import sqlite3
+import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -78,11 +82,13 @@ class CompareSummaryTests(unittest.TestCase):
         result = {"brand_moves": [self.finding("a:record:a-now", brand_id="b"), self.finding("a:record:a-now", brand_id="unknown")]}
         self.assertEqual([], validate_compare_result(result, self.packet())["brand_moves"])
 
+    @patch("server.compare_summary.build_compare_packet")
     @patch("server.compare_summary.ai.call_llm")
-    def test_cached_only_never_generates(self, llm):
+    def test_uncached_window_skips_evidence_and_model(self, llm, build_packet):
         result = compare_summary(self.conn, "2026-10-01", "2026-10-30", cached_only=True)
         self.assertTrue(result["cache_miss"])
         llm.assert_not_called()
+        build_packet.assert_not_called()
 
     @patch("server.compare_summary.ai.is_configured", return_value=True)
     @patch("server.compare_summary.ai.call_llm")
@@ -132,6 +138,36 @@ class CompareSummaryTests(unittest.TestCase):
         with patch("server.compare_summary.compare_summary", return_value={}) as summarize:
             compare_strategy_summary(start_date="2026-10-30", end_date="2026-10-01", conn=self.conn)
         summarize.assert_called_once_with(self.conn, "2026-10-01", "2026-10-30", refresh=False, cached_only=False)
+
+    def test_background_generation_can_be_polled_without_duplicate_work(self):
+        release = threading.Event()
+        params = {"start_date": "2026-10-01", "end_date": "2026-10-30", "background": True}
+
+        def summarize(conn, start, end, *, refresh):
+            self.assertTrue(release.wait(3))
+            return {"mode": "ai", "range": [start, end]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("server.compare_summary.compare_summary", side_effect=summarize) as generate:
+                conn = sqlite3.connect(Path(directory) / "compare.db")
+                try:
+                    for _ in range(2):
+                        result = compare_strategy_summary(**params, refresh=True, conn=conn)
+                        self.assertEqual("running", result["generation"]["status"])
+                    self.assertEqual("running", compare_strategy_summary(**params, conn=conn)["generation"]["status"])
+                    release.set()
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        result = compare_strategy_summary(**params, conn=conn)
+                        if result["generation"]["status"] != "running":
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual("completed", result["generation"]["status"])
+                    self.assertEqual(["2026-10-01", "2026-10-30"], result["range"])
+                    generate.assert_called_once()
+                finally:
+                    release.set()
+                    conn.close()
 
     def test_sampling_preserves_low_volume_brands_and_sources(self):
         for index in range(100):

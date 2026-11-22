@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
+from ..analysis_jobs import analysis_job
 from ..overview_evidence import OVERVIEW_VERSION, build_overview_evidence
 from .common import build_trend, get_conn, query_records, resolve_window
 
@@ -424,8 +425,14 @@ def compare(days: int = 30, start_date: str | None = None, end_date: str | None 
 
 
 @router.get("/compare/summary")
-def compare_strategy_summary(days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, cached_only: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+def compare_strategy_summary(days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, cached_only: bool = False, background: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     from ..compare_summary import compare_summary
 
     start, end = resolve_window(days, start_date, end_date)
+    if background:
+        return analysis_job(
+            conn, f"compare-strategy:{start}:{end}",
+            lambda worker: compare_summary(worker, start, end, refresh=True),
+            start=refresh and not cached_only, refresh=refresh,
+        )
     return compare_summary(conn, start, end, refresh=refresh, cached_only=cached_only)
