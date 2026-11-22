@@ -6,6 +6,7 @@ import { fmtNum } from "../lib/format";
 import { dailyPersistentTaskKey, persistTaskValue, PERSISTENT_TASK_EVENT, readPersistentTask } from "../lib/persistentTask";
 import { AsyncProgress, Badge, Button } from "./ui";
 import { OverviewResearch } from "./OverviewResearch";
+import { VoiceSummaryOpening } from "./VoiceSummaryOpening";
 
 function usePersistentSummary<T>(key: string, fetched: T | undefined): T | null {
   const [cached, setCached] = useState<T | null>(() => {
@@ -54,13 +55,9 @@ function highlightSource(highlight: string, representative: any[] = []) {
   return bestScore >= 2 ? best : null;
 }
 
-export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { brandId?: string; range: TimeRange; marketBrandIds?: string[] }) {
-  const [refreshKey, setRefreshKey] = useState(0);
-  const summary = useOverviewSummary(brandId, range, marketBrandIds, refreshKey);
-  const cacheKey = dailyPersistentTaskKey("executive-summary-research-v3", [brandId, range.start_date, range.end_date, marketBrandIds?.join(",")]);
-  const cached = usePersistentSummary<any>(cacheKey, summary.data);
-  const data = cached || summary.data;
-  const pending = summary.isFetching || readPersistentTask<any>(cacheKey)?.status === "pending";
+export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview }: { brandId?: string; range: TimeRange; marketBrandIds?: string[]; preview?: { mode: "fallback" } }) {
+  const { data: analyzed, pending, error, refresh } = useOverviewSummary(brandId, range, marketBrandIds);
+  const data = analyzed || preview;
 
   return (
     <div className="space-y-4">
@@ -70,16 +67,16 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { bran
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 跨板块证据研判</span>
         </div>
         <div className="flex flex-col items-end">
-          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={pending}>
+          <Button size="sm" onClick={refresh} disabled={pending}>
             <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
             {pending ? "更新中…" : "重新研判"}
           </Button>
-          <AsyncProgress active={pending} label="正在交叉分析经营证据" />
+          <AsyncProgress active={pending} label="正在后台分析经营证据" />
         </div>
       </div>
 
-      {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在交叉分析经营证据…</p>}
-      {summary.isError && <p className="text-[13px]" style={{ color: "var(--danger)" }}>经营总结暂时不可用，下面的业务指标仍可正常查看。</p>}
+      {error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
+      {!pending && !error && analyzed?.summary_notice && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>{analyzed.summary_notice}</p>}
       {data && <OverviewResearch data={data} brandId={brandId} />}
     </div>
   );
@@ -161,9 +158,10 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
   );
 }
 
-export function SmartSummary({ brandId, dimension, channel, range, filters, label = "智能总结" }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; filters?: SummaryFilters; label?: string }) {
+export function SmartSummary({ brandId, dimension, channel, range, filters, label = "智能总结", sourceLabels }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; filters?: SummaryFilters; label?: string; sourceLabels?: Record<string, string> }) {
   const summarize = useInsightsSummary(brandId, dimension, channel, range, filters);
   const data = summarize.data;
+  const voiceOpening = dimension === "voc" ? data?.voice_opening : undefined;
   const error = summarize.generate.error?.message || summarize.error?.message || summarize.generationError;
 
   const run = () => {
@@ -190,9 +188,11 @@ export function SmartSummary({ brandId, dimension, channel, range, filters, labe
 
       {data && (
         <div className="mt-4 space-y-4">
-          {data.summary && <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{data.summary}</p>}
+          {voiceOpening ? (
+            <VoiceSummaryOpening summary={data.summary} sentiment={data.sentiment} opening={voiceOpening} recordCount={data.record_count} sourceLabels={sourceLabels} />
+          ) : data.summary && <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{data.summary}</p>}
 
-          {data.sentiment && (data.sentiment.overall || data.sentiment.positive != null) && (
+          {!voiceOpening && data.sentiment && (data.sentiment.overall || data.sentiment.positive != null) && (
             <div className="flex items-center gap-2 flex-wrap">
               {data.sentiment.overall && <Badge tone={data.sentiment.overall === "negative" ? "negative" : data.sentiment.overall === "positive" ? "positive" : "neutral"}>整体 {data.sentiment.overall}</Badge>}
               {data.sentiment.positive != null && <span className="text-[12px]" style={{ color: "var(--mute)" }}>正 {fmtNum(data.sentiment.positive)} · 中 {fmtNum(data.sentiment.neutral || 0)} · 负 {fmtNum(data.sentiment.negative || 0)}</span>}

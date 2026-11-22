@@ -91,8 +91,8 @@ export default function Overview() {
   }, [brandId, brands]);
   const { data, isLoading, isError, refetch, isFetching } = useOverview(brandId, range, marketBrandIds);
 
+  if (isError && !data) return <Card><EmptyState title="经营总览加载失败" hint="请检查数据服务后重试。" action={<Button onClick={() => refetch()}>重新加载</Button>} /></Card>;
   if (isLoading || !data) return <Spinner />;
-  if (isError) return <Card><EmptyState title="经营总览加载失败" hint="请检查数据服务后重试。" action={<Button onClick={() => refetch()}>重新加载</Button>} /></Card>;
 
   const k = data.kpis || {};
   const modules = data.modules || {};
@@ -109,7 +109,7 @@ export default function Overview() {
 
       <Card className="p-5">
         <SectionTitle title="经营情报洞察" subtitle={`先看高优先事项，再看跨板块深度预测${lastUpdated ? ` · 最近数据 ${String(lastUpdated).slice(0, 16).replace("T", " ")}` : ""}`} />
-        <ExecutiveSmartSummary brandId={brandId} range={range} marketBrandIds={marketBrandIds} />
+        <ExecutiveSmartSummary key={JSON.stringify([brandId, range.start_date, range.end_date, marketBrandIds])} brandId={brandId} range={range} marketBrandIds={marketBrandIds} preview={data.summary_preview} />
       </Card>
 
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">

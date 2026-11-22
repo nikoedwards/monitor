@@ -6,6 +6,7 @@ the browser. Uses stdlib urllib (no extra dependency).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -47,7 +48,7 @@ except (TypeError, ValueError):
     JD_ANALYSIS_TIMEOUT_SECONDS = 180.0
 
 
-def get_cached_summary(conn: sqlite3.Connection, cache_key: str) -> dict | None:
+def get_cached_summary(conn: sqlite3.Connection, cache_key: str, *, max_age: timedelta | None = SUMMARY_CACHE_TTL) -> dict | None:
     """Return a cached LLM result while it is less than 24 hours old."""
     row = conn.execute(
         "SELECT result_json, created_at FROM llm_summary_cache WHERE cache_key = ?",
@@ -57,7 +58,7 @@ def get_cached_summary(conn: sqlite3.Connection, cache_key: str) -> dict | None:
         return None
     try:
         created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
-        if datetime.now(timezone.utc) - created >= SUMMARY_CACHE_TTL:
+        if max_age is not None and datetime.now(timezone.utc) - created >= max_age:
             return None
         value = json.loads(row["result_json"] or "{}")
         return value if isinstance(value, dict) else None
@@ -647,100 +648,135 @@ ORG_ESTIMATE_PROMPT = """目标公司：{brand}
 公司公开元数据（可能为空）：{public_context}
 统计窗口：{start} 至 {end}
 
-招聘组织雷达原始信号：
+岗位与员工样本汇总：
 {radar}
 
-请估算部门和地区的可能员工人数区间。输出严格符合以下 JSON：
+推断公司总人数及各地区、部门、岗位族的可能人数区间。输出严格符合以下 JSON：
 {{
-  "summary": "2-4 句话，说明估算依据和最大不确定性",
-  "overall": {{"low": 0, "high": 0, "confidence": "low|medium|high", "basis": ["依据"]}},
-  "departments": [{{"department": "只能使用输入中的部门名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["输入中的职位 ID"]}}],
-  "locations": [{{"city": "只能使用输入中的城市名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["输入中的职位 ID"]}}],
+  "summary": "说明有证据支撑的组织结构、规模依据及最大不确定性",
+  "overall": {{"low": 0, "high": 0, "confidence": "low|medium|high", "basis": ["规模依据"]}},
+  "departments": [{{"department": "输入中的部门名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["该部门的职位 ID"]}}],
+  "locations": [{{"city": "输入中的地区名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["该地区的职位 ID"], "departments": [{{"department": "该地区的部门名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["该地区该部门的职位 ID"]}}]}}],
+  "role_families": [{{"role_family": "输入中的岗位族名", "low": 0, "high": 0, "confidence": "low|medium|high", "rationale": "简短推理", "evidence_ids": ["该岗位族的职位 ID"]}}],
   "assumptions": ["明确写出使用的假设"],
   "limitations": ["明确写出数据限制"]
 }}
 
 规则：
-- low/high 必须是非负整数，low <= high；区间要比单点更诚实。
-- 已知员工样本是可见下界，部门 low 不得低于该部门已知样本；不要把样本当作完整 headcount。
-- 招聘需求只能作为扩张或岗位结构信号；岗位数量多不等于员工数量多。
-- 只对输入中已有的部门和城市输出结果；没有足够证据的条目可以省略。
-- evidence_ids 只能来自输入证据，最多 6 个；没有证据时返回空数组并降低置信度。
-- 不要使用当前日期之外的外部事实，不要声称已经访问了网页；公开元数据只能作为弱辅助信号。
+- low/high 必须是非负整数，low <= high。证据不足时 overall 返回 null，分组条目省略。0 不表示未知。
+- 公开员工样本是可见下界。整体及分组的 low 不得低于各自样本量。样本没有地区字段时不得按城市分配。
+- 在招和历史招聘量只支持推断岗位需求。仅凭职位数量无法推算员工人数，不得应用通用招聘倍率。
+- 地区值是招聘地点，可能包含远程、多地或仅有历史记录的岗位。不得确认物理办公室、办公地址或汇报线。
+- 只估算输入中已有且分类明确的分组。局部估算须有地区内证据，上界不得超过所属地区或公司上界。
+- evidence_ids 只能引用当前分组的 evidence 字段中的职位 ID，最多 6 个。如果只依据公开员工样本，可返回空数组。缺乏可靠规模依据时置信度应为 low。
+- 仅使用输入，不要声称访问了网页。组织总量与各维度是不同口径，不应跨维度相加。
 """
 
 
-def estimate_hiring_org(conn: sqlite3.Connection, context: dict) -> dict:
-    """Ask the configured model for bounded headcount ranges with evidence IDs."""
-    cfg = get_config(conn)
+def hiring_org_estimate_input(context: dict) -> tuple[dict, str]:
+    """Use the same evidence snapshot for generation, polling, and cache lookup."""
     radar = context.get("radar") or {}
     brand = context.get("brand") or {}
-    cache_key = "hiring-org-estimate:" + "|".join(
-        [str(brand.get("id") or brand.get("name") or ""), str(context.get("start") or ""), str(context.get("end") or ""), str(context.get("platform") or "all"), "v1"]
-    )
-    cached = get_cached_summary(conn, cache_key)
+    public_context = {
+        "description": (brand.get("description") or "")[:800],
+        "official_website": brand.get("official_website") or "",
+        "category": brand.get("category") or "",
+    }
+
+    def compact_group(row: dict, label: str) -> dict:
+        return {key: row[key] for key in (label, "open_roles", "postings_total", "known_people", "top_roles", "evidence")}
+
+    evidence = {
+        "overview": radar["overview"],
+        "departments": [compact_group(row, "department") for row in radar["departments"] if row["department"] != "未分类"],
+        "locations": [
+            {**compact_group(row, "city"), "department_details": [
+                compact_group(department, "department") for department in row["department_details"] if department["department"] != "未分类"
+            ]}
+            for row in radar["locations"] if row["city"] != "未标注地区"
+        ],
+        "role_families": [compact_group(row, "role_family") for row in radar["role_families"] if row["role_family"] not in {"未分类岗位", "未命名职位"}],
+        "data_quality": radar["data_quality"],
+    }
+    inputs = {"brand": brand.get("name") or "目标公司", "public_context": public_context, "radar": evidence}
+    revision = json.dumps([brand.get("id"), context.get("platform"), context.get("scope"), context.get("start"),
+                           None if context.get("scope") == "all_history" else context.get("end"), inputs], sort_keys=True, ensure_ascii=False)
+    return inputs, "hiring-org-estimate:v2:" + hashlib.sha256(revision.encode()).hexdigest()
+
+
+def estimate_hiring_org(conn: sqlite3.Connection, context: dict, inputs: dict, cache_key: str) -> dict:
+    """Ask the configured model for bounded headcount ranges with evidence IDs."""
+    cached = get_cached_summary(conn, cache_key, max_age=None)
     if cached is not None and not context.get("refresh"):
         return {**cached, "cached": True}
 
+    cfg = get_config(conn)
+    radar = inputs["radar"]
     prompt = ORG_ESTIMATE_PROMPT.format(
-        brand=brand.get("name") or "目标公司",
-        public_context=json.dumps({
-            "description": (brand.get("description") or "")[:800],
-            "official_website": brand.get("official_website") or "",
-            "category": brand.get("category") or "",
-        }, ensure_ascii=False),
-        start=context.get("start") or "",
-        end=context.get("end") or "",
-        radar=json.dumps({
-            "overview": radar.get("overview") or {},
-            "departments": radar.get("departments") or [],
-            "locations": radar.get("locations") or [],
-            "role_families": radar.get("role_families") or [],
-            "data_quality": radar.get("data_quality") or {},
-        }, ensure_ascii=False),
+        brand=inputs["brand"],
+        public_context=json.dumps(inputs["public_context"], ensure_ascii=False),
+        start=context["start"], end=context["end"],
+        radar=json.dumps(radar, ensure_ascii=False),
     )
     parsed = _extract_json(call_llm(cfg, ORG_ESTIMATE_SYSTEM, prompt))
     if not isinstance(parsed, dict):
         raise LlmError("大模型未返回有效的组织规模估算对象")
 
-    def clean_group(item: dict, key: str) -> dict | None:
-        if not isinstance(item, dict) or not str(item.get(key) or "").strip():
+    def clean_range(item: dict | None, floor: int, ceiling: int | None = None) -> dict | None:
+        if not isinstance(item, dict):
             return None
-        try:
-            low = max(0, int(item.get("low") or 0))
-            high = max(low, int(item.get("high") or low))
-        except (TypeError, ValueError):
-            low = high = 0
-        evidence_ids = item.get("evidence_ids") if isinstance(item.get("evidence_ids"), list) else []
+        low, high = item.get("low"), item.get("high")
+        if type(low) is not int or type(high) is not int or not 0 <= low <= high or high == 0:
+            return None
+        low, high = max(low, floor), max(high, floor)
+        if ceiling is not None:
+            high = min(high, ceiling)
+        if high < low:
+            return None
         return {
-            key: str(item.get(key)).strip()[:80],
             "low": low,
             "high": high,
-            "confidence": item.get("confidence") if item.get("confidence") in {"low", "medium", "high"} else "low",
-            "rationale": str(item.get("rationale") or "").strip()[:400],
-            "evidence_ids": [str(value) for value in evidence_ids[:6]],
+            "confidence": item.get("confidence") if item.get("confidence") in ("low", "medium", "high") else "low",
         }
 
-    departments = [item for raw in parsed.get("departments") or [] if (item := clean_group(raw, "department"))]
-    locations = [item for raw in parsed.get("locations") or [] if (item := clean_group(raw, "city"))]
-    overall = parsed.get("overall") if isinstance(parsed.get("overall"), dict) else {}
-    try:
-        overall_low = max(0, int(overall.get("low") or 0))
-        overall_high = max(overall_low, int(overall.get("high") or overall_low))
-    except (TypeError, ValueError):
-        overall_low = overall_high = 0
+    def as_list(value: object) -> list:
+        return value if isinstance(value, list) else []
+
+    def clean_groups(items: object, observed: list[dict], label: str, ceiling: int | None) -> list[dict]:
+        available = {row[label]: row for row in observed}
+        groups = []
+        for item in as_list(items):
+            if not isinstance(item, dict) or not isinstance(item.get(label), str):
+                continue
+            name = item[label].strip()
+            source = available.get(name)
+            if source is None:
+                continue
+            estimate = clean_range(item, source["known_people"], ceiling)
+            allowed_ids = {ref["id"] for ref in source["evidence"]}
+            ids = list(dict.fromkeys(value for value in as_list(item.get("evidence_ids")) if isinstance(value, str) and value in allowed_ids))[:6]
+            if estimate is None or not (ids or source["known_people"]):
+                continue
+            group = {label: name, **estimate, "rationale": str(item.get("rationale") or "").strip()[:400], "evidence_ids": ids}
+            if label == "city":
+                group["departments"] = clean_groups(item.get("departments"), source["department_details"], "department", estimate["high"])
+            groups.append(group)
+            del available[name]
+        return groups
+
+    overall = clean_range(parsed.get("overall"), radar["overview"]["known_people"])
+    if overall is not None:
+        overall["basis"] = [str(value)[:240] for value in as_list(parsed["overall"].get("basis"))[:6]]
+    ceiling = overall["high"] if overall else None
     result = {
         "summary": str(parsed.get("summary") or "").strip()[:1200],
-        "overall": {
-            "low": overall_low,
-            "high": overall_high,
-            "confidence": overall.get("confidence") if overall.get("confidence") in {"low", "medium", "high"} else "low",
-            "basis": [str(value)[:240] for value in (overall.get("basis") if isinstance(overall.get("basis"), list) else [])[:6]],
-        },
-        "departments": departments,
-        "locations": locations,
-        "assumptions": [str(value)[:300] for value in (parsed.get("assumptions") if isinstance(parsed.get("assumptions"), list) else [])[:8]],
-        "limitations": [str(value)[:300] for value in (parsed.get("limitations") if isinstance(parsed.get("limitations"), list) else [])[:8]],
+        "overall": overall,
+        "departments": clean_groups(parsed.get("departments"), radar["departments"], "department", ceiling),
+        "locations": clean_groups(parsed.get("locations"), radar["locations"], "city", ceiling),
+        "role_families": clean_groups(parsed.get("role_families"), radar["role_families"], "role_family", ceiling),
+        "assumptions": [str(value)[:300] for value in as_list(parsed.get("assumptions"))[:8]],
+        "limitations": [str(value)[:300] for value in as_list(parsed.get("limitations"))[:8]],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "cached": False,
         "model": cfg.get("llm_model") or DEFAULTS["llm_model"],
     }

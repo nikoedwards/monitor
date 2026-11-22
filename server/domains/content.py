@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from bisect import bisect_right
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 import time
@@ -17,6 +18,7 @@ from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
 from ..schemas import CommunitySummariesIn, ImportIn, RecordIn, VocActionIn, VocActionUpdate
 from ..util import compact_key, new_id, utc_now
+from ..voc_issues import analyze_issue
 from .common import build_trend, community_post_views, get_conn, query_records, resolve_window
 
 router = APIRouter(prefix="/api", tags=["content"])
@@ -194,15 +196,17 @@ def _source_catalog(records: list[dict]) -> list[dict]:
         topic_counts = Counter(topic for record in source_records for topic in (record.get("topics") or []))
         negative = counts.get("negative", 0)
         total = len(source_records)
-        representative_record = next(
-            (record for record in source_records if record.get("sentiment") == "negative"),
-            source_records[0] if source_records else {},
-        )
-        summary = (
-            representative_record.get("problem_summary") or _problem_summary(representative_record)
-            if source_records
-            else "当前时间范围内暂无反馈。"
-        )
+        examples = [record for record in source_records if record["voice_issue"]["title"] and _is_issue_feedback(record, record["voice_issue"])]
+        grouped_examples: dict[str, list[dict]] = {}
+        for record in examples:
+            grouped_examples.setdefault(record["voice_issue"]["key"], []).append(record)
+        ranked_examples = sorted(grouped_examples.values(), key=lambda group: (len(group), not group[0]["voice_issue"]["key"].startswith("quote_")), reverse=True)[:2]
+        if not ranked_examples:
+            ranked_examples = [[record] for record in source_records if record["voice_issue"]["title"]][:1]
+        source_examples = []
+        for group in ranked_examples:
+            issue = max((record["voice_issue"] for record in group), key=lambda issue: len(issue["summary"]))
+            source_examples.append({**issue, "count": len(group)})
         catalog.append({
             **item,
             "count": total,
@@ -210,9 +214,10 @@ def _source_catalog(records: list[dict]) -> list[dict]:
             "neutral": counts.get("neutral", 0),
             "negative": negative,
             "negative_rate": round(negative / total, 4) if total else 0.0,
-            "summary": summary,
-            "problem_summary": summary,
-            "representative": _representative_feedback([representative_record] if representative_record else source_records),
+            "examples": source_examples,
+            "summary": (source_examples[0]["summary"] or source_examples[0]["title"]) if source_examples else "",
+            "problem_summary": source_examples[0]["summary"] if source_examples else "",
+            "representative": source_examples[0]["evidence"]["excerpt"] if source_examples else "",
             "top_topics": [{"topic": topic, "count": count} for topic, count in topic_counts.most_common(3)],
             "hot_risk_count": sum(1 for record in source_records if record.get("hot_risk")),
         })
@@ -222,10 +227,8 @@ def _source_catalog(records: list[dict]) -> list[dict]:
 def _enrich_voice_record(record: dict) -> dict:
     """Add a readable summary and a transparent high-velocity risk signal."""
     metrics = record.get("metrics") or {}
-    body = (record.get("body") or record.get("title") or "").strip()
     sentiment = record.get("sentiment") or "neutral"
-    problem_summary = _problem_summary(record)
-    highlight_terms = _highlight_terms(record)
+    issue = analyze_issue(record)
 
     def metric_number(*keys: str) -> float:
         for key in keys:
@@ -255,100 +258,15 @@ def _enrich_voice_record(record: dict) -> dict:
     hot_risk = sentiment == "negative" and ((age_hours <= 24 and interactions >= 20) or (age_hours <= 72 and interactions >= 50) or velocity >= 8)
     return {
         **record,
-        "problem_summary": problem_summary,
-        "feedback_summary": problem_summary,
-        "highlight_terms": highlight_terms,
+        "voice_issue": issue,
+        "problem_summary": issue["summary"],
+        "feedback_summary": issue["summary"],
+        "highlight_terms": issue["evidence"]["highlights"],
         "interaction_count": int(interactions),
         "interaction_velocity": round(velocity, 2),
         "age_hours": round(age_hours, 1) if age_hours < 9999 else None,
         "hot_risk": hot_risk,
     }
-
-
-_TOPIC_PROBLEM_LABELS = {
-    "support": "客服与售后支持",
-    "experience": "产品使用体验",
-    "feature": "功能与系统集成",
-    "quality": "产品质量与稳定性",
-    "price": "价格与订阅成本",
-    "delivery": "物流与交付",
-    "retail": "购买渠道与订单",
-    "ads": "广告与内容表达",
-    "creator": "红人内容",
-    "pr": "品牌口碑与媒体报道",
-}
-
-
-def _problem_summary(record: dict) -> str:
-    """Turn a raw feedback item into a specific, readable Chinese one-liner."""
-    title = str(record.get("title") or "").strip()
-    body = str(record.get("body") or "").strip()
-    text = f"{title} {body}".strip()
-    lowered = text.lower()
-    topics = record.get("topics") or []
-    intent = record.get("intent") or ""
-    sentiment = record.get("sentiment") or "neutral"
-
-    if ("start recording" in lowered or "stop recording" in lowered) and ("shortcut" in lowered or "siri" in lowered or "app intents" in lowered):
-        return "用户希望通过 Apple 快捷指令和 Siri 开始、停止录音，并查看录音状态。"
-    if ("magnetic case" in lowered or "magnetic" in lowered) and ("iphone duo" in lowered or "back panel" in lowered) and ("doesn't work" in lowered or "does not work" in lowered or "too big" in lowered or "doesn't fit" in lowered):
-        return "磁吸保护壳与 iPhone Duo 尺寸不兼容，保护壳过大并影响手机折叠。"
-    if any(term in lowered for term in ("doesn't fit", "does not fit", "won't fit", "cannot fit")):
-        return "产品尺寸或适配性存在问题，无法与目标设备正常配合使用。"
-    if any(term in lowered for term in ("crash", "crashes", "crashed", "keeps crashing", "闪退", "崩溃")):
-        return "应用或游戏频繁崩溃，用户无法正常完成使用。"
-    if any(term in lowered for term in ("refund", "退款", "charged twice", "double charged", "unauthorized charge")):
-        return "用户认为收费存在问题，提出退款或对未授权扣款进行投诉。"
-    if any(term in lowered for term in ("repair", "rma", "replacement", "no response", "status update", "delays")) and ("support" in lowered or "service" in lowered or "died" in lowered):
-        return "产品故障后的维修与客服响应周期过长，用户长时间得不到明确进展。"
-    if "battery" in lowered and any(term in lowered for term in ("drain", "draining", "dies quickly", "续航", "耗电")):
-        return "设备耗电过快，续航表现没有达到用户预期。"
-    if "ct clamp" in lowered and any(term in lowered for term in ("not reading", "incorrect", "wrong", "self test")):
-        return "智能电表无法正确读取 CT 夹数据，导致电池放电功率异常。"
-
-    topic = next((str(item) for item in topics if item in _TOPIC_PROBLEM_LABELS), "")
-    topic_label = _TOPIC_PROBLEM_LABELS.get(topic, "产品使用")
-    if intent == "request":
-        if topic == "feature" or any(term in lowered for term in ("feature", "integration", "workflow", "shortcut", "siri")):
-            return "用户希望补充功能或系统集成能力，以减少操作步骤并提升使用效率。"
-        return f"用户希望改善{topic_label}，并提出了具体功能或服务需求。"
-    if sentiment == "positive":
-        return f"用户对{topic_label}整体评价积极，认可当前产品或服务表现。"
-    if sentiment == "negative":
-        if topic == "support":
-            return "用户对客服或售后支持不满，认为问题处理不及时或没有得到解决。"
-        return f"用户对{topic_label}不满，认为当前表现影响了正常使用。"
-    if title and not title.lower().startswith(("unknown", "untitled")):
-        return f"用户提到：{title[:72]}{'…' if len(title) > 72 else ''}。"
-    return f"用户围绕{topic_label}分享了使用反馈，暂未形成明确的正负向结论。"
-
-
-def _highlight_terms(record: dict) -> list[str]:
-    text = f"{record.get('title') or ''} {record.get('body') or ''}"
-    lowered = text.lower()
-    terms: list[str] = []
-    explanation = record.get("sentiment_explanation") or {}
-    for key in ("positive_terms", "negative_terms", "negation_terms"):
-        values = explanation.get(key) if isinstance(explanation, dict) else []
-        if isinstance(values, list):
-            terms.extend(str(value).strip() for value in values if str(value).strip())
-    patterns = (
-        r"(?:doesn't|does not|isn't|is not|can't|cannot|won't|will not)\s+(?:work|fit|respond|start|stop)(?:\s+(?:on|with|for|the|it|this|that|device|phone|app)){0,4}",
-        r"too\s+(?:big|small|slow|expensive|late|difficult)",
-        r"(?:keeps?\s+)?crash(?:es|ed|ing)?",
-        r"hangs?\s+past\s+the\s+(?:bottom|back|edge)\s+(?:edge|panel|of\s+the\s+phone)",
-        r"no\s+(?:response|meaningful status update)",
-    )
-    for pattern in patterns:
-        terms.extend(match.group(0).strip() for match in re.finditer(pattern, text, flags=re.IGNORECASE))
-    unique: list[str] = []
-    seen: set[str] = set()
-    for term in sorted(terms, key=len, reverse=True):
-        key = term.lower()
-        if len(term) >= 3 and key in lowered and key not in seen:
-            unique.append(term)
-            seen.add(key)
-    return unique[:8]
 
 
 def _representative_feedback(records: list[dict]) -> str:
@@ -423,12 +341,12 @@ def _impact_metrics(record: dict) -> dict[str, float]:
     }
 
 
-def _relative_metric(value: float, comparison_values: list[float]) -> dict[str, float | int | None]:
-    values = sorted(item for item in comparison_values if item > 0)
+def _relative_metric(value: float, values: list[float]) -> dict[str, float | int | None]:
     if value <= 0 or not values:
         return {"value": value, "percentile": None, "rank": None, "sample_size": len(values)}
-    rank = 1 + sum(item > value for item in values)
-    percentile = sum(item <= value for item in values) / len(values)
+    position = bisect_right(values, value)
+    rank = 1 + len(values) - position
+    percentile = position / len(values)
     return {
         "value": value,
         "percentile": round(percentile, 4),
@@ -437,16 +355,27 @@ def _relative_metric(value: float, comparison_values: list[float]) -> dict[str, 
     }
 
 
-def _issue_impact(records: list[dict], comparison_records: list[dict] | None = None) -> dict:
+_IMPACT_KEYS = ("views", "comments", "interactions", "reach", "velocity")
+
+
+def _impact_comparison(records: list[dict]) -> dict[str, list[float]]:
+    metrics = [_impact_metrics(record) for record in records]
+    return {key: sorted(item[key] for item in metrics if item[key] > 0) for key in _IMPACT_KEYS}
+
+
+def _issue_impact(records: list[dict], comparison_records: list[dict] | None = None,
+                  *, comparison: dict[str, list[float]] | None = None) -> dict:
     negative_records = [record for record in records if record.get("sentiment") == "negative"]
     metrics = [_impact_metrics(record) for record in negative_records]
-    comparison_metrics = [_impact_metrics(record) for record in (comparison_records or records)]
+    comparison_records = comparison_records or records
+    if comparison is None:
+        comparison = _impact_comparison(comparison_records)
     maximum = {
         key: max((item[key] for item in metrics), default=0)
-        for key in ("views", "comments", "interactions", "reach", "velocity")
+        for key in _IMPACT_KEYS
     }
     relative = {
-        key: _relative_metric(maximum[key], [item[key] for item in comparison_metrics])
+        key: _relative_metric(maximum[key], comparison[key])
         for key in maximum
     }
     top_10 = [key for key, item in relative.items() if item["percentile"] is not None and item["percentile"] >= 0.9]
@@ -466,13 +395,13 @@ def _issue_impact(records: list[dict], comparison_records: list[dict] | None = N
     }
 
 
-def _issue_priority(records: list[dict], comparison_records: list[dict] | None = None) -> str:
+def _issue_priority(records: list[dict], comparison_records: list[dict] | None = None, *, impact: dict | None = None) -> str:
     if any(_p0_match(record) for record in records):
         return "urgent"
     negative = sum(1 for record in records if record.get("sentiment") == "negative")
     complaints = sum(1 for record in records if record.get("intent") == "complaint")
     rate = negative / len(records) if records else 0.0
-    impact = _issue_impact(records, comparison_records)
+    impact = impact or _issue_impact(records, comparison_records)
     if impact["high"] or negative >= 5 or complaints >= 5 or (negative >= 3 and rate >= 0.5):
         return "high"
     if negative >= 2 or complaints >= 2:
@@ -480,8 +409,7 @@ def _issue_priority(records: list[dict], comparison_records: list[dict] | None =
     return "low"
 
 
-def _issue_priority_reason(records: list[dict], comparison_records: list[dict] | None = None) -> str:
-    impact = _issue_impact(records, comparison_records)
+def _issue_priority_reason(impact: dict) -> str:
     if impact["high"]:
         details = []
         labels = {"views": "浏览", "comments": "评论/回复", "interactions": "互动", "reach": "触达", "velocity": "互动速度"}
@@ -498,54 +426,79 @@ def _issue_priority_reason(records: list[dict], comparison_records: list[dict] |
     return ""
 
 
+def _is_issue_feedback(record: dict, issue: dict) -> bool:
+    return record.get("sentiment") == "negative" or record.get("intent") in {"complaint", "request"} or (
+        issue["key"] in {"dark_mode", "template_view", "folder_vocabulary", "shortcut_recording", "calendar_banner"}
+    )
+
+
 def _topic_breakdown(records: list[dict], comparison_records: list[dict] | None = None) -> list[dict]:
     issue_groups: dict[str, dict] = {}
     for record in records:
         topics = [str(topic) for topic in (record.get("topics") or []) if str(topic).strip()]
-        if not topics:
+        issue = record.get("voice_issue") or analyze_issue(record)
+        if not issue["title"]:
             continue
-        problem_summary = record.get("problem_summary") or _problem_summary(record)
-        group_key = " ".join(str(problem_summary).split()).casefold()
         group = issue_groups.setdefault(
-            group_key,
-            {"records": {}, "topics": set(), "teams": set(), "problem_summary": problem_summary},
+            issue["key"], {"records": {}, "topics": set(), "teams": set()},
         )
         record_key = str(record.get("id") or f"record_{id(record)}")
-        group["records"][record_key] = record
+        group["records"][record_key] = (record, issue)
         group["topics"].update(topics)
         for topic in topics:
             group["teams"].add(team_for_records([record], topic))
 
     out = []
+    comparison_records = comparison_records or records
+    comparison = _impact_comparison(comparison_records)
     team_order = {"marketing_team": 0, "support_team": 1, "product_team": 2, "experience_team": 3}
-    for group in issue_groups.values():
-        items = list(group["records"].values())
+    for issue_key, group in issue_groups.items():
+        entries = list(group["records"].values())
+        items = [record for record, _ in entries]
         negative = sum(1 for r in items if r.get("sentiment") == "negative")
-        if not negative:
+        candidates = [(record, issue) for record, issue in entries if _is_issue_feedback(record, issue)]
+        if not candidates:
             continue
         topics = sorted(group["topics"])
         suggested_teams = sorted(group["teams"], key=lambda team: (team_order.get(team, 99), team))
         source_counts = Counter(item.get("voice_source") for item in items if item.get("voice_source"))
-        representative_record = next((item for item in items if item.get("sentiment") == "negative"), items[0])
+        candidates.sort(key=lambda entry: (entry[0].get("sentiment") == "negative", len(entry[1]["summary"])), reverse=True)
+        evidence = []
+        seen_text = set()
+        for _, issue in candidates:
+            quote = issue["evidence"]
+            normalized = " ".join(quote["text"].casefold().split())
+            if normalized and normalized not in seen_text:
+                evidence.append(quote)
+                seen_text.add(normalized)
+            if len(evidence) == 3:
+                break
+        representative = evidence[0] if evidence else {}
+        lead_issue = candidates[0][1]
+        impact = _issue_impact(items, comparison_records, comparison=comparison)
         out.append({
-            "topic": topics[0],
+            "id": issue_key,
+            "title": lead_issue["title"],
+            "topic": topics[0] if topics else None,
             "topics": topics,
             "total": len(items),
             "negative": negative,
             "negative_rate": round(negative / len(items), 4) if items else 0.0,
-            "suggested_team": suggested_teams[0] if suggested_teams else team_for_records(items, topics[0]),
+            "suggested_team": suggested_teams[0] if suggested_teams else team_for_records(items),
             "suggested_teams": suggested_teams,
-            "priority": _issue_priority(items, comparison_records or records),
-            "priority_reason": _issue_priority_reason(items, comparison_records or records),
-            "impact": _issue_impact(items, comparison_records or records),
-            "representative": _representative_feedback(items),
-            "representative_url": representative_record.get("url"),
-            "representative_record_id": representative_record.get("id"),
-            "problem_summary": group["problem_summary"],
+            "priority": _issue_priority(items, comparison_records, impact=impact),
+            "priority_reason": _issue_priority_reason(impact),
+            "impact": impact,
+            "evidence": evidence,
+            "representative": representative.get("excerpt"),
+            "representative_url": representative.get("url") if representative.get("url_kind") in {"review", "source"} else None,
+            "representative_record_id": representative.get("record_id"),
+            "problem_summary": lead_issue["summary"],
             "source_keys": [key for key, _ in source_counts.most_common(3)],
             "latest_at": max((item.get("occurred_at") or "" for item in items), default=""),
         })
-    return sorted(out, key=lambda item: (item["negative"], item["negative_rate"], item["total"]), reverse=True)[:10]
+    priorities = {"urgent": 3, "high": 2, "medium": 1, "low": 0}
+    return sorted(out, key=lambda item: (priorities[item["priority"]], item["negative"], item["total"], item["latest_at"]), reverse=True)[:10]
 
 
 def _channel_breakdown(records: list[dict]) -> list[dict]:
@@ -563,14 +516,14 @@ def _channel_breakdown(records: list[dict]) -> list[dict]:
     return sorted(out, key=lambda item: item["total"], reverse=True)
 
 
-def _build_alerts(records: list[dict], comparison_records: list[dict] | None = None) -> list[dict]:
+def _build_alerts(records: list[dict], topics: list[dict]) -> list[dict]:
     alerts = []
-    for topic in _topic_breakdown(records, comparison_records or records):
+    for topic in topics:
         if topic["negative"] >= 2:
             alerts.append({
-                "id": f"topic_{topic['topic']}",
+                "id": f"topic_{topic['id']}",
                 "type": "topic",
-                "label": f"主题「{topic['topic']}」负向声量 {topic['negative']} 条",
+                "label": f"{topic['title']} · {topic['negative']} 条负向反馈",
                 "severity": "high" if topic["negative_rate"] >= 0.4 else "medium",
                 "priority": topic["priority"],
                 "suggested_team": topic["suggested_team"],
@@ -610,6 +563,7 @@ def voc_summary(
         (brand_id, brand_id),
     ).fetchall()
     closed = sum(1 for a in actions if a["status"] in {"resolved", "closed"})
+    topics = _topic_breakdown(records, records)
     return {
         "totals": {
             "total": total,
@@ -622,8 +576,8 @@ def voc_summary(
         "channels": _channel_breakdown(records),
         "source_catalog": _source_catalog(all_records),
         "selected_sources": sorted(selected_sources),
-        "topics": _topic_breakdown(records, records),
-        "alerts": _build_alerts(records, records),
+        "topics": topics,
+        "alerts": _build_alerts(records, topics),
         "p0": _p0_summary(records),
         "actions": {
             "total": len(actions),
@@ -654,6 +608,11 @@ def voc_records(
         if record.get("voice_source") in selected_sources and (not sentiment or record.get("sentiment") == sentiment)
     ]
     return {"records": records[:max(1, min(limit, 200))]}
+
+
+@router.post("/voc/record-summaries")
+def voc_record_summaries(payload: CommunitySummariesIn, conn: sqlite3.Connection = Depends(get_conn)):
+    return summarize_community_records(conn, payload.record_ids, voice=True)
 
 
 # --------------------------------------------------------------- VoC actions

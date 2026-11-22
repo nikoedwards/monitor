@@ -108,6 +108,15 @@ body {
   100% { transform: translateX(330%); }
 }
 
+@media (max-width: 639px) {
+  .voice-page .group > [role="tooltip"] {
+    position: fixed;
+    inset: auto 0.75rem 0.75rem;
+    width: auto;
+    max-width: none;
+  }
+}
+
 /* Utility shorthands mapped to design tokens */
 @layer components {
   /* Keep long URLs and unbroken source text from widening the page. */

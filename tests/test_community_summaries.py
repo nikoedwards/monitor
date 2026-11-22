@@ -54,6 +54,21 @@ class CommunitySummaryTests(unittest.TestCase):
         self.assertEqual(1, llm.call_count)
         self.assertIn("仍无法停止", result["summaries"]["siri"]["summary"])
 
+    def test_voice_feedback_caches_headline_and_summary_for_non_community_records(self):
+        insert_record(self.conn, {"id": "review", "dimension": "voc", "channel": "app",
+                                  "body": "Après un retour depuis une note, tous mes filtres disparaissent."})
+        response = json.dumps({"summaries": [{
+            "id": "review", "headline": "返回列表后筛选条件消失",
+            "summary": "用户从笔记返回后发现所有筛选条件被清空",
+        }]})
+        with patch("server.community_summaries.ai.call_llm", return_value=response) as llm:
+            first = summarize_community_records(self.conn, ["review", "media"], voice=True)
+            second = summarize_community_records(self.conn, ["review"], voice=True)
+        self.assertEqual(1, llm.call_count)
+        self.assertEqual(first["summaries"]["review"], second["summaries"]["review"])
+        self.assertEqual("返回列表后筛选条件消失", second["summaries"]["review"]["headline"])
+        self.assertEqual("unavailable", first["summaries"]["media"]["status"])
+
     def test_malformed_batch_recovers_valid_records_individually(self):
         malformed = self.response(siri="用户希望开始录音")
         with patch(

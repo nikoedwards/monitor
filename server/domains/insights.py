@@ -81,7 +81,7 @@ def _summary_records(
             records = [record for record in records if record.get("voice_source") in selected]
         if channel:
             records = [record for record in records if record.get("channel") == channel]
-        return _filter_summary_records(records, filters)[:150]
+        return _filter_summary_records(records, filters)
     filters = filters or {}
     records = query_records(
         conn,
@@ -343,23 +343,44 @@ def overview(brand_id: str | None = None, days: int = 30, start_date: str | None
         for record in records:
             topics.update(record.get("topics") or [])
         return {"kpis": _brand_snapshot(conn, brand_id, start, end), "trend": build_trend(records, start, end), "sentiment": [{"sentiment": k, "total": v} for k, v in sentiment.items()], "top_topics": [{"topic": k, "total": v} for k, v in topics.most_common(8)], "high_signal": []}
-    return _overview_payload(conn, brand_id, start, end, market_brand_ids)
+    payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
+    preview = _fallback_summary(payload)
+    payload["summary_preview"] = {**preview, "coverage": payload["coverage"], "caveats": []}
+    return payload
 
 
 @router.get("/overview/summary")
-def overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, market_brand_ids: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+def overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, market_brand_ids: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn), background: bool = False, cached_only: bool = False):
     start, end = resolve_window(days, start_date, end_date)
     cache_key = (OVERVIEW_VERSION, brand_id, start, end, market_brand_ids or "")
-    now = time.monotonic()
     persistent_key = "overview:" + "|".join(cache_key)
+    if background:
+        previous = ai.get_cached_summary(conn, persistent_key)
+
+        def generate(worker: sqlite3.Connection) -> dict:
+            result = _generate_overview_summary(worker, brand_id, start, end, market_brand_ids, cache_key, persistent_key)
+            if result.get("summary_notice") and previous and previous.get("mode") == "ai":
+                return {**previous, "cached": True, "summary_notice": "本次 AI 研判暂未完成，当前显示上次成功的结果。"}
+            return result
+
+        job = analysis_job(conn, persistent_key, generate, start=not cached_only and (refresh or previous is None), refresh=refresh)
+        snapshot = {**previous, "cached": True} if previous is not None else {}
+        return {**snapshot, **job}
+
     if not refresh:
         persistent = ai.get_cached_summary(conn, persistent_key)
         if persistent is not None:
-            _OVERVIEW_SUMMARY_CACHE[cache_key] = (now, persistent)
             return {**persistent, "cached": True}
     cached = _OVERVIEW_SUMMARY_CACHE.get(cache_key)
-    if not refresh and cached and now - cached[0] < _SUMMARY_TTL_SECONDS:
+    if not refresh and cached and time.monotonic() - cached[0] < _SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
+    if cached_only:
+        return {}
+    return _generate_overview_summary(conn, brand_id, start, end, market_brand_ids, cache_key, persistent_key)
+
+
+def _generate_overview_summary(conn: sqlite3.Connection, brand_id: str, start: str, end: str,
+                               market_brand_ids: str | None, cache_key: tuple, persistent_key: str) -> dict:
     with ai.measure_preparation("overview.aggregate"):
         payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
     transient_failure = False
@@ -373,6 +394,7 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
         except ai.LlmError:
             transient_failure = True
             result = _fallback_summary(payload)
+            result["summary_notice"] = "大模型暂时不可用，当前显示系统速览。可点击「重新研判」再试。"
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
     result.update({"range": payload["range"], "cached": False})
     result.setdefault("deep_insights", result.get("insights", []))
@@ -382,8 +404,8 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
     result.setdefault("coverage", payload["coverage"])
     result["schema_version"] = OVERVIEW_VERSION
     if not transient_failure:
-        _OVERVIEW_SUMMARY_CACHE[cache_key] = (now, result)
         ai.put_cached_summary(conn, persistent_key, result)
+        _OVERVIEW_SUMMARY_CACHE[cache_key] = (time.monotonic(), result)
     return result
 
 
@@ -397,7 +419,8 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         "region": region, "data_type": data_type,
     }.items() if value not in (None, "")}
     filter_key = json.dumps(filters, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    cache_key = "insights:" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
+    namespace = "insights-voc-v2" if dimension == "voc" else "insights"
+    cache_key = namespace + ":" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
     background = background and dimension == "marketing"
     cached = ai.get_cached_summary(conn, cache_key) if background or not refresh else None
     snapshot = {**cached, "cached": True} if cached is not None else {
@@ -422,15 +445,33 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
 
 def _generate_insights_summary(conn: sqlite3.Connection, brand_id: str | None, dimension: str | None,
                                channel: str | None, start: str, end: str, filters: dict, cache_key: str) -> dict:
+    is_voice = dimension == "voc"
     with ai.measure_preparation("insights"):
         records = _summary_records(conn, brand_id, dimension, channel, start, end, filters)
-    if not records:
+    if not records and not is_voice:
         return {"summary": "所选时间范围与筛选条件下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}, "filters": filters}
     try:
-        result = ai.summarize_records(conn, records, {"start": start, "end": end, "channel": channel, "dimension": dimension, "filters": filters})
+        if is_voice:
+            from ..voice_insights import summarize_voice
+
+            cross_domain = {}
+            if brand_id and records:
+                with ai.measure_preparation("voice-cross-domain"):
+                    previous_start, previous_end = _previous_window(start, end)
+                    market = _market_module(conn, brand_id, start, end, None)
+                    cross_domain = build_overview_evidence(conn, brand_id, {
+                        "range": {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end},
+                        "modules": {"market": market},
+                        "coverage": {},
+                        "kpis": {},
+                    }, record_sources=(("marketing", "media"), ("marketing", "ads"), ("hiring", None)))
+            result = summarize_voice(conn, records, start, end, cross_domain)
+        else:
+            result = ai.summarize_records(conn, records, {"start": start, "end": end, "channel": channel, "dimension": dimension, "filters": filters})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    result["record_count"] = len(records)
+    if not is_voice:
+        result["record_count"] = len(records)
     result["range"] = {"start": start, "end": end}
     result["filters"] = filters
     result["cached"] = False

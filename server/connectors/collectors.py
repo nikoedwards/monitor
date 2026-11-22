@@ -2167,7 +2167,7 @@ def _discourse_replies(
             "url": topic_url,
             "occurred_at": _parse_iso(post.get("created_at")),
             "metrics": {"parent_external_id": topic_ext, "reply_to_post_number": post.get("reply_to_post_number")},
-            "raw": {"post_id": pid, "topic_id": topic_id, "site": root},
+            "raw": {"post_id": pid, "post_number": post.get("post_number"), "topic_id": topic_id, "site": root},
         })
     return out
 
@@ -2398,7 +2398,7 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
         return None
 
     payloads: list[dict] = []
-    idea_ext_by_idx: dict[str, str] = {}
+    idea_links: dict[str, tuple[str, str]] = {}
     sorted_ideas = sorted(
         ideas.values(),
         key=lambda idea: str(idea.get("created_at") or ""),
@@ -2410,7 +2410,7 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
         title = clean_text(idea.get("name")) or "Feature idea"
         body = clean_text(idea.get("excerpt")) or title
         ext = f"{brand.get('id')}:frill:{host}:{idea.get('idx')}"
-        idea_ext_by_idx[idea.get("idx")] = ext
+        idea_links[idea.get("idx")] = (ext, idea_url)
         payloads.append({
             "source_id": "community_site",
             "brand_id": brand.get("id"),
@@ -2442,10 +2442,11 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
     for comment in comments:
         idea_ref = (comment.get("idea") or {}).get("__ref") or ""
         parent_idx = idea_ref.split(".")[0] if idea_ref else ""
-        parent_ext = idea_ext_by_idx.get(parent_idx)
+        parent = idea_links.get(parent_idx)
         body = clean_text(comment.get("body") or comment.get("excerpt") or "")
-        if not parent_ext or not body:
+        if not parent or not body:
             continue
+        parent_ext, parent_url = parent
         payloads.append({
             "source_id": "community_site",
             "brand_id": brand.get("id"),
@@ -2458,7 +2459,7 @@ def _frill_payloads(url: str, brand: dict, link_id) -> list[dict] | None:
             "title": "回复",
             "author": resolve_name(comment),
             "body": body,
-            "url": root,
+            "url": parent_url,
             "occurred_at": _parse_iso(comment.get("created_at")),
             "metrics": {"parent_external_id": parent_ext},
             "raw": {"site": root},

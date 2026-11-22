@@ -15,12 +15,13 @@ import {
 } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { TrendChart } from "../components/charts";
-import { RecordList } from "../components/RecordList";
+import { SentimentBadge } from "../components/RecordList";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, SectionTitle, Spinner, StatCard, Textarea } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { useSourceMutations, useVocMutations, useVocRecords, useVocSummary } from "../lib/hooks";
+import { useSourceMutations, useVocMutations, useVocRecords, useVocSummary, useVoiceFeedbackSummaries } from "../lib/hooks";
+import type { CommunityPostSummary, RecordItem, VoiceEvidence, VoiceIssuePreview } from "../lib/api";
 import { useTimeRange } from "../lib/timeRange";
-import { fmtNum, TEAM_LABEL } from "../lib/format";
+import { fmtDateTime, fmtNum, TEAM_LABEL } from "../lib/format";
 import { SmartSummary } from "../components/SmartSummary";
 
 type SourceKey =
@@ -32,6 +33,34 @@ type SourceKey =
   | "manual_feedback";
 
 type BadgeTone = "neutral" | "positive" | "negative" | "warning" | "accent";
+type FeedbackSummaries = Record<string, CommunityPostSummary>;
+
+interface VoiceSourceSummary {
+  key: string;
+  label: string;
+  count: number;
+  positive: number;
+  neutral: number;
+  negative: number;
+  hot_risk_count: number;
+  examples: (VoiceIssuePreview & { count: number })[];
+}
+
+interface IssueCard {
+  id: string;
+  title: string;
+  topics: string[];
+  total: number;
+  negative: number;
+  negative_rate: number;
+  priority: string;
+  priority_reason: string;
+  impact: Record<string, unknown>;
+  suggested_teams: string[];
+  suggested_team: string;
+  problem_summary: string;
+  evidence: VoiceEvidence[];
+}
 
 const VOICE_SOURCES: { key: SourceKey; label: string; description: string; icon: typeof Database }[] = [
   { key: "sales_reviews", label: "销售渠道评论", description: "Amazon、独立站等销售平台的商品评论", icon: ShoppingBag },
@@ -79,11 +108,19 @@ export default function Voice() {
   const [sourceDraft, setSourceDraft] = useState<SourceKey[]>(ALL_SOURCE_KEYS);
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all");
   const [collectMessage, setCollectMessage] = useState("");
+  const [openEvidence, setOpenEvidence] = useState<VoiceEvidence | null>(null);
   const { collect } = useSourceMutations();
   const summaryQuery = useVocSummary(brandId, range, selectedSources);
   const recordsQuery = useVocRecords(brandId, range, selectedSources, 40, sentimentFilter === "all" ? undefined : sentimentFilter);
   const { data: summary, isLoading, isError, error, refetch } = summaryQuery;
   const { data: records = [], isLoading: recordsLoading, isError: recordsError, refetch: refetchRecords } = recordsQuery;
+  const topics: IssueCard[] = summary?.topics || [];
+  const sourceCatalog: VoiceSourceSummary[] = summary?.source_catalog || [];
+  const feedbackSummaries = useVoiceFeedbackSummaries([
+    ...topics.flatMap((topic) => !topic.problem_summary ? (topic.evidence || []).slice(0, 1) : []),
+    ...sourceCatalog.flatMap((source) => (source.examples || []).filter((example) => !example.summary).map((example) => example.evidence)),
+    ...records.flatMap((record) => record.voice_issue && !record.voice_issue.summary ? [record.voice_issue.evidence] : []),
+  ].filter((evidence) => evidence.record_id && evidence.text));
 
   if (isLoading && !summary) return <Spinner />;
   if (isError && !summary) {
@@ -101,8 +138,7 @@ export default function Voice() {
   if (!summary) return <Spinner />;
   const totals = summary.totals;
   const p0 = summary.p0 || { total: 0, issue_count: 0, issues: [] };
-  const sourceCatalog = summary.source_catalog || [];
-  const sourceCounts = Object.fromEntries(sourceCatalog.map((source: any) => [source.key, source.count]));
+  const sourceCounts = Object.fromEntries(sourceCatalog.map((source) => [source.key, source.count]));
   const filteredRecords = records;
 
   const openSourcePicker = () => {
@@ -127,7 +163,7 @@ export default function Voice() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="voice-page space-y-6">
       <SectionTitle
         title="用户之声"
         subtitle="聚合各业务板块的真实用户反馈，识别情绪、问题标签、责任团队与高优先级风险"
@@ -184,8 +220,15 @@ export default function Voice() {
       </Card>
 
       <Card>
-        <SectionTitle title="用户之声智能总结" subtitle="结合当前时间范围与数据来源，提炼主要话题、情绪和需要关注的舆情" />
-        <SmartSummary brandId={brandId} dimension="voc" range={range} filters={{ sources: selectedSources, sentiment: sentimentFilter === "all" ? undefined : sentimentFilter }} />
+        <SectionTitle title="用户之声智能总结" />
+        <SmartSummary
+          key={JSON.stringify([brandId, range.start_date, range.end_date, selectedSources])}
+          brandId={brandId}
+          dimension="voc"
+          range={range}
+          filters={{ sources: selectedSources }}
+          sourceLabels={SOURCE_LABEL}
+        />
       </Card>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -219,10 +262,10 @@ export default function Voice() {
         <Card className="lg:col-span-2">
           <SectionTitle
             title="突出问题与标签归类"
-            subtitle="按负向声量与集中度排序，并给出建议关注部门"
+            subtitle="按具体问题归并反馈，优先显示高风险和高频问题"
             hint="P0 仅用于命中安全、隐私、数据丢失、异常扣款或大范围故障等高危信号；其余问题结合负向声量、负向率和帖子在当前范围内的相对传播排名划分 P1-P3。"
           />
-          <IssueBoard topics={summary.topics || []} />
+          <IssueBoard topics={topics} summaries={feedbackSummaries.data} onOpenEvidence={setOpenEvidence} />
         </Card>
         <div className="space-y-4">
           <Card>
@@ -233,9 +276,10 @@ export default function Voice() {
       </div>
 
       <Card>
-        <SectionTitle title="原始反馈明细" subtitle="每个数据源先给出摘要，再查看具体反馈、情绪判断、标签和采集依据" />
+        <SectionTitle title="原始反馈明细" subtitle="按来源和情绪筛选，查看具体问题、建议和原始反馈" />
         <SourceSummaryGrid
           sources={sourceCatalog}
+          summaries={feedbackSummaries.data}
           selectedSources={selectedSources}
           onSelect={(key) => setSelectedSources((current) => toggleSourceSelection(current, key as SourceKey))}
         />
@@ -253,8 +297,23 @@ export default function Voice() {
         </div>
         {recordsLoading ? <Spinner /> : recordsError ? (
           <EmptyState title="反馈明细加载失败" hint="汇总数据已加载，但明细接口暂时不可用。" action={<Button size="sm" onClick={() => void refetchRecords()}>重试明细</Button>} />
-        ) : <RecordList records={filteredRecords} emptyHint="当前时间和来源范围内暂无反馈，请调整数据来源或补充导入。" />}
+        ) : <VoiceFeedbackList records={filteredRecords} summaries={feedbackSummaries.data} onOpenEvidence={setOpenEvidence} />}
       </Card>
+
+      <Modal open={!!openEvidence} onClose={() => setOpenEvidence(null)} title="完整原文" width={720}>
+        {openEvidence && (
+          <div className="space-y-3">
+            <EvidenceMetadata evidence={openEvidence} />
+            {openEvidence.title && openEvidence.title !== openEvidence.text && (
+              <h4 className="text-[15px] font-semibold break-words" style={{ color: "var(--ink)" }}>{openEvidence.title}</h4>
+            )}
+            <p className="whitespace-pre-wrap break-words text-[14px] leading-relaxed" style={{ color: "var(--body)" }}>
+              <HighlightedQuote text={openEvidence.text} highlights={openEvidence.highlights} />
+            </p>
+            <EvidenceLink evidence={openEvidence} />
+          </div>
+        )}
+      </Modal>
 
       <DataSourceModal
         open={sourceOpen}
@@ -313,21 +372,27 @@ function SentimentDistribution({ totals }: { totals: any }) {
   );
 }
 
-function SourceSummaryGrid({ sources, selectedSources, onSelect }: { sources: any[]; selectedSources: SourceKey[]; onSelect: (key: string) => void }) {
+function SourceSummaryGrid({ sources, selectedSources, onSelect, summaries }: { sources: VoiceSourceSummary[]; selectedSources: SourceKey[]; onSelect: (key: string) => void; summaries?: FeedbackSummaries }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
       {sources.map((source) => {
-        const selected = selectedSources.includes(source.key);
+        const selected = selectedSources.some((key) => key === source.key);
         return (
           <button key={source.key} type="button" onClick={() => onSelect(source.key)} className="text-left rounded-lg p-3 transition-colors cursor-pointer" style={{ border: selected ? "1px solid var(--accent)" : "1px solid var(--hairline)", background: selected ? "rgba(0,112,243,0.06)" : "var(--bg-soft)" }}>
             <div className="flex items-center justify-between gap-2">
               <span className="text-[13px] font-semibold" style={{ color: "var(--ink)" }}>{source.label}</span>
               <span className="text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>{fmtNum(Number(source.count || 0))} 条</span>
             </div>
-            <div className="mt-2">
-              <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>主要问题</div>
-              <p className="text-[12px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{source.problem_summary || source.summary}</p>
-            </div>
+            {source.examples?.length > 0 && (
+              <ul className="mt-2 space-y-1 text-[12px] leading-relaxed" style={{ color: "var(--ink)" }}>
+                {source.examples.map((example) => (
+                  <li key={example.key} className="flex gap-2">
+                    <span className="min-w-0 break-words">{example.summary || summaries?.[example.evidence.record_id]?.summary || example.title}</span>
+                    {example.count > 1 && <span className="shrink-0 tabular-nums" style={{ color: "var(--mute)" }}>{example.count} 条</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
             <div className="flex items-center gap-2 mt-2 text-[11px]" style={{ color: "var(--mute)" }}>
               <span style={{ color: "var(--accent)" }}>正 {fmtNum(Number(source.positive || 0))}</span>
               <span>中 {fmtNum(Number(source.neutral || 0))}</span>
@@ -341,55 +406,114 @@ function SourceSummaryGrid({ sources, selectedSources, onSelect }: { sources: an
   );
 }
 
-function IssueBoard({ topics }: { topics: any[] }) {
-  if (!topics.length) return <EmptyState title="暂无突出问题" hint="当前筛选范围内没有负向问题标签。" />;
+function IssueBoard({ topics, summaries, onOpenEvidence }: { topics: IssueCard[]; summaries?: FeedbackSummaries; onOpenEvidence: (evidence: VoiceEvidence) => void }) {
+  if (!topics.length) return <EmptyState title="暂无突出问题" hint="当前筛选范围内暂无可归类的问题或功能建议。" />;
   return (
     <div className="space-y-2">
       {topics.map((topic) => {
         const priority = priorityView(topic.priority);
-        const topicLabels = (topic.topics || [topic.topic]).map((item: string) => TOPIC_LABEL[item] || item);
+        const topicLabels = (topic.topics || []).map((item) => TOPIC_LABEL[item] || item);
         const suggestedTeams = topic.suggested_teams?.length ? topic.suggested_teams : [topic.suggested_team];
+        const evidence = topic.evidence || [];
+        const generated = summaries?.[evidence[0]?.record_id];
+        const title = topic.id?.startsWith("quote_") ? generated?.headline || topic.title : topic.title;
+        const description = topic.problem_summary || generated?.summary;
         return (
-          <div key={topic.topic} className="rounded-lg p-3.5" style={{ border: "1px solid var(--hairline)" }}>
-            <div className="flex flex-col md:flex-row md:items-start gap-3">
-              <div className="flex items-center gap-2 md:w-[92px] shrink-0">
+          <article key={topic.id} className="rounded-lg p-3.5" style={{ border: "1px solid var(--hairline)" }}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
                 <Badge tone={priority.tone}>{priority.level}</Badge>
                 <span className="text-[11px]" style={{ color: "var(--mute)" }}>{priority.label}</span>
               </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[14px] font-semibold" style={{ color: "var(--ink)" }}>{topicLabels.map((label: string) => `#${label}`).join("、")}</span>
-                  <span className="text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>
-                    {topic.total} 条反馈 · 负向 {topic.negative} 条 · 负向率 {(topic.negative_rate * 100).toFixed(0)}%
-                  </span>
-                </div>
-                {topic.priority_reason && <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>{topic.priority_reason}</div>}
-                {topic.impact && <ImpactMetrics impact={topic.impact} />}
-                <div className="mt-2">
-                  <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>问题概述</div>
-                  <p className="text-[13px] mt-0.5 leading-relaxed" style={{ color: "var(--ink)" }}>{topic.problem_summary || "当前未生成明确的问题描述。"}</p>
-                </div>
-                {topic.representative && (
-                  <div className="mt-2">
-                    <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>代表原文</div>
-                    {topic.representative_url ? (
-                      <a href={topic.representative_url} target="_blank" rel="noreferrer" className="block text-[12px] mt-0.5 line-clamp-2 leading-relaxed hover:underline" style={{ color: "var(--accent)" }} title="打开原文">
-                        “{topic.representative}” ↗
-                      </a>
-                    ) : (
-                      <p className="text-[12px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}>“{topic.representative}”</p>
-                    )}
-                  </div>
-                )}
-                <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                  {(topic.source_keys || []).map((key: string) => <Badge key={key} tone="neutral">{SOURCE_LABEL[key] || key}</Badge>)}
-                </div>
-              </div>
-              <div className="flex items-center shrink-0">
-                <Badge tone="accent">建议关注：{suggestedTeams.map((team: string) => TEAM_LABEL[team] || team).join("、")}</Badge>
-              </div>
+              <Badge tone="accent">建议关注：{suggestedTeams.map((team) => TEAM_LABEL[team] || team).join("、")}</Badge>
             </div>
-          </div>
+            <h3 className="mt-2 text-[15px] font-semibold leading-snug break-words" style={{ color: "var(--ink)" }}>{title}</h3>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] tabular-nums" style={{ color: "var(--mute)" }}>
+              <span>{topic.total} 条反馈 · 负向 {topic.negative} 条{topic.negative > 0 && ` · 负向率 ${(topic.negative_rate * 100).toFixed(0)}%`}</span>
+              {topicLabels.map((label) => <Badge key={label} tone="neutral">#{label}</Badge>)}
+            </div>
+            {description && description.replace(/[。！？，.!?]+$/, "") !== title && (
+              <p className="mt-2 text-[13px] leading-relaxed" style={{ color: "var(--ink)" }}>{description}</p>
+            )}
+            {topic.priority_reason && <div className="mt-1 text-[11px]" style={{ color: "var(--mute)" }}>{topic.priority_reason}</div>}
+            {topic.impact && <ImpactMetrics impact={topic.impact} />}
+            {evidence.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                <h4 className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>代表原文</h4>
+                {evidence.map((quote) => <EvidenceQuote key={quote.record_id} evidence={quote} onOpen={onOpenEvidence} />)}
+              </div>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function HighlightedQuote({ text, highlights }: { text: string; highlights: string[] }) {
+  const escaped = [...highlights].filter(Boolean).sort((a, b) => b.length - a.length)
+    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!escaped.length) return <>{text}</>;
+  return <>{text.split(new RegExp(`(${escaped.join("|")})`, "gi")).map((part, index) => index % 2 ? (
+    <mark key={index} className="rounded px-0.5 font-medium" style={{ background: "var(--warning-soft)", color: "var(--ink)" }}>{part}</mark>
+  ) : part)}</>;
+}
+
+function EvidenceMetadata({ evidence }: { evidence: VoiceEvidence }) {
+  const platform = evidence.platform === "app_store" ? "App Store" : evidence.platform === "google_play" ? "Google Play" : evidence.platform;
+  const source = evidence.source_key && SOURCE_LABEL[evidence.source_key];
+  const rating = Number(evidence.rating);
+  const details = [platform || source, evidence.author, evidence.occurred_at && fmtDateTime(evidence.occurred_at), rating >= 1 && rating <= 5 ? `${rating}/5 星` : ""].filter(Boolean);
+  return <span className="text-[11px] break-words" style={{ color: "var(--mute)" }}>{details.join(" · ")}</span>;
+}
+
+function EvidenceLink({ evidence }: { evidence: VoiceEvidence }) {
+  if (!evidence.url) return null;
+  const labels = { source: "打开来源页面", store: "打开应用页面", review: "打开商店原评论", thread: "打开所在讨论" };
+  const label = labels[evidence.url_kind || "source"];
+  return <a href={evidence.url} target="_blank" rel="noreferrer" className="text-[12px] hover:underline" style={{ color: "var(--accent)" }}>{label} ↗</a>;
+}
+
+function EvidenceQuote({ evidence, onOpen, showLink = false }: { evidence: VoiceEvidence; onOpen: (evidence: VoiceEvidence) => void; showLink?: boolean }) {
+  return (
+    <blockquote className="rounded-md px-3 py-2" style={{ background: "var(--bg-soft)", borderLeft: "2px solid var(--hairline-strong)" }}>
+      <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed" style={{ color: "var(--body)" }}>
+        <HighlightedQuote text={evidence.excerpt} highlights={evidence.highlights} />
+      </p>
+      <footer className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <EvidenceMetadata evidence={evidence} />
+        <button type="button" onClick={() => onOpen(evidence)} className="cursor-pointer text-[12px] hover:underline" style={{ color: "var(--accent)" }}>查看完整原文</button>
+        {(showLink || evidence.url_kind === "review" || evidence.url_kind === "source") && <EvidenceLink evidence={evidence} />}
+      </footer>
+    </blockquote>
+  );
+}
+
+function VoiceFeedbackList({ records, summaries, onOpenEvidence }: { records: RecordItem[]; summaries?: FeedbackSummaries; onOpenEvidence: (evidence: VoiceEvidence) => void }) {
+  if (!records.length) return <EmptyState title="暂无反馈" hint="当前筛选范围内暂无反馈。" />;
+  return (
+    <div className="space-y-2">
+      {records.map((record) => {
+        const issue = record.voice_issue;
+        if (!issue) return null;
+        const generated = summaries?.[record.id];
+        const summary = issue.summary || generated?.summary;
+        const originalTitle = !summary && issue.evidence.title !== issue.evidence.text ? issue.evidence.title : "";
+        const title = issue.key.startsWith("quote_") ? generated?.headline || originalTitle : issue.title;
+        const source = record.voice_source && SOURCE_LABEL[record.voice_source];
+        return (
+          <article key={record.id} className="panel p-4 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <SentimentBadge record={record} />
+              {source && <Badge tone="neutral">{source}</Badge>}
+              {record.hot_risk && <Badge tone="negative">高热度负向</Badge>}
+            </div>
+            {title && <h3 className="text-[14px] font-semibold break-words" style={{ color: "var(--ink)" }}>{title}</h3>}
+            {summary && summary.replace(/[。！？，.!?]+$/, "") !== title && (
+              <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{summary}</p>
+            )}
+            <EvidenceQuote evidence={issue.evidence} onOpen={onOpenEvidence} showLink />
+          </article>
         );
       })}
     </div>
