@@ -134,7 +134,7 @@ class VisualDiffTests(unittest.TestCase):
         def complete_retry(request, staging, *_args):
             if not request["scriptless"]:
                 (staging / "partial").touch()
-                return {"error": "memory reserve", "resource_pressure": True}
+                return {"error": "memory reserve", "retry_reason": "memory_reserve"}
             self.assertTrue(request["safe_mode"])
             self.assertEqual(list(staging.parent.glob(".capture-*")), [staging])
             Path(request["png_path"]).write_bytes(b"complete PNG")
@@ -151,6 +151,39 @@ class VisualDiffTests(unittest.TestCase):
             self.assertEqual(result["engine"], "chromium_cdp")
             self.assertEqual(list(root.iterdir()), [root / "a.png"])
             self.assertEqual(worker.call_count, 2)
+
+    def test_sustained_host_io_pressure_defers_before_launch(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.snapshot._available_memory_mb", return_value=400),
+            patch("server.snapshot._io_pressure_percent", return_value=60),
+            patch("server.snapshot.subprocess.Popen") as launch,
+        ):
+            root = Path(tmp)
+            result = _isolated_playwright_capture("https://example.com", root / "a.png", root / "a.html")
+            self.assertIn("I/O", result["error"])
+            self.assertEqual(list(root.iterdir()), [])
+            launch.assert_not_called()
+
+    def test_deadline_leaves_budget_for_prefetched_chromium_retry(self):
+        with (
+            patch("server.snapshot.sys.platform", "linux"),
+            patch("server.snapshot._available_memory_mb", return_value=400),
+            patch("server.snapshot._io_pressure_percent", return_value=0),
+            patch("server.snapshot.CAPTURE_JOB_TIMEOUT_SECONDS", 90),
+            patch("server.snapshot._capture_in_staging", side_effect=[
+                {"error": "deadline", "retry_reason": "deadline"},
+                {"method": "playwright"},
+            ]) as capture,
+        ):
+            result = _isolated_playwright_capture(
+                "https://example.com", Path("a.png"), Path("a.html"), "<main>Prefetched</main>",
+            )
+        self.assertEqual(result["method"], "playwright")
+        first, second = capture.call_args_list
+        self.assertEqual(second.args[-1] - first.args[-1], 45)
+        self.assertTrue(second.kwargs["scriptless"])
+        self.assertTrue(second.kwargs["prefer_prefetched"])
 
     def test_worker_publishes_png_and_archive_after_success(self):
         def write_capture(request, *, timeout):

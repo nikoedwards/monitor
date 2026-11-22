@@ -60,3 +60,19 @@ class SnapshotCdpIntegrationTests(unittest.TestCase):
                 self.assertEqual(image.format, "PNG")
                 self.assertGreater(image.height, 800)
 
+    def test_cdp_renders_prefetched_html_at_original_url_without_navigating_remotely(self):
+        source = "<html><body><main style='height:1200px;background:#123456'>Prefetched storefront</main></body></html>"
+        url = "https://unreachable.example/landing"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = capture(
+                url, root / "capture.png", root / "capture.html", source,
+                safe_mode=True, scriptless=True, prefer_prefetched=True,
+            )
+            self.assertTrue(result["source_html_fallback"], result)
+            self.assertEqual(result["page"]["final_url"], url)
+            self.assertIn("Prefetched storefront", result["page"]["text"])
+            with Image.open(root / "capture.png") as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertGreater(image.height, 1100)
+

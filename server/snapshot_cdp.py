@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -144,7 +145,7 @@ class _Page:
 
 def capture(
     url: str, png_path: Path, html_path: Path, source_html="", *,
-    safe_mode=True, scriptless=False,
+    safe_mode=True, scriptless=False, trace_stages=False, prefer_prefetched=False,
 ):
     import websocket
 
@@ -166,7 +167,15 @@ def capture(
     )
     browser = None
     socket = None
-    stage = "launch"
+    stage = ""
+
+    def mark_stage(name):
+        nonlocal stage
+        stage = name
+        if trace_stages:
+            print(f"SNAPSHOT_STAGE={name}", file=sys.stderr, flush=True)
+
+    mark_stage("launch")
     # The outer isolated worker owns a process group. Keep Chromium in it so
     # the supervisor's timeout/SIGKILL reaches every browser child as well.
     # Standalone diagnostics need their own browser group for the same reason.
@@ -226,28 +235,38 @@ def capture(
                     })
                     if scriptless:
                         page.call("Emulation.setScriptExecutionDisabled", {"value": True})
-                    stage = "navigation"
-                    source_fallback = False
-                    try:
-                        data = page.navigate(url)
-                    except SnapshotCaptureError:
-                        if not source_html:
-                            raise
+                    mark_stage("navigation")
+                    source_fallback = bool(prefer_prefetched and source_html)
+
+                    def enable_source_html():
                         page.source_html = source_html
                         page.call("Fetch.enable", {"patterns": [{"resourceType": "Document", "requestStage": "Request"}]})
+
+                    if source_fallback:
+                        enable_source_html()
                         data = page.navigate(url)
-                        source_fallback = True
+                    else:
+                        try:
+                            data = page.navigate(url)
+                        except SnapshotCaptureError:
+                            if not source_html:
+                                raise
+                            enable_source_html()
+                            data = page.navigate(url)
+                            source_fallback = True
+                    mark_stage("prepare")
                     page.evaluate("""() => {
                       for (const v of document.querySelectorAll('video')) { v.pause(); v.preload = 'none'; }
                       const s=document.createElement('style');
                       s.textContent='*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
                       document.head.appendChild(s);
                     }""")
-                    stage = "screenshot"
+                    mark_stage("screenshot")
                     tiles = _capture_chunked_screenshot(
                         page, png_path, height,
                         max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
                     )
+                    mark_stage("archive")
                     _write_fallback_archive(
                         html_path.name, data.get("final_url") or url, data.get("title", ""),
                         source_html[:1_000_000], data.get("text", ""),

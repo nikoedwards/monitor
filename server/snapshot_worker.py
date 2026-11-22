@@ -31,8 +31,11 @@ def main() -> int:
             capture = capture_cdp
         scriptless = bool(request.get("scriptless"))
         options = {"safe_mode": bool(request.get("safe_mode"))}
-        if capture is not _playwright_capture and scriptless:
-            options["scriptless"] = True
+        if capture is not _playwright_capture:
+            options["trace_stages"] = True
+            if scriptless:
+                options["scriptless"] = True
+                options["prefer_prefetched"] = bool(request.get("prefer_prefetched"))
         result = capture(
             request["url"],
             Path(request["png_path"]),
@@ -47,7 +50,7 @@ def main() -> int:
             first_error = result["error"]
             result = capture(
                 request["url"], Path(request["png_path"]), Path(request["html_path"]),
-                request.get("source_html") or "", safe_mode=True, scriptless=True,
+                request.get("source_html") or "", safe_mode=True, scriptless=True, trace_stages=True,
             )
             result["previous_browser_error"] = first_error
     except Exception as exc:
