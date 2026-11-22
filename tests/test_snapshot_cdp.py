@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import quote
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -58,13 +59,14 @@ class SnapshotCdpIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             png_path = root / "capture.png"
             html_path = root / "capture.html"
-            result = capture(
-                "data:text/html;charset=utf-8," + quote(source),
-                png_path,
-                html_path,
-                source,
-                safe_mode=True,
-            )
+            with patch('server.snapshot_cdp._available_memory_mb', return_value=128):
+                result = capture(
+                    "data:text/html;charset=utf-8," + quote(source),
+                    png_path,
+                    html_path,
+                    source,
+                    safe_mode=True,
+                )
 
             self.assertNotIn("error", result)
             self.assertEqual(result["method"], "playwright")

@@ -76,7 +76,8 @@ def _browser_binary() -> str:
     explicit = os.environ.get("SNAPSHOT_BROWSER", "").strip()
     if explicit:
         return explicit
-    root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"))
+    default_root = str(Path(os.environ.get('LOCALAPPDATA', '')) / 'ms-playwright') if os.name == 'nt' else '/ms-playwright'
+    root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", default_root))
     for pattern in (
         "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
         "chromium_headless_shell-*/chrome-headless-shell-win64/chrome-headless-shell.exe",
@@ -305,7 +306,7 @@ def capture(
                             pass
                         if browser.poll() is not None:
                             browser_log.seek(0)
-                            raise RuntimeError(browser_log.read().decode(errors="replace")[-500:])
+                            raise RuntimeError(f'Chromium exited {browser.returncode}: '+browser_log.read().decode(errors="replace")[-500:])
                         if time.monotonic() >= deadline:
                             raise TimeoutError(
                                 f"Chromium DevTools did not start within {CDP_STARTUP_TIMEOUT_SECONDS} seconds"
@@ -318,7 +319,12 @@ def capture(
                     page = _Page(socket)
                     page.scriptless = scriptless
                     targets = page.call("Target.getTargets")["targetInfos"]
-                    target = next(t["targetId"] for t in targets if t.get("type") == "page")
+                    target = next((t["targetId"] for t in targets if t.get("type") == "page"), None)
+                    if target is None:
+                        # The DevTools socket can appear before the initial tab
+                        # has registered. Create a target instead of failing with
+                        # an empty StopIteration startup error.
+                        target = page.call("Target.createTarget", {"url":"about:blank"})['targetId']
                     page.session = page.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
                     page.call("Page.enable")
                     page.call("Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0})
@@ -432,4 +438,4 @@ def capture(
     except SnapshotCaptureError:
         raise
     except Exception as exc:
-        return {"error": f"{stage}: {str(exc)}"[:500], "timings": dict(timings, total=round(time.monotonic()-started, 2))}
+        return {"error": f"{stage}: {type(exc).__name__}: {str(exc)}"[:500], "timings": dict(timings, total=round(time.monotonic()-started, 2))}
