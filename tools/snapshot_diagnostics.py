@@ -19,7 +19,7 @@ def emit(event, **values):
 
 def resources():
     readings = {}
-    for name in ('memory.current', 'memory.max', 'memory.events', 'memory.stat', 'pids.current', 'pids.max', 'cpu.stat'):
+    for name in ('memory.current', 'memory.max', 'memory.events', 'memory.stat', 'pids.current', 'pids.max', 'pids.events', 'cpu.stat', 'cpu.pressure', 'memory.pressure', 'io.pressure'):
         path = Path('/sys/fs/cgroup') / name
         if path.exists():
             readings[name] = path.read_text().strip()
@@ -88,9 +88,12 @@ def main():
         for url in urls:
             emit('starting_capture', url=url, attempt=attempt)
             health_errors = []
+            peak_pids = peak_memory = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(capture, url, attempt)
                 while not future.done():
+                    peak_pids = max(peak_pids, int(Path('/sys/fs/cgroup/pids.current').read_text()))
+                    peak_memory = max(peak_memory, int(Path('/sys/fs/cgroup/memory.current').read_text()))
                     try:
                         with urlopen('http://127.0.0.1:8790/api/health', timeout=3) as r:
                             assert json.load(r)['ok']
@@ -102,7 +105,8 @@ def main():
                 except Exception as exc:
                     failures += 1
                     emit('capture_failed', url=url, attempt=attempt, error=str(exc))
-            emit('api_health', url=url, errors=health_errors)
+            emit('api_health', url=url, errors=health_errors, peak_pids=peak_pids,
+                 peak_memory_mib=round(peak_memory/1024**2, 2))
             resources()
     emit('summary', attempts=attempts*len(urls), failures=failures)
     if failures:
