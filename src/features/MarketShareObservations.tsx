@@ -3,8 +3,8 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronRight, ExternalLink } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { Card, EmptyState, SectionTitle, Select, Spinner } from "../components/ui";
-import type { AppMetric, AppObservation, BrandMetric, BrandObservations } from "../lib/api";
+import { Badge, Card, EmptyState, SectionTitle, Select, Spinner } from "../components/ui";
+import type { AppMetric, AppObservation, BrandMetric, BrandObservations, MarketShareResponse } from "../lib/api";
 import { useBrands, useMarketObservations } from "../lib/hooks";
 import { useTimeRange, type TimeRange } from "../lib/timeRange";
 
@@ -128,37 +128,59 @@ function RangeFilters({ countries }: { countries: string[] }) {
   );
 }
 
-export function BrandObservationsCard({ brandIds, country, range }: {
+export function MarketShareBreakdown({ brandIds, country, range, result }: {
   brandIds: string[];
   country: string;
   range: TimeRange;
+  result?: MarketShareResponse;
 }) {
   const { brandId } = useParams();
   const [params] = useSearchParams();
   const query = useMarketObservations(brandIds, country, range);
   const base = `/brand/${brandId}/market-share`;
-  const metrics = BRAND_METRICS.filter(({ key }) => key !== "app_downloads" || query.data?.brands.some((brand) => brand.metrics[key] != null));
+  const observations = new Map(query.data?.brands.map((brand) => [brand.brand_id, brand.metrics]));
+  const estimates = new Map(result?.brands.map((brand) => [brand.brand_id, brand]));
+  const brands = result?.brands ?? query.data?.brands ?? [];
+  const weights = result?.model.active_weights;
+  const metrics = BRAND_METRICS.filter(({ key }) => {
+    if (key === "google_play_ratings") return country === "all";
+    if (key === "app_downloads") return Boolean(weights?.app || query.data?.brands.some((brand) => brand.metrics[key] != null));
+    return true;
+  });
+  const components = weights && weights.app > 0 && weights.conversation > 0 ? [
+    { key: "conversation", label: `评分份额（${Math.round(weights.conversation * 100)}% 权重）` },
+    { key: "app", label: `下载份额（${Math.round(weights.app * 100)}% 权重）` },
+  ] as const : [];
   return (
-    <Card>
+    <Card className="min-w-0">
       <SectionTitle
-        title="品牌原始数据"
-        subtitle="每个 App 按商店和地区取所选期间内最新的累计评分数及实采下载量。"
-        hint="App Store 按国家或地区汇总，Google Play 全球评分在全部地区下单列。横线表示所选期间缺少对应记录。"
+        title="份额拆解"
+        subtitle="点击品牌查看每日统计和 App 明细。"
+        hint="原始数据取所选期间内各 App 在对应商店和地区的最新快照。综合份额按当前模型权重计算，横线表示该项暂无数据。"
       />
-      {query.isLoading && <Spinner />}
-      {query.isError && <EmptyState title="品牌数据加载失败" hint={query.error.message} />}
-      {query.data && <ObservationTable
-        headers={["品牌", ...metrics.map(({ label }) => label)]}
-        rows={query.data.brands.map((brand) => ({
-          key: brand.brand_id,
-          values: [
-            <Link to={{ pathname: `${base}/brands/${encodeURIComponent(brand.brand_id)}`, search: params.toString() }} className="inline-flex items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: "var(--accent)" }}>
-              {brand.name} <ChevronRight size={14} />
-            </Link>,
-            ...metrics.map(({ key }) => numberText(brand.metrics[key])),
-          ],
-        }))}
-      />}
+      {query.isLoading && !brands.length && <Spinner />}
+      {query.isError && <p role="status" className="mb-3 text-[13px]" style={{ color: "var(--danger)" }}>原始数据加载失败，{query.error.message}</p>}
+      {brands.length > 0 && (
+        <ObservationTable
+          headers={["品牌", "综合份额", ...metrics.map(({ label }) => label), ...components.map(({ label }) => label), "覆盖度"]}
+          rows={brands.map((brand) => {
+            const entry = estimates.get(brand.brand_id);
+            const raw = observations.get(brand.brand_id);
+            return {
+              key: brand.brand_id,
+              values: [
+                <Link to={{ pathname: `${base}/brands/${encodeURIComponent(brand.brand_id)}`, search: params.toString() }} className="inline-flex items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: "var(--accent)" }}>
+                  {brand.name} <ChevronRight size={14} />
+                </Link>,
+                entry ? <span className="font-semibold" style={{ color: "var(--accent)" }}>{entry.share.toFixed(2)}%</span> : "—",
+                ...metrics.map(({ key }) => numberText(raw?.[key])),
+                ...components.map(({ key }) => entry ? `${entry.signal_shares[key].toFixed(1)}%` : "—"),
+                entry ? <Badge tone={entry.coverage >= 75 ? "positive" : entry.coverage >= 50 ? "warning" : "negative"}>{entry.coverage}%</Badge> : "—",
+              ],
+            };
+          })}
+        />
+      )}
     </Card>
   );
 }
@@ -183,7 +205,7 @@ export function MarketShareDetail({ view }: { view: "brand" | "apps" }) {
   return (
     <div className="space-y-5">
       <Link to={{ pathname: base, search: filter }} className="inline-flex items-center gap-1.5 text-[13px] hover:underline" style={{ color: "var(--accent)" }}>
-        <ArrowLeft size={14} /> 品牌原始数据
+        <ArrowLeft size={14} /> 份额拆解
       </Link>
       <SectionTitle
         title={view === "brand" ? (brand ? `${brand.name} · 品牌详情` : "品牌详情") : "App 明细"}
