@@ -89,7 +89,7 @@ export default function MarketShare() {
   const result = query.data;
   const selectedKey = useMemo(() => [...selected].sort().join(","), [selected]);
   const appDataMissing = Boolean(result?.brands.some(
-    (row) => row.raw.app_download_basis === "unavailable",
+    (row) => !row.signals.app && !row.signals.conversation,
   ));
 
   useEffect(() => {
@@ -108,7 +108,7 @@ export default function MarketShare() {
   );
   const leader = result?.brands.find((row) => row.share > 0);
   const appRatingCount = result?.brands.reduce((sum, row) => sum + row.raw.app_reviews, 0) || 0;
-  const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0).length : 0;
+  const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0) : [];
   const trendData = useMemo(
     () => (trendQuery.data?.points || []).map((point) => ({ date: point.date, ...point.shares })),
     [trendQuery.data?.points],
@@ -140,7 +140,7 @@ export default function MarketShare() {
     <div className="space-y-6">
       <SectionTitle
         title="市占分析"
-        subtitle="按国家使用 应用商店累计评分据，并结合下载量估算计算相对份额"
+        subtitle="使用应用商店累计评分次数计算样本份额，有可比较的实采下载量时一并计入"
         hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -205,15 +205,15 @@ export default function MarketShare() {
             <StatCard label="领先品牌" value={leader?.name || "—"} hint={leader ? `${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${leader.share.toFixed(1)}%` : undefined} tone="accent" />
             <StatCard
               label="模型置信度"
-              labelHint={<InfoHint align="right" symbol="!" label="查看模型置信度说明" text="这不是预测准确率，而是当前估算的证据完整度。系统综合可用信号覆盖、品牌间可比性、证据数量和下载估算占比；数据越完整、口径越一致，置信度越高。" />}
+              labelHint={<InfoHint align="right" symbol="!" label="查看模型置信度说明" text="系统根据评级与下载数据的覆盖情况、品牌间可比性和采集证据数量衡量证据完整度。" />}
               value={`${result.confidence.score}%`}
               hint={`${result.confidence.label} · ${result.confidence.evidence_total} 条证据`}
             />
             <StatCard
               label="可用信号"
               labelHint={<InfoHint align="right" symbol="!" label="查看可用信号说明" text="表示本次实际参与计算的基础信号数量。2 类信号是 App 下载信号和 App Store 累计评分数；缺失信号不会按 0 强行计入，而是重新分配剩余权重。" />}
-              value={`${activeSignals}/2`}
-              hint="App 下载信号 + App Store 累计评分数"
+              value={`${activeSignals.length}/2`}
+              hint={activeSignals.map(({ label }) => label).join(" + ") || "缺少可比较的 App 数据"}
             />
             <StatCard label="应用商店评分数" value={appRatingCount ? fmtNum(appRatingCount) : "—"} hint={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · 商店累计值；非所选期间新增`} />
           </div>
@@ -261,7 +261,6 @@ export default function MarketShare() {
                         <div className="text-[11px] mt-1" style={{ color: "var(--mute)" }}>
                           期初 {row.start_share.toFixed(1)}% · 公开评分 {fmtNum(row.latest_rating_count)}
                           {row.rating_count_change > 0 ? `（+${fmtNum(row.rating_count_change)}）` : ""}
-                          {row.latest_average_rating ? ` · ${row.latest_average_rating.toFixed(2)} / 5` : ""}
                         </div>
                       </div>
                     );
@@ -304,7 +303,7 @@ export default function MarketShare() {
                           <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
                           <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.rank}. {row.name}</span>
                         </div>
-                        <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{row.raw.app_download_basis === "unavailable" ? "缺数据" : `${row.share.toFixed(2)}%`}</span>
+                        <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{activeSignals.some(({ key }) => row.signals[key] > 0) ? `${row.share.toFixed(2)}%` : "缺数据"}</span>
                       </div>
                       <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
                         <div className="h-full rounded-full" style={{ width: `${Math.max(row.share, 0.5)}%`, background: COLORS[index % COLORS.length] }} />
@@ -328,7 +327,7 @@ export default function MarketShare() {
                     <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
                       <th className="text-left font-medium py-2.5 px-2">品牌</th>
                       <th className="text-right font-medium py-2.5 px-2">综合份额</th>
-                      {SIGNALS.map((signal) => (
+                      {activeSignals.map((signal) => (
                         <th key={signal.key} className="text-right font-medium py-2.5 px-2">
                           {signal.label}
                           <div className="text-[10px] font-normal">权重 {(result.model.active_weights[signal.key] * 100).toFixed(0)}%</div>
@@ -342,9 +341,9 @@ export default function MarketShare() {
                       <tr key={row.brand_id} style={{ borderBottom: "1px solid var(--hairline)", color: "var(--body)" }}>
                         <td className="py-3 px-2 font-medium" style={{ color: "var(--ink)" }}>{row.name}</td>
                         <td className="py-3 px-2 text-right font-semibold tabular-nums" style={{ color: "var(--accent)" }}>{row.share.toFixed(2)}%</td>
-                        {SIGNALS.map((signal) => (
+                        {activeSignals.map((signal) => (
                           <td key={signal.key} className="py-3 px-2 text-right tabular-nums">
-                            {result.model.active_weights[signal.key] ? `${row.signal_shares[signal.key].toFixed(1)}%` : "—"}
+                            {`${row.signal_shares[signal.key].toFixed(1)}%`}
                           </td>
                         ))}
                         <td className="py-3 px-2 text-right"><Badge tone={row.coverage >= 75 ? "positive" : row.coverage >= 50 ? "warning" : "negative"}>{row.coverage}%</Badge></td>
@@ -366,14 +365,13 @@ export default function MarketShare() {
           <Card>
             <SectionTitle title="估算模型" subtitle={result.model.description} />
             <div className="space-y-3">
-              {SIGNALS.map((signal) => {
-                const base = result.model.base_weights[signal.key] * 100;
+              {activeSignals.map((signal) => {
                 const active = result.model.active_weights[signal.key] * 100;
                 return (
                   <div key={signal.key}>
                     <div className="flex justify-between text-[13px] mb-1">
                       <span style={{ color: "var(--body)" }}>{signal.label}</span>
-                      <span className="tabular-nums" style={{ color: "var(--ink)" }}>{active.toFixed(0)}%{Math.abs(active - base) > 0.1 ? `（原 ${base.toFixed(0)}%）` : ""}</span>
+                      <span className="tabular-nums" style={{ color: "var(--ink)" }}>{active.toFixed(0)}%</span>
                     </div>
                     <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
                       <div className="h-full rounded-full" style={{ width: `${active}%`, background: "var(--accent)" }} />
@@ -383,7 +381,7 @@ export default function MarketShare() {
               })}
             </div>
             <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
-              算法：App 下载估算权重 {(result.model.base_weights.app * 100).toFixed(0)}%，应用商店累计评分权重 {(result.model.base_weights.conversation * 100).toFixed(0)}%。评分数来自应用商店累计值；Google Play 全球评分仅在“全部国家”中计入一次。评分推算的下载量仅供参考，不作为独立证据计权。销售、商品评论、媒体与互动不参与计算，大模型也不参与数值计算。
+              每项数据先计算所选品牌中的占比，再按本次生效的权重合成。Google Play 全球评分在“全部国家”中计入一次。
             </div>
           </Card>
 

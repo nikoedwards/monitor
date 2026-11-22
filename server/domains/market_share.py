@@ -87,29 +87,31 @@ def _record_signals(
     start: str,
     end: str,
     country: str,
+    *,
+    include_engagement: bool = False,
 ) -> dict:
     country_filter = " AND UPPER(COALESCE(region, '')) = ?" if country else ""
     params: list[str] = [brand["id"], start, end]
     if country:
         params.append(country)
+    app_filter = "" if include_engagement else (
+        " AND (LOWER(channel) = 'app' OR INSTR(LOWER(source_id), 'app_store') > 0 "
+        "OR LOWER(platform) IN ('app_store', 'google_play'))"
+    )
     rows = conn.execute(
         "SELECT id, source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, occurred_at, "
         "metrics_json, raw_json FROM records WHERE brand_id = ? "
         "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ?"
         + country_filter
+        + app_filter
         + " ORDER BY occurred_at",
         params,
     ).fetchall()
 
-    mentions = 0
-    voc_records = 0
     app_reviews = 0
-    comments = 0.0
     engagement = 0.0
-    views = 0.0
     explicit_downloads_by_app: dict[str, float] = defaultdict(float)
     app_ratings_by_app: dict[str, float] = defaultdict(float)
-    app_average_rating_by_app: dict[str, tuple[float, float]] = {}
     app_evidence_by_app: set[str] = set()
     app_data_updated_at = ""
     allowed_apps = configured_app_ids(conn, brand["id"])
@@ -132,26 +134,14 @@ def _record_signals(
         data_type = (row["data_type"] or "").lower()
         is_app = channel == "app" or "app_store" in source_id or platform in {"app_store", "google_play"}
 
-        if dimension == "marketing" and data_type != "community_metric":
-            mentions += 1
-        if dimension == "voc":
-            voc_records += 1
-
-        comment_value = _first_metric(metrics, COMMENT_KEYS)
-        if data_type in {"community_reply", "comment", "reply"} and not comment_value:
-            comment_value = 1
-        comments += comment_value
-
-        record_engagement = _number(metrics.get("engagement"))
-        if not record_engagement:
-            record_engagement = (
-                _number(metrics.get("likes"))
-                + comment_value
-                + _number(metrics.get("shares"))
-                + _number(metrics.get("vote_count"))
+        if include_engagement:
+            comment_value = _first_metric(metrics, COMMENT_KEYS)
+            if data_type in {"community_reply", "comment", "reply"} and not comment_value:
+                comment_value = 1
+            engagement += _number(metrics.get("engagement")) or (
+                _number(metrics.get("likes")) + comment_value
+                + _number(metrics.get("shares")) + _number(metrics.get("vote_count"))
             )
-        engagement += record_engagement
-        views += _number(metrics.get("views"))
 
         if is_app:
             # Play exposes a global cumulative rating count even on localized
@@ -175,10 +165,7 @@ def _record_signals(
                 if previous is None or order >= previous[:2]:
                     latest_app_metrics[app_key] = (*order, metrics)
                 continue
-            rating = _number(metrics.get("rating"))
             rating_count = _number(metrics.get("rating_count"))
-            if data_type == "app_metric" and rating and rating_count >= app_average_rating_by_app.get(app_key, (0, 0))[1]:
-                app_average_rating_by_app[app_key] = (rating, rating_count)
             explicit_downloads_by_app[app_key] = max(
                 explicit_downloads_by_app[app_key], _first_metric(metrics, DOWNLOAD_KEYS)
             )
@@ -188,55 +175,19 @@ def _record_signals(
 
     for app_key, (_, _, metrics) in latest_app_metrics.items():
         app_evidence_by_app.add(app_key)
-        rating = _number(metrics.get("rating"))
         rating_count = _number(metrics.get("rating_count"))
         app_ratings_by_app[app_key] = rating_count
-        if rating:
-            app_average_rating_by_app[app_key] = (rating, rating_count)
         explicit_downloads_by_app[app_key] = _first_metric(metrics, DOWNLOAD_KEYS)
 
-    explicit_downloads = sum(explicit_downloads_by_app.values())
     known_app_ratings = sum(app_ratings_by_app.values())
-    app_review_base = max(float(app_reviews), known_app_ratings)
-    if explicit_downloads:
-        app_downloads_est = explicit_downloads
-        app_downloads_low = explicit_downloads
-        app_downloads_high = explicit_downloads
-        app_download_basis = "observed"
-    elif app_review_base:
-        # Configurable app intelligence providers can populate installs directly.
-        # Until then, use a deliberately wide 0.5%-2% review-to-install interval.
-        app_downloads_est = app_review_base * 100
-        app_downloads_low = app_review_base * 50
-        app_downloads_high = app_review_base * 200
-        app_download_basis = "review_proxy"
-    else:
-        app_downloads_est = app_downloads_low = app_downloads_high = 0.0
-        app_download_basis = "unavailable"
-
-    rating_weight = sum(max(1.0, count) for _, count in app_average_rating_by_app.values())
-    app_rating = (
-        sum(rating * max(1.0, count) for rating, count in app_average_rating_by_app.values()) / rating_weight
-        if rating_weight else None
-    )
-
     return {
-        "mentions": mentions,
-        "voc_records": voc_records,
-        "app_reviews": round(app_review_base),
-        "app_rating": round(app_rating, 2) if app_rating is not None else None,
-        "app_store_apps": len(app_ratings_by_app),
-        "app_evidence_count": len(app_evidence_by_app),
+        "app_reviews": round(max(float(app_reviews), known_app_ratings)),
         "app_rating_count_observed": bool(known_app_ratings),
-        "comments": round(comments),
-        "engagement": round(engagement),
-        "views": round(views),
-        "app_downloads_est": round(app_downloads_est),
-        "app_downloads_low": round(app_downloads_low),
-        "app_downloads_high": round(app_downloads_high),
-        "app_download_basis": app_download_basis,
+        "app_downloads": round(sum(explicit_downloads_by_app.values())),
+        "app_evidence_count": len(app_evidence_by_app),
         "app_data_updated_at": app_data_updated_at or None,
         "excluded_app_records": excluded_app_records,
+        **({"engagement": round(engagement)} if include_engagement else {}),
     }
 
 
@@ -258,7 +209,7 @@ def _sales_signals(
     currency_column = "sm.currency" if "currency" in sales_columns else "NULL"
     created_at_column = "sm.created_at" if "created_at" in sales_columns else "NULL"
     rows = conn.execute(
-        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.revenue_est, sm.units_est, sm.review_count, "
+        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.revenue_est, sm.units_est, "
         f"{currency_column} AS currency, {created_at_column} AS created_at "
         "FROM sales_metrics sm LEFT JOIN links l ON l.id = sm.link_id "
         "WHERE sm.brand_id = ? AND sm.snapshot_date >= ? AND sm.snapshot_date <= ?"
@@ -276,7 +227,6 @@ def _sales_signals(
         latest_by_listing.setdefault(key, row)
     selected_rows = list(latest_by_listing.values())
 
-    latest_reviews: dict[str, float] = {}
     revenue = 0.0
     units = 0.0
     currencies: set[str] = set()
@@ -284,9 +234,6 @@ def _sales_signals(
     for row in selected_rows:
         revenue += _number(row["revenue_est"])
         units += _number(row["units_est"])
-        key = str(row["link_id"] or row["id"])
-        if _number(row["review_count"]):
-            latest_reviews[key] = _number(row["review_count"])
         if _number(row["revenue_est"]):
             currency = str(row["currency"] or "").strip().upper()
             if currency:
@@ -301,7 +248,6 @@ def _sales_signals(
         # not leak into the market-share signal as if it were normalized.
         "sales_revenue": round(revenue, 2) if sales_currency else 0.0,
         "sales_units": round(units),
-        "product_reviews": round(sum(latest_reviews.values())),
         "sales_data_points": len(selected_rows),
         "sales_currency": sales_currency,
         "sales_currency_mixed": currency_mixed,
@@ -358,6 +304,8 @@ def capture_market_share_snapshots(
     selected comparison cohort, which can change. The trend endpoint computes
     percentages from these immutable daily inputs for the current cohort.
     """
+    # The existing snapshot download column also holds measurements from earlier releases.
+    # Keep the basis marker so the trend can skip historical estimates.
     day = _snapshot_date(snapshot_date)
     params: list[str] = []
     where = ""
@@ -385,35 +333,23 @@ def capture_market_share_snapshots(
                 """
                 INSERT INTO market_share_snapshots
                   (id, snapshot_date, brand_id, country, app_downloads_est,
-                   app_downloads_low, app_downloads_high, app_download_basis,
-                   app_reviews, app_rating, app_store_apps, source_updated_at,
-                   created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   app_download_basis, app_reviews, source_updated_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(snapshot_date, brand_id, country) DO UPDATE SET
                   app_downloads_est = excluded.app_downloads_est,
-                  app_downloads_low = excluded.app_downloads_low,
-                  app_downloads_high = excluded.app_downloads_high,
                   app_download_basis = excluded.app_download_basis,
                   app_reviews = excluded.app_reviews,
-                  app_rating = excluded.app_rating,
-                  app_store_apps = excluded.app_store_apps,
                   source_updated_at = excluded.source_updated_at,
                   updated_at = excluded.updated_at
                 WHERE market_share_snapshots.app_downloads_est != excluded.app_downloads_est
-                   OR market_share_snapshots.app_downloads_low != excluded.app_downloads_low
-                   OR market_share_snapshots.app_downloads_high != excluded.app_downloads_high
                    OR market_share_snapshots.app_download_basis != excluded.app_download_basis
                    OR market_share_snapshots.app_reviews != excluded.app_reviews
-                   OR COALESCE(market_share_snapshots.app_rating, 0) != COALESCE(excluded.app_rating, 0)
-                   OR market_share_snapshots.app_store_apps != excluded.app_store_apps
                    OR COALESCE(market_share_snapshots.source_updated_at, '') != COALESCE(excluded.source_updated_at, '')
                 """,
                 (
                     new_id(), day, brand["id"], country,
-                    signals["app_downloads_est"], signals["app_downloads_low"],
-                    signals["app_downloads_high"], signals["app_download_basis"],
-                    signals["app_reviews"], signals["app_rating"], signals["app_store_apps"],
-                    signals["app_data_updated_at"], now, now,
+                    signals["app_downloads"], "observed" if signals["app_downloads"] else "unavailable",
+                    signals["app_reviews"], signals["app_data_updated_at"], now, now,
                 ),
             )
             changed += conn.total_changes - before
@@ -472,22 +408,20 @@ def sync_market_share_snapshots(
     return {"captured_dates": captured_dates, "changes": changes}
 
 
+def _snapshot_downloads(snapshot: dict) -> float:
+    return _number(snapshot.get("app_downloads_est")) if snapshot.get("app_download_basis") == "observed" else 0
+
+
 def _trend_shares(brand_ids: list[str], state: dict[str, dict], model: str) -> dict[str, float]:
     weights = MODEL_PRESETS[model]["weights"]
     comparable_floor = max(2, math.ceil(len(brand_ids) * 0.5))
     signal_values = {
-        "app": {brand_id: (
-            _number(state.get(brand_id, {}).get("app_downloads_est"))
-            if state.get(brand_id, {}).get("app_download_basis") == "observed" else 0
-        ) for brand_id in brand_ids},
+        "app": {brand_id: _snapshot_downloads(state.get(brand_id, {})) for brand_id in brand_ids},
         "conversation": {brand_id: _number(state.get(brand_id, {}).get("app_reviews")) for brand_id in brand_ids},
     }
     active = [
         key for key in ("app", "conversation")
         if weights[key] > 0 and sum(1 for value in signal_values[key].values() if value > 0) >= comparable_floor
-        and (key != "app" or sum(
-            1 for brand_id in brand_ids if state.get(brand_id, {}).get("app_download_basis") == "observed"
-        ) >= comparable_floor)
     ]
     active_total = sum(weights[key] for key in active)
     shares = {brand_id: 0.0 for brand_id in brand_ids}
@@ -530,10 +464,8 @@ def _app_observation(row: sqlite3.Row, platform: str, region: str, raw: dict, me
         "key": f"{platform}:{identity}:{scope}",
         "app_id": identity,
         "name": raw.get("track_name") or raw.get("app_name") or row["title"] or identity,
-        "publisher": raw.get("seller_name") or raw.get("developer"),
         "platform": platform,
         "scope": scope,
-        "version": raw.get("version"),
         "date": row["occurred_at"][:10],
         "observed_at": row["occurred_at"],
         "url": row["url"],
@@ -541,9 +473,10 @@ def _app_observation(row: sqlite3.Row, platform: str, region: str, raw: dict, me
             None if metrics.get("rating_count_observed") is False
             else _observed_number(metrics, "rating_count")
         ),
-        "rating": _observed_number(metrics, "rating"),
-        "downloads": _observed_number(metrics, "downloads", "download_count"),
-        "installs": _observed_number(metrics, "installs", "install_count"),
+        "downloads": max(
+            (value for key in DOWNLOAD_KEYS if (value := _observed_number(metrics, key)) is not None),
+            default=None,
+        ),
     }
 
 
@@ -559,78 +492,34 @@ def _brand_observations(
     app_days_seen: set[tuple[str, str]] = set()
     allowed_apps = configured_app_ids(conn, brand_id)
     records = conn.execute(
-        "SELECT id, source_id, link_id, data_type, dimension, platform, title, body, url, region, occurred_at, "
-        "metrics_json, raw_json FROM records WHERE brand_id = ? "
-        "AND occurred_at >= ? AND occurred_at < ? "
-        "AND (data_type = 'app_metric' OR dimension = 'marketing') "
-        "ORDER BY occurred_at DESC, rowid DESC",
+        "SELECT id, source_id, link_id, platform, title, url, region, occurred_at, metrics_json, raw_json "
+        "FROM records WHERE brand_id = ? AND occurred_at >= ? AND occurred_at < ? AND data_type = 'app_metric' "
+        "ORDER BY occurred_at DESC, (region = 'US') DESC, rowid DESC",
         (brand_id, start, end + "\uffff"),
     )
     for row in records:
-        region = (row["region"] or "").strip().upper()
-        metrics = _json_object(row["metrics_json"])
+        platform = (row["platform"] or "").lower() or APP_PLATFORMS.get(row["source_id"], "")
         raw = _json_object(row["raw_json"])
-        day = row["occurred_at"][:10]
-        if row["data_type"] == "app_metric":
-            platform = (row["platform"] or "").lower() or APP_PLATFORMS.get(row["source_id"], "")
-            if platform not in APP_PLATFORMS.values() or not app_record_allowed(
-                {**dict(row), "platform": platform, "raw": raw}, allowed_apps,
-            ):
-                continue
-            region = region or str(raw.get("storefront") or "").strip().upper()
-            if platform == "app_store" and len(region) == 2 and region.isascii() and region.isalpha():
-                countries.add(region)
-            if country != "all" and (platform == "google_play" or country != region):
-                continue
-            observation = _app_observation(row, platform, region, raw, metrics)
-            key = observation["key"]
-            apps.setdefault(key, observation)
-            if include_history and (key, day) not in app_days_seen:
-                app_days_seen.add((key, day))
-                app_days[key].append(observation)
-                _sum_observations(daily[day], {f"{platform}_ratings": observation["rating_count"]})
+        if platform not in APP_PLATFORMS.values() or not app_record_allowed(
+            {**dict(row), "platform": platform, "raw": raw}, allowed_apps,
+        ):
             continue
-
-        if country != "all" and country != region:
+        region = str(row["region"] or raw.get("storefront") or "").strip().upper()
+        if platform == "app_store" and len(region) == 2 and region.isascii() and region.isalpha():
+            countries.add(region)
+        if country != "all" and (platform == "google_play" or country != region):
             continue
-        if not _record_is_relevant(row, brand["name"], raw):
-            continue
-        comments = _observed_number(metrics, *COMMENT_KEYS)
-        is_reply = row["data_type"] in {"community_reply", "comment", "reply"}
-        values = {
-            "mentions": 1 if not is_reply and row["data_type"] != "community_metric" else None,
-            "comments": 1 if is_reply and comments is None else comments,
-            "engagement": _observed_number(metrics, "engagement"),
-            "views": _observed_number(metrics, "views"),
-        }
-        _sum_observations(totals, values)
-        if include_history:
-            _sum_observations(daily[day], values)
-
-    for app in apps.values():
-        _sum_observations(totals, {f"{app['platform']}_ratings": app["rating_count"]})
-
-    sales = conn.execute(
-        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.review_count, l.region "
-        "FROM sales_metrics sm LEFT JOIN links l ON l.id = sm.link_id "
-        "WHERE sm.brand_id = ? AND sm.snapshot_date BETWEEN ? AND ? "
-        "ORDER BY sm.snapshot_date DESC, sm.rowid DESC",
-        (brand_id, start, end),
-    )
-    listings_seen: set[str] = set()
-    listing_days_seen: set[tuple[str, str]] = set()
-    for row in sales:
-        if country != "all" and country != (row["region"] or "").strip().upper():
-            continue
-        listing = row["link_id"] or row["id"]
-        day = row["snapshot_date"]
-        values = {"product_reviews": row["review_count"]}
-        if listing not in listings_seen:
+        observation = _app_observation(row, platform, region, raw, _json_object(row["metrics_json"]))
+        key = observation["key"]
+        day = observation["date"]
+        values = {f"{platform}_ratings": observation["rating_count"], "app_downloads": observation["downloads"]}
+        if key not in apps:
+            apps[key] = observation
             _sum_observations(totals, values)
-            listings_seen.add(listing)
-        if include_history and (listing, day) not in listing_days_seen:
+        if include_history and (key, day) not in app_days_seen:
+            app_days_seen.add((key, day))
+            app_days[key].append(observation)
             _sum_observations(daily[day], values)
-            listing_days_seen.add((listing, day))
 
     result = {"brand_id": brand_id, "name": brand["name"], "metrics": totals}
     if include_history:
@@ -726,7 +615,8 @@ def market_share_trend(
 
     start, end = resolve_window(days, start_date, end_date)
     snapshot_rows = conn.execute(
-        f"SELECT * FROM market_share_snapshots WHERE brand_id IN ({placeholders}) "
+        "SELECT brand_id, snapshot_date, app_downloads_est, app_download_basis, app_reviews, source_updated_at, updated_at "
+        f"FROM market_share_snapshots WHERE brand_id IN ({placeholders}) "
         "AND country = ? AND snapshot_date <= ? ORDER BY snapshot_date, brand_id",
         [*ids, country_code, end],
     ).fetchall()
@@ -752,8 +642,7 @@ def market_share_trend(
             state[item["brand_id"]] = item
         evidence_brands = sum(
             1 for brand_id in ids
-            if _number(state.get(brand_id, {}).get("app_downloads_est"))
-            or _number(state.get(brand_id, {}).get("app_reviews"))
+            if _snapshot_downloads(state.get(brand_id, {})) or _number(state.get(brand_id, {}).get("app_reviews"))
         )
         if evidence_brands >= comparable_floor:
             points.append({
@@ -762,8 +651,6 @@ def market_share_trend(
                 "public_metrics": {
                     brand_id: {
                         "rating_count": round(_number(state.get(brand_id, {}).get("app_reviews"))),
-                        "average_rating": state.get(brand_id, {}).get("app_rating"),
-                        "app_count": round(_number(state.get(brand_id, {}).get("app_store_apps"))),
                     }
                     for brand_id in ids
                 },
@@ -794,7 +681,6 @@ def market_share_trend(
                 "start_rating_count": first_metrics[brand_id]["rating_count"],
                 "latest_rating_count": latest_metrics[brand_id]["rating_count"],
                 "rating_count_change": latest_metrics[brand_id]["rating_count"] - first_metrics[brand_id]["rating_count"],
-                "latest_average_rating": latest_metrics[brand_id]["average_rating"],
             })
 
     return {
@@ -853,17 +739,18 @@ def market_share(
 
     start, end = resolve_window(days, start_date, end_date)
     countries = _available_countries(conn, ids, start, end)
+    base_weights = preset["weights"]
     rows: list[dict] = []
     for brand_id in ids:
         brand = by_id[brand_id]
-        record_data = _record_signals(conn, brand, start, end, country_code)
-        sales_data = _sales_signals(conn, brand_id, start, end, country_code)
+        record_data = _record_signals(conn, brand, start, end, country_code, include_engagement=base_weights["engagement"] > 0)
+        sales_data = _sales_signals(conn, brand_id, start, end, country_code) if base_weights["sales"] else {}
         conversation_signal = record_data["app_reviews"]
         signals = {
             "sales": 0,
-            "app": record_data["app_downloads_est"] if record_data["app_download_basis"] == "observed" else 0,
+            "app": record_data["app_downloads"],
             "conversation": conversation_signal,
-            "engagement": record_data["engagement"],
+            "engagement": record_data.get("engagement", 0),
         }
         rows.append({
             "brand_id": brand_id,
@@ -876,7 +763,6 @@ def market_share(
             "gaps": [],
         })
 
-    base_weights = preset["weights"]
     comparable_floor = max(2, math.ceil(len(rows) * 0.5))
 
     # Do not mix currencies with unit counts. Choose one sales basis that is
@@ -890,11 +776,11 @@ def market_share(
     revenue_coverage = sum(
         1
         for row in rows
-        if row["raw"]["sales_revenue"] > 0
+        if row["raw"].get("sales_revenue", 0) > 0
         and not row["raw"].get("sales_currency_mixed")
         and row["raw"].get("sales_currency") == revenue_currency
     )
-    unit_coverage = sum(1 for row in rows if row["raw"]["sales_units"] > 0)
+    unit_coverage = sum(1 for row in rows if row["raw"].get("sales_units", 0) > 0)
     if revenue_coverage >= comparable_floor:
         sales_basis = "revenue"
         for row in rows:
@@ -913,9 +799,6 @@ def market_share(
     active_keys = [
         key for key in base_weights
         if base_weights[key] > 0 and signal_coverage[key] >= comparable_floor
-        and (key != "app" or sum(
-            row["raw"]["app_download_basis"] == "observed" for row in rows
-        ) >= comparable_floor)
     ]
     active_base_weight = sum(base_weights[key] for key in active_keys)
     active_weights = {
@@ -930,10 +813,8 @@ def market_share(
             gaps.append(f"已排除 {row['raw']['excluded_app_records']} 条非当前配置应用的记录")
         if base_weights["sales"] > 0 and not row["signals"]["sales"]:
             gaps.append("缺少可比较的销量或销售额")
-        if row["raw"]["app_download_basis"] == "unavailable":
-            gaps.append("缺少 App 下载量或应用商店评论")
-        elif row["raw"]["app_download_basis"] == "review_proxy":
-            gaps.append("App 下载量由公开评分数区间推算")
+        if not row["signals"]["app"]:
+            gaps.append("缺少实采 App 下载量")
         if not row["signals"]["conversation"]:
             gaps.append("缺少 App Store 公开评分数")
         if base_weights["engagement"] > 0 and not row["signals"]["engagement"]:
@@ -965,14 +846,9 @@ def market_share(
     evidence_total = sum(row["raw"].get("app_evidence_count", 0) for row in rows)
     sample_strength = min(1.0, math.log1p(evidence_total) / math.log1p(max(500, len(rows) * 250)))
     base_confidence = 100 * (0.55 * active_base_weight + 0.25 * fairness + 0.20 * sample_strength)
-    proxy_ratio = (
-        sum(1 for row in rows if row["raw"]["app_download_basis"] == "review_proxy") / len(rows)
-        if rows else 0.0
-    )
-    # Review-derived downloads and review counts are correlated rather than
-    # independent evidence.  Discount confidence until observed install data
-    # is available instead of showing a misleading near-100% score.
-    confidence_score = round(base_confidence * (1.0 - 0.30 * proxy_ratio))
+    # A ratings-only brand has less corroborating evidence than one with a measured download count.
+    ratings_only_ratio = sum(1 for row in rows if row["signals"]["conversation"] and not row["signals"]["app"]) / len(rows)
+    confidence_score = round(base_confidence * (1.0 - 0.30 * ratings_only_ratio))
     confidence_label = "高" if confidence_score >= 75 else "中" if confidence_score >= 50 else "低"
 
     warnings = [
@@ -990,8 +866,6 @@ def market_share(
         warnings.append("所选品牌分属不同品类，横向市占的业务含义可能有限。")
     elif any(not row.get("category") for row in rows):
         warnings.append("部分品牌未设置品类，请确认它们属于同一竞争市场。")
-    if any(row["raw"]["app_download_basis"] == "review_proxy" for row in rows):
-        warnings.append("下载估算仅供参考：按评分数的 50–200 倍估算，中位值为 100 倍；此推算不作为独立信号参与份额计算。")
     if active_base_weight < 0.999:
         warnings.append("数据覆盖不足、无法横向比较的指标未计入综合值，其权重已自动分配给可用指标。")
     for key, label in (("sales", "销售结果"), ("app", "App 下载"), ("conversation", "App Store 评分数"), ("engagement", "互动")):
@@ -1016,7 +890,7 @@ def market_share(
             "available_weight": round(active_base_weight, 2),
             "coverage_fairness": round(fairness, 2),
             "evidence_total": evidence_total,
-            "download_proxy_ratio": round(proxy_ratio, 2),
+            "ratings_only_ratio": round(ratings_only_ratio, 2),
         },
         "brands": rows,
         "warnings": warnings,
