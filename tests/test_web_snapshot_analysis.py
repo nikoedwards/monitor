@@ -33,6 +33,7 @@ from server.fetchers import FetchError
 from server.snapshot import (
     CAPTURE_SLOT,
     SnapshotCaptureError,
+    SnapshotResourceDeferred,
     SnapshotCaptureBusy,
     _capture_error_reason,
     _capture_chunk_height,
@@ -109,17 +110,18 @@ class VisualDiffTests(unittest.TestCase):
             launch.assert_not_called()
 
     def test_running_worker_is_killed_and_staging_removed_on_memory_pressure(self):
-        def partial_output(request, *, timeout):
-            payload = json.loads(request)
-            Path(payload["png_path"]).write_bytes(b"partial image")
-            raise subprocess.TimeoutExpired("snapshot", timeout)
-
         process = MagicMock(pid=1234, returncode=None)
-        process.communicate.side_effect = partial_output
+
+        def launch_worker(*_args, stdin, **_kwargs):
+            payload = json.load(stdin)
+            Path(payload["png_path"]).write_bytes(b"partial image")
+            return process
+
+        process.communicate.side_effect = subprocess.TimeoutExpired("snapshot", 0.5)
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("server.snapshot._available_memory_mb", side_effect=[400, 64, 100]),
-            patch("server.snapshot.subprocess.Popen", return_value=process),
+            patch("server.snapshot.subprocess.Popen", side_effect=launch_worker),
             patch("server.snapshot._kill_capture_process") as kill,
         ):
             root = Path(tmp)
@@ -186,23 +188,25 @@ class VisualDiffTests(unittest.TestCase):
         self.assertTrue(second.kwargs["prefer_prefetched"])
 
     def test_worker_publishes_png_and_archive_after_success(self):
-        def write_capture(request, *, timeout):
-            payload = json.loads(request)
+        process = MagicMock(pid=1234, returncode=0)
+
+        def launch_worker(*_args, stdin, **_kwargs):
+            payload = json.load(stdin)
+            self.assertEqual(payload["source_html"], "<main>中文</main>")
             Path(payload["png_path"]).write_bytes(b"complete PNG")
             Path(payload["html_path"]).write_text("archive")
-            return b'{"method":"playwright"}', b""
+            return process
 
-        process = MagicMock(pid=1234, returncode=0)
-        process.communicate.side_effect = write_capture
+        process.communicate.return_value = b'{"method":"playwright"}', b""
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("server.snapshot._available_memory_mb", return_value=400),
-            patch("server.snapshot.subprocess.Popen", return_value=process),
+            patch("server.snapshot.subprocess.Popen", side_effect=launch_worker),
             patch("server.snapshot._kill_capture_process"),
         ):
             root = Path(tmp)
             png, html = root / "a.png", root / "a.html"
-            result = _isolated_playwright_capture("https://example.com", png, html)
+            result = _isolated_playwright_capture("https://example.com", png, html, "<main>中文</main>")
             self.assertEqual(result["method"], "playwright")
             self.assertEqual(png.read_bytes(), b"complete PNG")
             self.assertEqual(html.read_text(), "archive")
@@ -1061,6 +1065,17 @@ class SnapshotSchedulingTests(unittest.TestCase):
             - datetime.fromisoformat(row["last_snapshot_attempt_at"])
         )
         self.assertEqual(retry_delay, timedelta(minutes=10))
+        with patch("server.domains.web._capture_one", side_effect=SnapshotResourceDeferred("主机 I/O 压力")):
+            self.assertEqual(capture_monitor(conn, dict(row) | monitor), [])
+        deferred = conn.execute("SELECT * FROM web_monitors WHERE id = 'monitor-1'").fetchone()
+        self.assertEqual(deferred["snapshot_retry_count"], 1)
+        self.assertEqual(deferred["last_snapshot_at"], previous_snapshot_at)
+        self.assertIn("主机 I/O 压力", deferred["last_error"])
+        self.assertEqual(
+            datetime.fromisoformat(deferred["next_snapshot_retry_at"])
+            - datetime.fromisoformat(deferred["last_snapshot_attempt_at"]),
+            timedelta(minutes=10),
+        )
         conn.close()
 
     def test_snapshot_retry_deadline_overrides_normal_schedule(self):

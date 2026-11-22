@@ -34,7 +34,7 @@ def browser_pids():
     return found
 
 
-def run_capture(url, root, timeout=90, *, simulate_pressure=False):
+def run_capture(url, root, timeout=90, *, simulate_pressure=False, prefetched_html=""):
     started = time.monotonic()
     samples = []
     def available_memory():
@@ -49,7 +49,7 @@ def run_capture(url, root, timeout=90, *, simulate_pressure=False):
         ):
             future = executor.submit(
                 _isolated_playwright_capture, url,
-                root / "capture.png", root / "capture.html", "", safe_mode=True,
+                root / "capture.png", root / "capture.html", prefetched_html, safe_mode=True,
             )
             while not future.done():
                 health()
@@ -87,9 +87,24 @@ def main():
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 source = "<html><body><main style='height:1800px;background:linear-gradient(red,blue)'>Runtime PNG</main></body></html>"
-                result = run_capture("data:text/html," + quote(source), root)
+                # Simulate a slow worker boot before it reads an HTML payload
+                # larger than a pipe buffer. The API and all guards stay live.
+                start_worker = subprocess.Popen
+
+                def delayed_worker(args, **kwargs):
+                    return start_worker(
+                        [args[0], "-c", "import time; time.sleep(1.2); from server.snapshot_worker import main; raise SystemExit(main())"],
+                        **kwargs,
+                    )
+
+                large_html = source + "<!--" + ("文" * 300_000) + "-->"
+                with patch("server.snapshot.subprocess.Popen", side_effect=delayed_worker):
+                    result = run_capture(
+                        "data:text/html," + quote(source), root, timeout=12, prefetched_html=large_html,
+                    )
                 assert result.get("engine") == "chromium_cdp", result
                 assert (root / "capture.png").stat().st_size > 1000
+                assert "文".encode() in (root / "capture.html").read_bytes()
                 # An unresponsive renderer must be killed with the worker,
                 # while the separate API continues answering health checks.
                 result = run_capture("data:text/html,<script>while(true){}</script>", root, timeout=4)

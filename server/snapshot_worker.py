@@ -20,7 +20,7 @@ def main() -> int:
             os.nice(10)
         except OSError:
             pass
-    request = json.loads(sys.stdin.read())
+    request = json.load(sys.stdin.buffer)
     try:
         capture = _playwright_capture
         if os.name == "posix" and request.get("safe_mode"):
