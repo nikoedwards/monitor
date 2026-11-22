@@ -8,6 +8,7 @@ from urllib.parse import quote
 from PIL import Image
 
 from server.snapshot_cdp import _browser_binary, capture
+from server.snapshot import SnapshotCaptureError
 
 
 def _has_browser() -> bool:
@@ -19,6 +20,17 @@ def _has_browser() -> bool:
 
 @unittest.skipUnless(_has_browser(), "Chromium is not installed")
 class SnapshotCdpIntegrationTests(unittest.TestCase):
+    def test_rejects_fullscreen_loader_instead_of_saving_spinner(self):
+        source = """<html><body><main>Real content behind loading mask</main>
+          <aside id='c-preloaderapp' style='position:fixed;inset:0;background:white'>
+          Loading</aside></body></html>"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(SnapshotCaptureError, 'loading overlay'):
+                capture('data:text/html;charset=utf-8,'+quote(source),
+                        root/'loader.png', root/'loader.html', source)
+            self.assertFalse((root/'loader.png').exists())
+
     def test_waits_for_application_to_replace_fullscreen_loader(self):
         source = """<html><body>
           <div id='c-preloaderapp' style='position:fixed;inset:0;background:white'>Loading</div>

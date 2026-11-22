@@ -186,6 +186,19 @@ class _Page:
         return result
 
     def screenshot(self, path, **_options):
+        if not getattr(self, 'scriptless', False):
+            self.evaluate("""() => new Promise(resolve => setTimeout(() => {
+          // Finish one-shot opacity reveals, leaving carousels and looping
+          // animations alone. Scroll-triggered fades must settle before PNG.
+          if (window.gsap?.globalTimeline) {
+            for (const tween of window.gsap.globalTimeline.getChildren(true,true,false)) {
+              if (!tween.repeat() && (tween.vars.opacity!==undefined || tween.vars.autoAlpha!==undefined)) {
+                tween.progress(1);
+              }
+            }
+          }
+          resolve(true);
+        }, 300))""")
         result = self.call("Page.captureScreenshot", {
             "format": "png", "captureBeyondViewport": False, "fromSurface": True,
         }, timeout=15)
@@ -334,6 +347,33 @@ def capture(
                       document.head.appendChild(s);
                     }""")
                     readiness = page.wait_for_render()
+                    page.evaluate("""() => {
+                      for (const el of document.querySelectorAll(
+                        '#onetrust-banner-sdk,#shopify-pc__banner,.cky-consent-container,'+
+                        '[id*=cookie i],[class*=cookie i],[id*=consent i],[class*=consent i]'
+                      )) {
+                        const s=getComputedStyle(el);
+                        if (s.position==='fixed' && (/cookie|privacy|consent/i.test(el.innerText||'')
+                          || /overlay|backdrop/i.test(el.className||''))) {
+                          el.style.setProperty('display','none','important');
+                        }
+                      }
+                      const positioned=[...document.querySelectorAll('body *')].map(el=>({
+                        el, position:getComputedStyle(el).position, r:el.getBoundingClientRect()
+                      })).filter(x=>x.position==='fixed'||x.position==='sticky');
+                      for (const {el,position,r} of positioned) {
+                        el.style.setProperty('position',position==='fixed'?'absolute':'relative','important');
+                        if (position==='fixed') {
+                          el.style.setProperty('top',(r.top+scrollY)+'px','important');
+                          el.style.setProperty('bottom','auto','important');
+                        } else {
+                          el.style.setProperty('top','auto','important');
+                        }
+                      }
+                      const style=document.createElement('style');
+                      style.textContent='*{scrollbar-width:none!important}*::-webkit-scrollbar{display:none!important}';
+                      document.head.appendChild(style);
+                    }""")
                     data = page.evaluate("""() => ({
                       final_url:location.href, title:document.title,
                       text:(document.body?.innerText||'').slice(0,200000)
