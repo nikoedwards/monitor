@@ -164,6 +164,7 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
 export function SmartSummary({ brandId, dimension, channel, range, filters, label = "智能总结" }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; filters?: SummaryFilters; label?: string }) {
   const summarize = useInsightsSummary(brandId, dimension, channel, range, filters);
   const data = summarize.data;
+  const error = summarize.generate.error?.message || summarize.error?.message || summarize.generationError;
 
   const run = () => {
     if (brandId) summarize.generate.mutate({ refresh: !!summarize.data });
@@ -173,17 +174,17 @@ export function SmartSummary({ brandId, dimension, channel, range, filters, labe
     <div>
       <div className="flex items-start gap-2">
         <div className="flex flex-col items-start">
-          <Button size="sm" variant="primary" disabled={!brandId || summarize.generate.isPending || summarize.isLoading} onClick={run}>
-            <Sparkles size={14} /> {summarize.generate.isPending ? "生成中…" : label}
+          <Button size="sm" variant="primary" disabled={!brandId || summarize.isGenerating || summarize.isLoading} onClick={run}>
+            <Sparkles size={14} /> {summarize.isGenerating ? "生成中…" : label}
           </Button>
-          <AsyncProgress active={summarize.generate.isPending} label="正在生成智能总结" />
+          <AsyncProgress active={summarize.isGenerating} label="正在生成智能总结" />
         </div>
         <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)}{channel ? ` · ${channel}` : ""}{filters?.sentiment ? ` · ${filters.sentiment}` : ""}</span>
       </div>
 
-      {(summarize.isError || summarize.generate.isError) && (
-        <p className="text-[13px] mt-3" style={{ color: "var(--danger)" }}>
-          {((summarize.generate.error || summarize.error) as any)?.message || "生成失败，请稍后重试。"}
+      {error && (
+        <p className="text-[13px] mt-3" role="alert" style={{ color: "var(--danger)" }}>
+          {error}
         </p>
       )}
 
