@@ -20,11 +20,11 @@ SYSTEM = """你是行业战略与竞争情报负责人。只依据输入的各�
 PROMPT = """请对以下跨品牌证据进行战略研判，不要逐品牌复述计数。
 1. 分析范围严格是 range.start 至 range.end，previous 只是紧邻的等长前期基线；前期事件不能冒充本期变化。active_in_window 只证明在本期仍有可见活动，不能称为本期新发布。
 2. 寻找跨品牌、跨板块的共性变化与分化：需求/产品方向、定价与渠道、营销竞争、用户痛点、组织投入。区分观察与战略推断，给出下一步验证信号。
-3. industry_changes 最多两条，每条至少引用两个不同品牌，且至少一份本期证据；单品牌现象放 brand_moves。跨板块数据互相印证时，检查来源是否独立。不要把同一报道的转载当独立验证。
-4. brand_moves 最多四条，每个有本期证据的品牌最多一条；无数据的品牌不推断。opportunities 与 risks 各最多两条，说明影响及可执行的验证动作。每项引用 evidence 中最多三份证据，且至少一份属于本期；不输出自己的链接或证据对象。
+3. 四个判断列表合计最多六条，按证据强弱选取，不必填满。industry_changes 每条至少引用两个不同品牌，且至少一份本期证据。单品牌现象放 brand_moves，每品牌最多一条。转载不算独立来源。
+4. opportunities 与 risks 说明影响及验证动作。每项最多引用三份证据，且至少一份属于本期；不输出链接或证据对象。
 5. 监测样本不是行业全量，品牌声量不等于市场份额，缺失不等于零。销售额/销量来自快照估算，不同币种不可相加，重复快照不可当成交额；定价、评分只比较相同商品/地区/币种。岗位首见不等于发布日期，不能从岗位数推导实际人数。采集量变化不能直接解释为需求增长。
 6. 如果前期无数据或覆盖不可比，明确无法判断增减。limited_sources 中的来源可能存在读取上限、缺失或批量导入。结合 category 识别品类边界。数据不足时少写或返回空数组。
-7. summary 用 2-3 句话概括有证据支持的行业主线；各卡片文字字段各用一句话，约 20-45 字。正文使用品牌名、日期和具体动作，证据 ID 只放 evidence_ids。confidence 只能用 low/medium/high。
+7. summary 用两句话概括有证据支持的行业主线；各卡片文字字段各用一个短句，约 20-30 字。正文使用品牌名、日期和具体动作，证据 ID 只放 evidence_ids。confidence 只能用 low/medium/high。
 返回结构：
 {"summary":"行业主线与竞争格局", "industry_changes":[{"title":"共性变化", "observation":"本期跨品牌事实", "implication":"战略含义及不确定性", "next_signal":"后续验证什么", "confidence":"medium", "evidence_ids":["输入证据ID"]}], "brand_moves":[{"brand_id":"输入品牌ID", "title":"品牌策略", "observation":"本期动作", "implication":"竞争位置变化的假设", "next_signal":"验证信号", "confidence":"low", "evidence_ids":[]}], "opportunities":[], "risks":[], "caveats":["具体覆盖限制"]}
 opportunities 和 risks 的条目字段与 industry_changes 相同。
@@ -235,14 +235,15 @@ def compare_summary(conn, start, end, *, refresh=False, cached_only=False):
     try:
         cfg = ai.get_config(conn)
         try:
-            parsed = _request_compare_result(cfg, prompt, timeout=90)
+            parsed = _request_compare_result(cfg, prompt, timeout=180)
         except ai.LlmError as exc:
             cause = exc.__cause__
             if not isinstance(getattr(cause, "reason", cause), TimeoutError):
                 raise
             logger.info("Comparison model timed out; retrying with a smaller evidence sample")
             prompt, selected = build_compare_prompt(packet, evidence_budget=RETRY_EVIDENCE_BUDGET)
-            parsed = _request_compare_result(cfg, prompt, timeout=90)
+            brief = "本次只返回证据最强的两条判断和一句行业主线，其他列表使用空数组。\n"
+            parsed = _request_compare_result(cfg, brief + prompt, timeout=120)
         result = {**validate_compare_result(parsed, {**packet, "evidence": selected}), **metadata, "mode": "ai",
                   "evidence_count": len(selected), "generated_at": datetime.now(timezone.utc).isoformat()}
     except (ai.LlmError, ValueError, TypeError) as exc:
