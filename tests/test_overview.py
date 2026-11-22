@@ -1,7 +1,14 @@
+import sqlite3
+import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from server.domains.insights import _fallback_summary, _overview_payload, _previous_window, overview_summary
+from server import ai
+from server.db import SCHEMA
+from server.domains.insights import _fallback_summary, _overview_payload, _previous_window, overview, overview_summary
 
 
 class OverviewAggregationTests(unittest.TestCase):
@@ -61,6 +68,62 @@ class OverviewAggregationTests(unittest.TestCase):
         self.assertEqual("fallback", result["mode"])
         self.assertIn("销售额估算", result["summary"])
         self.assertEqual("2026-10-29", result["yesterday_summary"].split("：")[0])
+
+
+class OverviewBackgroundSummaryTests(unittest.TestCase):
+    def test_preview_and_cached_summary_survive_slow_and_failed_model(self):
+        payload = {"modules": {}, "kpis": {}, "coverage": {}, "range": {"start": "2026-10-01", "end": "2026-10-30"}}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_model(*args):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("Test did not release model")
+            return {"summary": "完成研判"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            conn = sqlite3.connect(Path(directory) / "overview.db", isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(SCHEMA)
+            params = {"brand_id": "brand", "start_date": "2026-10-01", "end_date": "2026-10-30", "conn": conn}
+
+            def read():
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    result = overview_summary(**params, background=True, cached_only=True)
+                    if result["generation"]["status"] != "running":
+                        return result
+                    time.sleep(0.01)
+                self.fail("Background summary did not complete")
+
+            try:
+                with patch("server.domains.insights._overview_payload", side_effect=lambda *args: dict(payload)), \
+                     patch("server.domains.insights.build_overview_evidence", return_value={}), \
+                     patch("server.domains.insights.ai.is_configured", return_value=True), \
+                     patch("server.domains.insights.ai.summarize_overview", side_effect=slow_model) as model:
+                    self.assertEqual("fallback", overview(**params)["summary_preview"]["mode"])
+                    first = overview_summary(**params, background=True)
+                    try:
+                        self.assertEqual("running", first["generation"]["status"])
+                        self.assertTrue(entered.wait(2))
+                        resumed = overview_summary(**params, background=True, cached_only=True)
+                        self.assertEqual("running", resumed["generation"]["status"])
+                    finally:
+                        release.set()
+                    self.assertEqual("完成研判", read()["summary"])
+                    model.assert_called_once()
+
+                    model.side_effect = ai.LlmError("timed out")
+                    refresh = overview_summary(**params, background=True, refresh=True)
+                    self.assertEqual("完成研判", refresh["summary"])
+                    result = read()
+                    self.assertEqual("completed", result["generation"]["status"])
+                    self.assertEqual("完成研判", result["summary"])
+                    self.assertIn("上次成功", result["summary_notice"])
+                    self.assertTrue(overview_summary(**params)["cached"])
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":
