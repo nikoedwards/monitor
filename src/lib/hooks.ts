@@ -456,8 +456,8 @@ export function useInsightsSummary(brandId?: string, dimension?: string, channel
   const rp = rangeParams(range);
   const filterParams = { ...filters, sources: filters.sources?.join(","), platforms: filters.platforms?.join(",") };
   const queryClient = useQueryClient();
-  const background = dimension === "marketing";
-  const namespace = background ? "marketing-insights-summary" : dimension === "voc" ? "insights-summary-voc-v2" : "insights-summary";
+  const background = dimension === "marketing" || dimension === "voc";
+  const namespace = dimension === "voc" ? "insights-summary-voc-v2" : background ? "marketing-insights-summary" : "insights-summary";
   const queryKey = [namespace, brandId, dimension, channel, rp, filterParams];
   const storageKey = persistentTaskKey(namespace, [brandId, dimension, channel, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
   const params = { brand_id: brandId, dimension, channel, background: background || undefined, ...filterParams, ...rp };
