@@ -105,21 +105,22 @@ export function CompareSummary({ range, brandIds }: { range: TimeRange; brandIds
     queryKey,
     queryFn: async () => {
       const previous = qc.getQueryData<StrategyReply>(queryKey);
-      if (previous?.generation?.status !== "running") {
-        return api.get<StrategyReply>(`${endpoint}${qs({ ...params, cached_only: true })}`);
-      }
       const next = await api.get<StrategyReply>(`${endpoint}${qs({ ...params, background: true })}`);
-      return keepPreviousSummary(previous, next.generation ? next : {
-        generation: { status: "failed", error: "生成任务已中断，请重试。" },
-      });
+      if (previous?.generation?.status === "running" && !next.generation) {
+        return keepPreviousSummary(previous, {
+          ...next, generation: { status: "failed", error: "生成任务已中断，请重试。" },
+        });
+      }
+      return keepPreviousSummary(previous, next);
     },
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 3000 : false,
-    retry: false,
+    retry: 2,
   });
   const generate = useMutation({
     mutationKey: queryKey,
+    onMutate: () => qc.cancelQueries({ queryKey, exact: true }),
     mutationFn: () => api.get<StrategyReply>(`${endpoint}${qs({ ...params, refresh: true, background: true })}`),
     onSuccess: (result) => qc.setQueryData<StrategyReply>(queryKey, (previous) => keepPreviousSummary(previous, result)),
   });

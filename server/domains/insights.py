@@ -492,13 +492,17 @@ def compare(days: int = 30, start_date: str | None = None, end_date: str | None 
 
 @router.get("/compare/summary")
 def compare_strategy_summary(days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, cached_only: bool = False, background: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
-    from ..compare_summary import compare_summary
+    from ..compare_summary import compare_cache_prefix, compare_summary
 
     start, end = resolve_window(days, start_date, end_date)
     if background:
-        return analysis_job(
+        saved = ai.get_latest_saved_summary(conn, compare_cache_prefix(start, end)) or {}
+        job = analysis_job(
             conn, f"compare-strategy:{start}:{end}",
             lambda worker: compare_summary(worker, start, end, refresh=True),
             start=refresh and not cached_only, refresh=refresh,
         )
+        if job.get("generation", {}).get("status") == "completed":
+            return job
+        return {**saved, **job}
     return compare_summary(conn, start, end, refresh=refresh, cached_only=cached_only)
