@@ -146,7 +146,7 @@ type OverviewSummaryResponse = {
   generation?: { status: "running" | "completed" | "failed"; error?: string };
 };
 
-type OverviewSummaryState = OverviewSummaryResponse & { pollingSince?: number };
+type OverviewSummaryState = OverviewSummaryResponse & { pollingSince?: number; takingLonger?: boolean };
 
 export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[]) {
   const rp = rangeParams(range);
@@ -159,20 +159,20 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
     queryKey,
     queryFn: async (): Promise<OverviewSummaryState> => {
       const previous = client.getQueryData<OverviewSummaryState>(queryKey);
-      const pollingSince = previous?.pollingSince;
       const polling = previous?.generation?.status === "running";
-      if (polling && pollingSince && Date.now() - pollingSince >= 120_000) {
-        return { ...previous, generation: { status: "failed", error: "AI 研判耗时较长，可点击「重新研判」继续查看进度。" } };
-      }
       const next = await read({ cached_only: polling });
-      if (polling && !next.generation && !next.mode) {
-        return { ...previous, generation: { status: "failed", error: "研判任务已中断，请点击「重新研判」重试。" } };
+      if (polling && !next.generation) {
+        return { ...previous, ...next, generation: { status: "failed", error: "研判任务已中断，请点击「重新研判」重试。" } };
       }
-      return { ...next, pollingSince: next.generation?.status === "running" ? pollingSince ?? Date.now() : undefined };
+      const pollingSince = next.generation?.status === "running" ? previous?.pollingSince ?? Date.now() : undefined;
+      return { ...next, pollingSince, takingLonger: pollingSince != null && Date.now() - pollingSince >= 120_000 };
     },
     enabled: !!brandId,
     retry: false,
-    refetchInterval: (current) => current.state.status !== "error" && current.state.data?.generation?.status === "running" ? 3000 : false,
+    refetchInterval: (current) => {
+      if (current.state.status === "error" || current.state.data?.generation?.status !== "running") return false;
+      return current.state.data.takingLonger ? 10_000 : 3000;
+    },
     staleTime: 10 * 60_000,
     gcTime: 24 * 60 * 60_000,
   });
@@ -180,14 +180,21 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
     mutationFn: () => read({ refresh: true }),
     onSuccess: (next) => client.setQueryData<OverviewSummaryState>(queryKey, (previous) => ({
       ...(next.mode ? next : { ...previous, ...next }),
-      pollingSince: Date.now(),
+      pollingSince: next.generation?.status === "running" ? Date.now() : undefined,
+      takingLonger: false,
     })),
   });
+  const running = !query.isError && query.data?.generation?.status === "running";
+  const takingLonger = running && query.data?.takingLonger === true;
   return {
     data: query.data?.mode ? query.data : undefined,
     error: refresh.error?.message || query.error?.message || query.data?.generation?.error,
-    pending: refresh.isPending || query.isFetching || (!query.isError && query.data?.generation?.status === "running"),
-    refresh: () => refresh.mutate(),
+    pending: refresh.isPending || (!takingLonger && (query.isFetching || running)),
+    takingLonger,
+    refresh: () => {
+      if (takingLonger) void query.refetch({ cancelRefetch: false });
+      else refresh.mutate();
+    },
   };
 }
 

@@ -56,7 +56,7 @@ function highlightSource(highlight: string, representative: any[] = []) {
 }
 
 export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview }: { brandId?: string; range: TimeRange; marketBrandIds?: string[]; preview?: { mode: "fallback" } }) {
-  const { data: analyzed, pending, error, refresh } = useOverviewSummary(brandId, range, marketBrandIds);
+  const { data: analyzed, pending, takingLonger, error, refresh } = useOverviewSummary(brandId, range, marketBrandIds);
   const data = analyzed || preview;
 
   return (
@@ -69,14 +69,15 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview 
         <div className="flex flex-col items-end">
           <Button size="sm" onClick={refresh} disabled={pending}>
             <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
-            {pending ? "更新中…" : "重新研判"}
+            {pending ? "更新中…" : takingLonger ? "查看进度" : "重新研判"}
           </Button>
           <AsyncProgress active={pending} label="正在后台分析经营证据" />
         </div>
       </div>
 
       {error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
-      {!pending && !error && analyzed?.summary_notice && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>{analyzed.summary_notice}</p>}
+      {takingLonger && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>AI 研判耗时较长，仍在后台处理，完成后会自动更新。</p>}
+      {!pending && !takingLonger && !error && analyzed?.summary_notice && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>{analyzed.summary_notice}</p>}
       {data && <OverviewResearch data={data} brandId={brandId} />}
     </div>
   );
