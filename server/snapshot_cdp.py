@@ -149,7 +149,7 @@ def capture(
     import websocket
 
     memory = _available_memory_mb()
-    emergency = memory is None or memory < CAPTURE_MIN_AVAILABLE_MB
+    emergency = scriptless or memory is None or memory < CAPTURE_MIN_AVAILABLE_MB
     constrained = memory is None or memory < int(
         os.environ.get("MONITOR_CAPTURE_SAFE_MEMORY_MB", "768")
     )
@@ -185,7 +185,7 @@ def capture(
                     _browser_binary(), "--headless", "--no-sandbox", "--disable-gpu",
                     "--disable-dev-shm-usage", "--disable-background-networking",
                     "--disable-extensions", "--disable-sync", "--no-first-run", "--mute-audio",
-                    "--renderer-process-limit=1",
+                    "--renderer-process-limit=1", "--disk-cache-size=16777216",
                     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
                     f"--user-data-dir={profile}", f"--window-size={width},{height}", "about:blank",
                 ]

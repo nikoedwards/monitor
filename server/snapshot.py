@@ -1240,15 +1240,46 @@ def _isolated_playwright_capture(
     if available is not None and available < CAPTURE_START_HEADROOM_MB:
         logger.warning("Snapshot deferred host=%s available_mib=%s", target, available)
         return {"error": f"截图暂缓：可用内存 {available} MiB，低于启动余量 {CAPTURE_START_HEADROOM_MB} MiB"}
+    deadline = time.monotonic() + CAPTURE_JOB_TIMEOUT_SECONDS
+    result = _capture_in_staging(url, png_path, html_path, source_html, safe_mode, available, target, deadline)
+    if result.get("resource_pressure") and sys.platform.startswith("linux") and time.monotonic() < deadline:
+        available = _available_memory_mb()
+        if available is None or available >= CAPTURE_START_HEADROOM_MB:
+            logger.warning("Snapshot retry host=%s reason=memory_reserve mode=scriptless", target)
+            result = _capture_in_staging(
+                url, png_path, html_path, source_html, True, available, target, deadline, scriptless=True,
+            )
+    return result
 
+
+def _capture_in_staging(
+    url: str,
+    png_path: Path,
+    html_path: Path,
+    source_html: str,
+    safe_mode: bool,
+    available: int | None,
+    target: str,
+    deadline: float,
+    *,
+    scriptless: bool = False,
+) -> dict:
     # Keep every intermediate file in a directory owned by the supervising
     # process. A killed renderer cannot clean up its tiles or Chromium profile.
     with tempfile.TemporaryDirectory(prefix=".capture-", dir=png_path.parent, ignore_cleanup_errors=True) as directory:
         staging = Path(directory).resolve()
         staged_png = staging / png_path.name
         staged_archive = staging / html_path.name
-        result = _run_snapshot_worker(url, staged_png, staged_archive, source_html, safe_mode, available, target)
-        if result and not result.get("error"):
+        request = {
+            "url": url,
+            "png_path": str(staged_png),
+            "html_path": str(staged_archive),
+            "source_html": source_html[:1_000_000 if safe_mode else 3_000_000],
+            "safe_mode": safe_mode,
+            "scriptless": scriptless,
+        }
+        result = _run_snapshot_worker(request, staging, available, target, deadline)
+        if not result.get("error"):
             if not staged_png.is_file() or staged_png.stat().st_size == 0:
                 return {"error": "截图进程没有写入 PNG"}
             if staged_archive.exists():
@@ -1262,33 +1293,21 @@ def _isolated_playwright_capture(
 
 
 def _run_snapshot_worker(
-    url: str,
-    png_path: Path,
-    html_path: Path,
-    source_html: str,
-    safe_mode: bool,
+    request: dict,
+    staging: Path,
     available: int | None,
     target: str,
+    deadline: float,
 ) -> dict:
-    source_limit = 1_000_000 if safe_mode else 3_000_000
-    request = json.dumps(
-        {
-            "url": url,
-            "png_path": str(png_path),
-            "html_path": str(html_path),
-            "source_html": source_html[:source_limit],
-            "safe_mode": safe_mode,
-        },
-        ensure_ascii=False,
-    )
     env = os.environ.copy()
-    staging = str(png_path.parent)
-    env.update(MONITOR_CAPTURE_ISOLATED="0", TMPDIR=staging, TMP=staging, TEMP=staging)
+    env.update(MONITOR_CAPTURE_ISOLATED="0", TMPDIR=str(staging), TMP=str(staging), TEMP=str(staging))
     started = time.monotonic()
-    deadline = started + CAPTURE_JOB_TIMEOUT_SECONDS
     low_water = available
     outcome = "worker_error"
-    logger.warning("Snapshot start host=%s safe_mode=%s available_mib=%s", target, safe_mode, available)
+    logger.warning(
+        "Snapshot start host=%s safe_mode=%s scriptless=%s available_mib=%s",
+        target, request["safe_mode"], request["scriptless"], available,
+    )
     process = subprocess.Popen(
         [sys.executable, "-m", "server.snapshot_worker"],
         cwd=str(ROOT),
@@ -1298,7 +1317,7 @@ def _run_snapshot_worker(
         start_new_session=(os.name != "nt"),
         env=env,
     )
-    data = request.encode("utf-8")
+    data = json.dumps(request, ensure_ascii=False).encode("utf-8")
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -1315,7 +1334,10 @@ def _run_snapshot_worker(
                     low_water = available if low_water is None else min(low_water, available)
                     if available < CAPTURE_RESERVE_MB:
                         outcome = "memory_reserve"
-                        return {"error": f"截图已结束以保护服务器：可用内存 {available} MiB，低于保留量 {CAPTURE_RESERVE_MB} MiB"}
+                        return {
+                            "error": f"截图已结束以保护服务器：可用内存 {available} MiB，低于保留量 {CAPTURE_RESERVE_MB} MiB",
+                            "resource_pressure": True,
+                        }
         if process.returncode:
             detail = stderr or stdout or f"worker exit {process.returncode}".encode()
             return {"error": detail.decode("utf-8", errors="replace").strip()[-500:]}

@@ -118,7 +118,7 @@ class VisualDiffTests(unittest.TestCase):
         process.communicate.side_effect = partial_output
         with (
             tempfile.TemporaryDirectory() as tmp,
-            patch("server.snapshot._available_memory_mb", side_effect=[400, 64]),
+            patch("server.snapshot._available_memory_mb", side_effect=[400, 64, 100]),
             patch("server.snapshot.subprocess.Popen", return_value=process),
             patch("server.snapshot._kill_capture_process") as kill,
         ):
@@ -129,6 +129,28 @@ class VisualDiffTests(unittest.TestCase):
         kill.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=2)
         self.assertEqual(process.communicate.call_count, 1)
+
+    def test_memory_pressure_retries_with_fresh_low_memory_browser_after_cleanup(self):
+        def complete_retry(request, staging, *_args):
+            if not request["scriptless"]:
+                (staging / "partial").touch()
+                return {"error": "memory reserve", "resource_pressure": True}
+            self.assertTrue(request["safe_mode"])
+            self.assertEqual(list(staging.parent.glob(".capture-*")), [staging])
+            Path(request["png_path"]).write_bytes(b"complete PNG")
+            return {"method": "playwright", "engine": "chromium_cdp"}
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.snapshot.sys.platform", "linux"),
+            patch("server.snapshot._available_memory_mb", side_effect=[400, 370]),
+            patch("server.snapshot._run_snapshot_worker", side_effect=complete_retry) as worker,
+        ):
+            root = Path(tmp)
+            result = _isolated_playwright_capture("https://example.com", root / "a.png", root / "a.html")
+            self.assertEqual(result["engine"], "chromium_cdp")
+            self.assertEqual(list(root.iterdir()), [root / "a.png"])
+            self.assertEqual(worker.call_count, 2)
 
     def test_worker_publishes_png_and_archive_after_success(self):
         def write_capture(request, *, timeout):
