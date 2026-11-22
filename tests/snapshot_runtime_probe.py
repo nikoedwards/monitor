@@ -13,7 +13,7 @@ from urllib.parse import quote
 from urllib.request import urlopen
 from unittest.mock import patch
 
-from server.snapshot import _isolated_playwright_capture
+from server.snapshot import _available_memory_mb, _isolated_playwright_capture
 
 
 def health():
@@ -27,18 +27,26 @@ def browser_pids():
         if entry.name.isdigit():
             try:
                 command = (entry / "cmdline").read_bytes()
-                if b"--user-data-dir=/tmp/monitor-cdp-" in command:
+                if b"--user-data-dir=" in command and b"monitor-cdp-" in command:
                     found.append(int(entry.name))
             except OSError:
                 pass
     return found
 
 
-def run_capture(url, root, timeout=90):
+def run_capture(url, root, timeout=90, *, simulate_pressure=False):
     started = time.monotonic()
     samples = []
+    def available_memory():
+        if simulate_pressure and browser_pids():
+            return 64
+        return _available_memory_mb()
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        with patch("server.snapshot.CAPTURE_JOB_TIMEOUT_SECONDS", timeout):
+        with (
+            patch("server.snapshot.CAPTURE_JOB_TIMEOUT_SECONDS", timeout),
+            patch("server.snapshot._available_memory_mb", side_effect=available_memory),
+        ):
             future = executor.submit(
                 _isolated_playwright_capture, url,
                 root / "capture.png", root / "capture.html", "", safe_mode=True,
@@ -50,6 +58,7 @@ def run_capture(url, root, timeout=90):
             result = future.result()
     health()
     assert not browser_pids(), f"Chromium children left behind: {browser_pids()}"
+    assert not list(root.glob(".capture-*")), "Worker staging directory was left behind"
     print(json.dumps({
         "url": url[:100], "elapsed": round(time.monotonic() - started, 2),
         "peak_sampled_mib": round(max(samples, default=0) / 1024**2, 2),
@@ -85,6 +94,10 @@ def main():
                 # while the separate API continues answering health checks.
                 result = run_capture("data:text/html,<script>while(true){}</script>", root, timeout=4)
                 assert "error" in result, result
+                result = run_capture(
+                    "data:text/html,<script>while(true){}</script>", root, timeout=20, simulate_pressure=True,
+                )
+                assert "低于保留量" in result.get("error", ""), result
                 target = os.environ.get("MONITOR_TEST_SNAPSHOT_URL")
                 if target:
                     result = run_capture(target, root)

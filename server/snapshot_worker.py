@@ -15,6 +15,11 @@ from .worker_support import _attach_windows_job, _prefer_worker_oom_kill
 def main() -> int:
     _attach_windows_job()
     _prefer_worker_oom_kill()
+    if hasattr(os, "nice"):
+        try:
+            os.nice(10)
+        except OSError:
+            pass
     request = json.loads(sys.stdin.read())
     try:
         capture = _playwright_capture
