@@ -10,7 +10,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from server import ai
-from server.compare_summary import build_compare_packet, compare_summary, validate_compare_result
+from server.compare_summary import build_compare_packet, build_compare_prompt, compare_summary, validate_compare_result
 from server.db import SCHEMA
 from server.domains.insights import compare_strategy_summary
 
@@ -150,11 +150,18 @@ class CompareSummaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch("server.compare_summary.compare_summary", side_effect=summarize) as generate:
                 conn = sqlite3.connect(Path(directory) / "compare.db")
+                conn.row_factory = sqlite3.Row
                 try:
+                    conn.executescript(SCHEMA)
+                    saved_key = "compare-strategy-v1:2026-10-01:2026-10-30:old-fingerprint"
+                    ai.put_cached_summary(conn, saved_key, {"mode": "ai", "summary": "上一次总结"})
+                    self.assertEqual("上一次总结", compare_strategy_summary(**params, conn=conn)["summary"])
                     for _ in range(2):
                         result = compare_strategy_summary(**params, refresh=True, conn=conn)
                         self.assertEqual("running", result["generation"]["status"])
-                    self.assertEqual("running", compare_strategy_summary(**params, conn=conn)["generation"]["status"])
+                    polled = compare_strategy_summary(**params, conn=conn)
+                    self.assertEqual("running", polled["generation"]["status"])
+                    self.assertEqual("上一次总结", polled["summary"])
                     release.set()
                     deadline = time.monotonic() + 3
                     while time.monotonic() < deadline:
@@ -176,6 +183,38 @@ class CompareSummaryTests(unittest.TestCase):
         packet = self.packet()
         self.assertIn("b:record:b-now", {ref["id"] for ref in packet["evidence"]})
         self.assertIn("a:web:web", {ref["id"] for ref in packet["evidence"]})
+
+    def test_model_prompt_is_bounded_and_keeps_full_citations_for_all_brands(self):
+        packet = self.packet()
+        for bid in ("a", "b"):
+            source = next(ref for ref in packet["evidence"] if ref["brand_id"] == bid)
+            for index in range(36):
+                packet["evidence"].append({
+                    **source, "id": f"{bid}:long-{index}",
+                    "detail": "长" * 1200, "metrics": {"raw_description": "额外数据" * 300},
+                })
+        prompt, selected = build_compare_prompt(packet)
+        self.assertLess(len(json.dumps({"prompt": prompt}, ensure_ascii=False).encode()), 30_000)
+        self.assertEqual({"a", "b"}, {ref["brand_id"] for ref in selected})
+        self.assertIn("a:record:a-now", prompt)
+        self.assertIn("b:record:b-now", prompt)
+        self.assertNotIn("raw_description", prompt)
+        self.assertEqual("长" * 1200, next(ref["detail"] for ref in selected if ref["id"] == "b:long-0"))
+
+    @patch("server.compare_summary.ai.is_configured", return_value=True)
+    @patch("server.compare_summary.ai.call_llm")
+    def test_model_timeout_retries_with_smaller_evidence(self, llm, configured):
+        for index in range(30):
+            self.record(f"extra-{index}", "a", "2026-10-24", "本期用户反馈" * 30)
+        upstream_timeout = ai.LlmError("model timeout")
+        upstream_timeout.__cause__ = TimeoutError()
+        llm.side_effect = [upstream_timeout, json.dumps(self.result())]
+        with patch("server.compare_summary.RETRY_EVIDENCE_BUDGET", 1400):
+            result = compare_summary(self.conn, "2026-10-01", "2026-10-30")
+        first, second = llm.call_args_list
+        self.assertLess(len(second.args[2]), len(first.args[2]))
+        self.assertEqual("ai", result["mode"])
+        self.assertEqual(1, len(result["industry_changes"]))
 
 
 if __name__ == "__main__":
