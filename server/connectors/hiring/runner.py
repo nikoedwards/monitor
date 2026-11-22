@@ -119,6 +119,12 @@ def _diff_fingerprint(old_fp: dict, new_fp: dict) -> list[dict]:
 
 def _record_snapshot(conn: sqlite3.Connection, posting: dict, snap: JobSnapshot) -> dict:
     now = utc_now()
+    if posting.get("platform") == "linkedin" and snap.status == "blocked":
+        conn.execute(
+            "UPDATE job_postings SET last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+            (snap.status, snap.error, now, posting["id"]),
+        )
+        return {"changed": False, "status": snap.status, "job_status": None}
     day = today()
     config = json.loads(posting.get("config_json") or "{}")
     old_fp = config.get("fingerprint") or {}

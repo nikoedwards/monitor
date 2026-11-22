@@ -1,9 +1,15 @@
 import sqlite3
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from server.connectors.hiring.linkedin import LinkedInJobsProvider
+from server.connectors.hiring.runner import _record_snapshot
 from server.db import SCHEMA
-from server.domains.hiring import cached_hiring_org_estimate, hiring_org_estimate, hiring_org_radar
+from server.schemas import HiringHeadcountReferenceIn
+from server.domains.hiring import (
+    cached_hiring_org_estimate, hiring_org_estimate, hiring_org_radar, save_hiring_headcount_reference,
+)
 
 
 class HiringOrgRadarTests(unittest.TestCase):
@@ -119,6 +125,73 @@ class HiringOrgRadarTests(unittest.TestCase):
         self.conn.execute("DELETE FROM job_postings WHERE id = 'p2'")
         self.assertIsNone(cached_hiring_org_estimate(**query)["estimate"])
         self.assertEqual(call_llm.call_count, 1)
+
+
+    def test_linkedin_locations_use_title_and_recover_the_latest_good_snapshot(self):
+        self.conn.executemany(
+            """
+            INSERT INTO job_postings (
+                id,brand_id,platform,title,city,status,first_seen,created_at,updated_at
+            ) VALUES (?, 'brand-1', 'linkedin', ?, ?, 'open', '2026-11-01', '2026-11-01', '2026-11-20')
+            """,
+            [
+                ("sf", "Brand &amp; Content at Example — San Francisco, CA | LinkedIn Jobs", ""),
+                ("tokyo", "Influencer Marketing - Tokyo — 東京 | LinkedIn求人", ""),
+                ("closed", "LinkedIn: Log In or Sign Up", ""),
+                ("blocked", "LinkedIn", ""),
+                ("unknown", "Business Operations", ""),
+                ("explicit", "QA Engineer — Singapore | LinkedIn Jobs", "深圳"),
+            ],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO job_snapshots (id,posting_id,brand_id,snapshot_date,title,is_open,created_at)
+            VALUES ('snap', 'closed', 'brand-1', '2026-11-15',
+                    'Sales Manager at Example — Seattle, WA | LinkedIn Jobs', 0, '2026-11-15')
+            """
+        )
+        result = hiring_org_radar("brand-1", scope="all_history", conn=self.conn)
+        self.assertEqual(result["overview"]["open_roles"], 4)
+        self.assertEqual(result["overview"]["city_count"], 4)
+        self.assertEqual(result["data_quality"]["postings_total"], 5)
+        self.assertEqual(result["locations"][-1]["city"], "未标注地区")
+        by_city = {item["city"]: item for item in result["locations"]}
+        self.assertEqual(by_city["Seattle, WA"]["open_roles"], 0)
+        self.assertEqual(by_city["深圳"]["evidence"][0]["id"], "explicit")
+        self.assertEqual(by_city["東京"]["open_roles"], 1)
+        self.assertEqual(by_city["San Francisco, CA"]["evidence"][0]["city_source"], "linkedin_title")
+        self.assertEqual(by_city["San Francisco, CA"]["top_roles"][0]["title"], "Brand & Content at Example")
+
+    @patch("server.connectors.hiring.linkedin.render")
+    def test_linkedin_login_page_preserves_a_closed_posting(self, render):
+        provider = LinkedInJobsProvider()
+        render.return_value = SimpleNamespace(status="ok", title="LinkedIn: Log In or Sign Up", meta={}, text="")
+        self.conn.execute(
+            """
+            INSERT INTO job_postings (id,brand_id,platform,title,status,created_at,updated_at)
+            VALUES ('job','brand-1','linkedin','Product Manager','closed','2026-11-01','2026-11-03')
+            """
+        )
+        posting = dict(self.conn.execute("SELECT * FROM job_postings").fetchone())
+        snapshot = provider.fetch(self.conn, posting)
+        self.assertEqual(snapshot.status, "blocked")
+        _record_snapshot(self.conn, posting, snapshot)
+        stored = self.conn.execute("SELECT title,status FROM job_postings").fetchone()
+        self.assertEqual(tuple(stored), ("Product Manager", "closed"))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM job_snapshots").fetchone()[0], 0)
+
+    @patch("server.ai.call_llm", return_value='{"overall":{"low":20,"high":45,"confidence":"low"}}')
+    def test_headcount_reference_is_stored_and_used_as_a_scale_anchor(self, call_llm):
+        scope = {"brand_id": "brand-1", "scope": "all_history", "conn": self.conn}
+        hiring_org_estimate(**scope)
+        reference = HiringHeadcountReferenceIn(count=800, as_of="2026-11-22", source="用户提供的最新情报")
+        saved = save_hiring_headcount_reference("brand-1", reference, conn=self.conn)
+        self.assertEqual(saved, {"count": 800, "as_of": "2026-11-22", "source": "用户提供的最新情报"})
+        self.assertEqual(hiring_org_radar(**scope)["headcount_reference"], saved)
+        self.assertIsNone(cached_hiring_org_estimate(**scope)["estimate"])
+        result = hiring_org_estimate(**scope)
+        self.assertIsNone(result["overall"])
+        self.assertIn('"count": 800', call_llm.call_args.args[2])
 
 
 if __name__ == "__main__":

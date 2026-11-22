@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
@@ -38,6 +39,25 @@ _AUTHWALL_MARKERS = (
     "password (6+ characters)",
 )
 _AUTHWALL_PATHS = ("/uas/login", "/login", "/signup", "/checkpoint/")
+
+
+_JOB_TITLE_SUFFIX_RE = re.compile(r"\s+\|\s+LinkedIn(?:\s+Jobs|求人)?\s*$", re.I)
+_JOB_LOCATION_SEPARATOR_RE = re.compile(r"\s+[—–]\s+")
+_LOGIN_TITLE_RE = re.compile(r"LinkedIn(?::\s*(?:log in|sign in)(?: or sign up)?)?", re.I)
+
+
+def parse_linkedin_job_title(value: str | None) -> tuple[str, str]:
+    """Read the posting location only from LinkedIn's title suffix."""
+    title = clean_text(unescape(value or ""))
+    if not title or _LOGIN_TITLE_RE.fullmatch(title):
+        return "", ""
+    suffix = _JOB_TITLE_SUFFIX_RE.search(title)
+    if suffix is None:
+        return title, ""
+    parts = _JOB_LOCATION_SEPARATOR_RE.split(title[:suffix.start()])
+    if len(parts) == 1:
+        return parts[0], ""
+    return " — ".join(parts[:-1]), parts[-1]
 
 
 class _ProfileAnchorParser(HTMLParser):
@@ -143,7 +163,15 @@ class LinkedInJobsProvider(HiringProvider):
             snap.error = page.error or "无法读取 LinkedIn 职位页（需登录 Cookie 或被反爬拦截）。"
             return snap
         text = page.text or ""
-        snap.title = clean_text(page.meta.get("og:title") or page.title)
+        for raw_title in (page.meta.get("og:title"), page.title):
+            title, city = parse_linkedin_job_title(raw_title)
+            if title:
+                snap.title = snap.title or title
+                snap.city = snap.city or city
+        if not snap.title and any((page.meta.get("og:title"), page.title)):
+            snap.status = "blocked"
+            snap.error = "LinkedIn 返回登录页，未取得有效职位信息。"
+            return snap
         snap.jd_text = _extract_jd(text)
         lowered = text.lower()
         snap.is_open = not any(m in lowered for m in _CLOSED_MARKERS)

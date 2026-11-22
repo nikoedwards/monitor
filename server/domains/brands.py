@@ -31,6 +31,7 @@ def brand_to_dict(row: sqlite3.Row) -> dict:
     for key in ("social_links", "ecommerce_links", "monitoring_keywords"):
         item[key] = json.loads(item.pop(f"{key}_json") or ("[]" if key == "monitoring_keywords" else "{}"))
     item.pop("raw_json", None)
+    item.pop("headcount_reference_json", None)
     item["is_competitor"] = bool(item.get("is_competitor"))
     item["is_primary"] = bool(item.get("is_primary"))
     return item
