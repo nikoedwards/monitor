@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from server.db import SCHEMA
 from server.domains.hiring import analyze_hiring, hiring_strategic_signals
-from server.strategic_signals import build_strategic_signals
+from server.strategic_signals import _model_packet, build_strategic_signals
 from server import ai
 
 
@@ -104,6 +104,19 @@ class StrategicSignalsTests(unittest.TestCase):
         self.assertEqual(result["analysis_status"], "fallback")
         self.assertIn("确定性统计", result["summary"])
         self.assertEqual(result["business_directions"][0]["direction"], "技术研发")
+
+    def test_model_packet_keeps_each_source_without_sending_full_evidence(self):
+        domains = ["hiring", "voice", "sales", "marketing", "web"]
+        rows = [
+            {"id": f"{domain}-{index}", "domain": domain, "kind": "record",
+             "detail": "证据" * 500, "metrics": {"count": index, "raw": ["unused"]}}
+            for domain in domains for index in range(50)
+        ]
+        result = _model_packet({"evidence": rows})["evidence"]
+        self.assertEqual(len(result), 36)
+        self.assertEqual({row["domain"] for row in result}, set(domains))
+        self.assertTrue(all(len(row["detail"]) <= 340 and "raw" not in row["metrics"] for row in result))
+        self.assertEqual(len(rows[0]["detail"]), 1000)
 
 
 if __name__ == "__main__":

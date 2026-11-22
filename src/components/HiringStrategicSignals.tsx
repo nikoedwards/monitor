@@ -37,7 +37,7 @@ export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
   if (isLoading) return <Card><Spinner /></Card>;
   if (isError && !data) return <EmptyState title="组织推演台暂时不可用" hint={error?.message || "加载失败，请重试。"} action={<Button onClick={() => refetch()}>重试</Button>} />;
   if (!data) return <EmptyState title="暂无组织推演" hint="完成招聘采集后，系统会结合全量历史和其他业务信号形成研判。" />;
-  const generating = refresh.isPending || data.generation?.status === "running";
+  const generating = refresh.isPending || (!isError && data.generation?.status === "running");
 
   return (
     <Card className="overflow-hidden p-0">

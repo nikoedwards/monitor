@@ -102,6 +102,31 @@ class HiringAnalysisJobTests(unittest.TestCase):
         self.assertTrue(result["cache_miss"])
         self.assertNotIn("generation", result)
 
+    def test_polling_keeps_the_jd_job_and_its_input_after_collection_changes(self):
+        entered = threading.Event()
+
+        def model(conn, postings, context):
+            entered.set()
+            self.assertTrue(self.release.wait(5))
+            self.assertEqual(postings[0]["jd_text"], "Build services")
+            return {"summary": "Analysis of original JD"}
+
+        with patch("server.domains.hiring.ai.is_configured", return_value=True), \
+             patch("server.domains.hiring.ai.analyze_jd", side_effect=model) as analyze:
+            self.jd(refresh=True)
+            self.assertTrue(entered.wait(2))
+            self.conn.execute("UPDATE job_postings SET jd_text = 'New product focus'")
+            self.assertEqual(self.jd(poll=True)["generation"]["status"], "running")
+            self.release.set()
+            self.assertEqual(self.poll(lambda: self.jd(poll=True))["summary"], "Analysis of original JD")
+            self.assertTrue(self.jd(cached_only=True)["cache_miss"])
+            analyze.assert_called_once()
+
+    def test_no_jd_data_is_a_cache_miss_and_poll_does_not_start_work(self):
+        self.conn.execute("DELETE FROM job_postings")
+        self.assertTrue(self.jd(cached_only=True)["cache_miss"])
+        self.assertEqual(self.jd(poll=True), {})
+
     def test_strategy_cold_load_automatically_generates_and_caches(self):
         entered = threading.Event()
 
@@ -125,6 +150,29 @@ class HiringAnalysisJobTests(unittest.TestCase):
             self.assertEqual(result["analysis_status"], "complete")
             self.assertTrue(result["timeline"])
             read()
+            summarize.assert_called_once()
+
+    def test_strategy_poll_survives_a_history_change_without_restarting(self):
+        entered = threading.Event()
+
+        def model(*args, **kwargs):
+            entered.set()
+            self.assertTrue(self.release.wait(5))
+            return {"summary": "First strategy", "deep_insights": []}
+
+        def read(**kwargs):
+            return hiring_strategic_signals("brand", background=True, conn=self.conn, **kwargs)
+
+        with patch("server.strategic_signals.ai.is_configured", return_value=True), \
+             patch("server.strategic_signals.ai.summarize_overview", side_effect=model) as summarize:
+            read()
+            self.assertTrue(entered.wait(2))
+            self.conn.execute("UPDATE job_postings SET first_seen='2026-10-31', updated_at='2026-11-02'")
+            self.assertEqual(read(poll=True)["generation"]["status"], "running")
+            self.release.set()
+            result = self.poll(lambda: read(poll=True))
+            self.assertEqual(result["headline"]["summary"], "First strategy")
+            self.assertEqual(result["window"]["start"], "2026-11-01")
             summarize.assert_called_once()
 
     def test_worker_failure_reports_terminal_status_and_can_retry(self):

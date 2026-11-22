@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 timing_logger = logging.getLogger("uvicorn.error.monitor.analysis_jobs")
 
 
-def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3.Connection], dict],
-                 *, start: bool = True, refresh: bool = False) -> dict:
+def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3.Connection], dict] | None = None,
+                 *, start: bool = True, refresh: bool = False, revision: str | None = None) -> dict:
+    """Follow a stable request key, using revisions only to invalidate finished results."""
     path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
     if not path:
         raise HTTPException(status_code=400, detail="后台分析需要文件数据库。")
@@ -36,10 +37,12 @@ def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3
             if job["status"] != "running" and now - job["updated"] > _TTL:
                 del _JOBS[old_key]
         job = _JOBS.get(job_key)
-        if start and (job is None or (refresh and job["status"] != "running")):
+        if job and job["status"] != "running" and revision is not None and job["revision"] != revision:
+            job = None
+        if start and generate is not None and (job is None or (refresh and job["status"] != "running")):
             if sum(item["status"] == "running" for item in _JOBS.values()) >= 16:
                 raise HTTPException(status_code=503, detail="分析任务较多，请稍后重试。")
-            job = {"status": "running", "updated": now}
+            job = {"status": "running", "updated": now, "revision": revision}
             _JOBS[job_key] = job
             _EXECUTOR.submit(_generate, path, key.partition(":")[0], job, generate)
         if job is None:
