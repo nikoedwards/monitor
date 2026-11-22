@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: monitor-snapshot-diagnostics
+  # Browser probes and image builds must not compete on the 1 GiB host.
+  group: monitor-production
   cancel-in-progress: false
 
 jobs:
