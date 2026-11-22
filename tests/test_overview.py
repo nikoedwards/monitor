@@ -1,10 +1,17 @@
 import unittest
 from unittest.mock import patch
 
-from server.domains.insights import _fallback_summary, _overview_payload, _previous_window
+from server.domains.insights import _fallback_summary, _overview_payload, _previous_window, overview_summary
 
 
 class OverviewAggregationTests(unittest.TestCase):
+    @patch("server.domains.insights._overview_payload")
+    @patch("server.domains.insights.ai.get_cached_summary", return_value={"summary": "已有分析"})
+    def test_cached_summary_does_not_rebuild_overview(self, _cache, payload):
+        result = overview_summary("brand-1", start_date="2026-10-01", end_date="2026-10-30", conn=object())
+        self.assertEqual({"summary": "已有分析", "cached": True}, result)
+        payload.assert_not_called()
+
     def test_previous_window_matches_equal_length(self):
         self.assertEqual(("2026-09-01", "2026-09-30"), _previous_window("2026-10-01", "2026-10-30"))
 

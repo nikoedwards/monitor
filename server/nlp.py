@@ -6,6 +6,7 @@ extensible (add terms to the dictionaries below).
 from __future__ import annotations
 
 from collections import Counter
+from functools import lru_cache
 import re
 
 POSITIVE_TERMS = {
@@ -81,17 +82,31 @@ VOC_ACTION_STATUSES = {"open", "assigned", "in_progress", "resolved", "closed"}
 OWNER_TEAMS = {"experience_team", "support_team", "product_team", "marketing_team"}
 
 
+@lru_cache(maxsize=512)
+def _term_match_rule(term: str) -> tuple[str, bool]:
+    candidate = str(term or "").strip().lower()
+    return candidate, any(ord(char) > 127 for char in candidate if char.isalpha())
+
+
 def _term_matches(lowered: str, term: str) -> bool:
     """Match words without treating an English keyword as part of another word."""
-    candidate = str(term or "").strip().lower()
+    candidate, use_substring = _term_match_rule(term)
     if not candidate:
         return False
     # CJK terms do not have whitespace-delimited word boundaries.  Keep the
     # substring behavior for those terms, but require boundaries for Latin
     # keywords so ``grabadoras`` cannot match ``bad`` or ``ad``.
-    if any(ord(char) > 127 for char in candidate if char.isalpha()):
+    if use_substring:
         return candidate in lowered
-    return re.search(rf"(?<![a-z]){re.escape(candidate)}(?![a-z])", lowered) is not None
+    start = lowered.find(candidate)
+    while start >= 0:
+        end = start + len(candidate)
+        left_boundary = start == 0 or not ("a" <= lowered[start - 1] <= "z")
+        right_boundary = end == len(lowered) or not ("a" <= lowered[end] <= "z")
+        if left_boundary and right_boundary:
+            return True
+        start = lowered.find(candidate, start + 1)
+    return False
 
 
 def _contains_any(lowered: str, terms: set[str] | tuple[str, ...]) -> bool:
@@ -100,10 +115,6 @@ def _contains_any(lowered: str, terms: set[str] | tuple[str, ...]) -> bool:
 
 def _count_terms(text: str, lowered: str, terms: set[str]) -> int:
     return sum(1 for term in terms if _term_matches(lowered, term))
-
-
-def _has_negation(lowered: str) -> bool:
-    return _contains_any(lowered, NEGATION_TERMS)
 
 
 def _matched_terms(text: str, lowered: str, terms: set[str]) -> list[str]:
@@ -130,7 +141,7 @@ def analyze_text(text: str) -> dict:
     negation_flipped = False
 
     # Simple negation flip: "not great" reads less positive.
-    if _has_negation(lowered) and positive > negative:
+    if negation_terms and positive > negative:
         positive, negative = negative, positive
         negation_flipped = True
 

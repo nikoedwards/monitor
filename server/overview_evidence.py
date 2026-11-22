@@ -94,7 +94,8 @@ def build_overview_evidence(conn, brand_id, payload):
     for dimension, channel in source_groups:
         source = f"{dimension}/{channel or 'all'}"
         records = query_records(conn, {"brand_id": brand_id, "dimension": dimension, "channel": channel,
-                                      "start_date": min(previous_start, baseline_start), "end_date": end}, limit=1000)
+                                      "start_date": min(previous_start, baseline_start), "end_date": end},
+                                limit=1000, include_sentiment_explanation=False)
         # app_metric snapshots are not user comments and must never affect sentiment.
         discussions = [r for r in records if r.get("data_type") != "app_metric"]
         periods = {}

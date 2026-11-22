@@ -71,7 +71,7 @@ class VocSourceTests(unittest.TestCase):
             ("platform", "app"): [{"id": "app-metric", "dimension": "platform", "channel": "app", "source_id": "app_store_reviews", "platform": "app_store", "body": "US App Store rating count"}],
         }
 
-        def fake_query_records(_conn, filters, limit=200):
+        def fake_query_records(_conn, filters, limit=200, *, include_sentiment_explanation=True):
             return records_by_filter.get((filters.get("dimension"), filters.get("channel")), [])
 
         with patch("server.domains.content.query_records", side_effect=fake_query_records):
@@ -129,7 +129,7 @@ class VocSourceTests(unittest.TestCase):
             ],
         }
 
-        def fake_query_records(_conn, filters, limit=200):
+        def fake_query_records(_conn, filters, limit=200, *, include_sentiment_explanation=True):
             return records_by_filter.get((filters.get("dimension"), filters.get("channel")), [])
 
         with patch("server.domains.content.query_records", side_effect=fake_query_records):

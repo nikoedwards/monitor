@@ -74,7 +74,7 @@ def _summary_records(
         from .content import _load_voice_records
 
         filters = filters or {}
-        records = _load_voice_records(conn, brand_id, start, end, filters.get("q"))
+        records = _load_voice_records(conn, brand_id, start, end, filters.get("q"), enrich=False)
         selected_sources = filters.get("sources")
         if selected_sources:
             selected = {part.strip() for part in str(selected_sources).split(",") if part.strip()}
@@ -93,7 +93,7 @@ def _summary_records(
             "end_date": end,
             **filters,
         },
-        limit=1000,
+        limit=1000, include_sentiment_explanation=False,
     )
     return _filter_summary_records(records, filters)[:150]
 
@@ -119,7 +119,8 @@ def _filter_summary_records(records: list[dict], filters: dict) -> list[dict]:
 
 
 def _brand_snapshot(conn: sqlite3.Connection, brand_id: str | None, start: str, end: str) -> dict:
-    records = query_records(conn, {"brand_id": brand_id, "start_date": start, "end_date": end}, limit=2000)
+    records = query_records(conn, {"brand_id": brand_id, "start_date": start, "end_date": end},
+                            limit=2000, include_sentiment_explanation=False)
     voc = [r for r in records if r.get("dimension") == "voc"]
     marketing = [r for r in records if r.get("dimension") == "marketing"]
     negative = sum(1 for r in voc if r.get("sentiment") == "negative")
@@ -138,7 +139,8 @@ def _brand_snapshot(conn: sqlite3.Connection, brand_id: str | None, start: str, 
 
 
 def _marketing_module(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
-    records = query_records(conn, {"brand_id": brand_id, "dimension": "marketing", "start_date": start, "end_date": end}, limit=2000)
+    records = query_records(conn, {"brand_id": brand_id, "dimension": "marketing", "start_date": start, "end_date": end},
+                            limit=2000, include_sentiment_explanation=False)
     totals = {"views": 0, "likes": 0, "comments": 0, "engagement": 0}
     by_channel = Counter()
     for record in records:
@@ -243,7 +245,9 @@ def _collect_modules(conn: sqlite3.Connection, brand_id: str, start: str, end: s
     web = _web_module(conn, brand_id, start, end)
     voice_totals = voice.get("totals") or {}
     voice["status"] = _status(bool(voice_totals.get("total")))
-    voice["last_data_at"] = max((r.get("occurred_at") or "" for r in query_records(conn, {"brand_id": brand_id, "dimension": "voc", "start_date": start, "end_date": end}, limit=1000)), default=None)
+    voice_records = query_records(conn, {"brand_id": brand_id, "dimension": "voc", "start_date": start, "end_date": end},
+                                  limit=1000, include_sentiment_explanation=False)
+    voice["last_data_at"] = max((r.get("occurred_at") or "" for r in voice_records), default=None)
     sales["status"] = _status(bool(sales.get("data_points")), bool(sales.get("listing_total")))
     sales["last_data_at"] = (sales.get("global_metrics") or {}).get("latest_date")
     return {"sales": sales, "market": market, "hiring": hiring, "marketing": marketing, "voice": voice, "web": web}
@@ -306,7 +310,8 @@ def _overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: 
     hiring, previous_hiring = modules["hiring"], previous["hiring"]
     current_market = modules["market"].get("current") or {} if modules["market"].get("status") == "ready" else {}
     previous_market = previous["market"].get("current") or {} if previous["market"].get("status") == "ready" else {}
-    records_total = len(query_records(conn, {"brand_id": brand_id, "start_date": start, "end_date": end}, limit=2000))
+    records_total = len(query_records(conn, {"brand_id": brand_id, "start_date": start, "end_date": end},
+                                      limit=2000, include_sentiment_explanation=False))
     kpis = {"records_total": records_total, "voc_total": voice_totals.get("total", 0), "voc_negative": voice_totals.get("negative", 0), "marketing_total": marketing.get("total", 0), "sales_revenue": sales.get("total_revenue", 0), "sales_units": sales.get("total_units", 0), "web_changes": modules["web"].get("changed", 0), "sales": _delta(sales.get("total_revenue"), previous_sales.get("total_revenue")), "sales_units_comparison": _delta(sales.get("total_units"), previous_sales.get("total_units")), "negative_rate": _delta(voice_totals.get("negative_rate"), previous_voice.get("negative_rate")), "marketing": _delta(marketing.get("total"), previous_marketing.get("total")), "hiring_open": _delta(hiring.get("total_open"), previous_hiring.get("total_open")), "market_share": _delta(current_market.get("share"), previous_market.get("share"))}
     signals = []
     if voice_totals.get("negative", 0):
@@ -331,7 +336,8 @@ def _overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: 
 def overview(brand_id: str | None = None, days: int = 30, start_date: str | None = None, end_date: str | None = None, market_brand_ids: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
     if not brand_id:
-        records = query_records(conn, {"start_date": start, "end_date": end}, limit=2000)
+        records = query_records(conn, {"start_date": start, "end_date": end},
+                                limit=2000, include_sentiment_explanation=False)
         sentiment = Counter(r.get("sentiment") or "neutral" for r in records)
         topics = Counter()
         for record in records:
@@ -343,7 +349,6 @@ def overview(brand_id: str | None = None, days: int = 30, start_date: str | None
 @router.get("/overview/summary")
 def overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, market_brand_ids: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
-    payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
     cache_key = (OVERVIEW_VERSION, brand_id, start, end, market_brand_ids or "")
     now = time.monotonic()
     persistent_key = "overview:" + "|".join(cache_key)
@@ -355,12 +360,15 @@ def overview_summary(brand_id: str, days: int = 30, start_date: str | None = Non
     cached = _OVERVIEW_SUMMARY_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
+    with ai.measure_preparation("overview.aggregate"):
+        payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
     transient_failure = False
     if not ai.is_configured(conn):
         result = _fallback_summary(payload)
     else:
         try:
-            evidence = build_overview_evidence(conn, brand_id, payload)
+            with ai.measure_preparation("overview.evidence"):
+                evidence = build_overview_evidence(conn, brand_id, payload)
             result = {"mode": "ai", **ai.summarize_overview(conn, evidence)}
         except ai.LlmError:
             transient_failure = True
@@ -398,7 +406,8 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
     if not ai.is_configured(conn):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
-    records = _summary_records(conn, brand_id, dimension, channel, start, end, filters)
+    with ai.measure_preparation("insights"):
+        records = _summary_records(conn, brand_id, dimension, channel, start, end, filters)
     if not records:
         return {"summary": "所选时间范围与筛选条件下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}, "filters": filters}
     try:

@@ -154,7 +154,8 @@ def _parse_voc_sources(value: str | None) -> set[str]:
     return selected or set(VOC_SOURCE_KEYS)
 
 
-def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: str, end: str, q: str | None = None) -> list[dict]:
+def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: str, end: str,
+                        q: str | None = None, *, enrich: bool = True) -> list[dict]:
     base = {"brand_id": brand_id, "start_date": start, "end_date": end, "q": q}
     candidates: list[dict] = []
     for filters in (
@@ -164,7 +165,7 @@ def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: s
         {**base, "dimension": "marketing", "channel": "creators"},
         {**base, "dimension": "platform", "channel": "app"},
     ):
-        candidates.extend(query_records(conn, filters, limit=1000))
+        candidates.extend(query_records(conn, filters, limit=1000, include_sentiment_explanation=enrich))
 
     records: list[dict] = []
     seen: set[str] = set()
@@ -180,7 +181,8 @@ def _load_voice_records(conn: sqlite3.Connection, brand_id: str | None, start: s
             continue
         if record_id:
             seen.add(record_id)
-        records.append(_enrich_voice_record({**record, "voice_source": source_key}))
+        item = {**record, "voice_source": source_key}
+        records.append(_enrich_voice_record(item) if enrich else item)
     return sorted(records, key=lambda item: item.get("occurred_at") or "", reverse=True)
 
 
@@ -1084,7 +1086,7 @@ def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel
     records = query_records(
         conn,
         {"brand_id": brand_id, "dimension": "marketing", "channel": channel, "start_date": start, "end_date": end},
-        limit=5000,
+        limit=5000, include_sentiment_explanation=False,
     )
     totals = {"views": 0, "likes": 0, "comments": 0, "engagement": 0}
     for record in records:
@@ -1247,7 +1249,6 @@ def marketing_overview(brand_id: str, days: int = 30, start_date: str | None = N
 @router.get("/marketing/overview/summary")
 def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
-    payload = _marketing_overview_payload(conn, brand_id, start, end)
     cache_key = (brand_id, start, end)
     now = time.monotonic()
     persistent_key = "marketing-overview:" + "|".join(cache_key)
@@ -1259,17 +1260,21 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
     cached = _MARKETING_OVERVIEW_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _MARKETING_SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
+    with ai.measure_preparation("marketing-overview"):
+        payload = _marketing_overview_payload(conn, brand_id, start, end)
+    transient_failure = False
     if not ai.is_configured(conn):
         result = _marketing_fallback_summary(payload)
     else:
         try:
-            from .. import ai
             evidence = {"range": payload["range"], "coverage": payload["coverage"], "yesterday": payload["yesterday"], "signals": payload["signals"], "modules": {key: {field: value for field, value in module.items() if field != "trend"} for key, module in payload["modules"].items()}}
             result = {"mode": "ai", **ai.summarize_marketing_overview(conn, evidence)}
         except ai.LlmError:
+            transient_failure = True
             result = _marketing_fallback_summary(payload)
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
     result.update({"range": payload["range"], "cached": False})
-    _MARKETING_OVERVIEW_CACHE[cache_key] = (now, result)
-    ai.put_cached_summary(conn, persistent_key, result)
+    if not transient_failure:
+        _MARKETING_OVERVIEW_CACHE[cache_key] = (now, result)
+        ai.put_cached_summary(conn, persistent_key, result)
     return result
