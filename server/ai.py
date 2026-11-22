@@ -65,6 +65,24 @@ def get_cached_summary(conn: sqlite3.Connection, cache_key: str) -> dict | None:
         return None
 
 
+def get_latest_saved_summary(conn: sqlite3.Connection, prefix: str) -> dict | None:
+    """Read the last successful result for an exact analysis scope."""
+    row = conn.execute(
+        "SELECT result_json, created_at FROM llm_summary_cache "
+        "WHERE cache_key >= ? AND cache_key < ? ORDER BY created_at DESC LIMIT 1",
+        (prefix, prefix + chr(0x10FFFF)),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        result = json.loads(row["result_json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    return {**result, "generated_at": row["created_at"], "cached": True, "previous_result": True}
+
+
 def put_cached_summary(conn: sqlite3.Connection, cache_key: str, result: dict) -> None:
     conn.execute(
         "INSERT INTO llm_summary_cache (cache_key, result_json, created_at) VALUES (?, ?, ?) "

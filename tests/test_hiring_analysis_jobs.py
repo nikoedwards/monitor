@@ -92,14 +92,16 @@ class HiringAnalysisJobTests(unittest.TestCase):
             self.assertEqual(result["summary"], "Recovered")
             self.assertNotEqual(result.get("analysis_status"), "fallback")
 
-    def test_changed_jd_invalidates_completed_result(self):
+    def test_changed_jd_keeps_completed_result_until_regenerated(self):
         with patch("server.domains.hiring.ai.is_configured", return_value=True), \
              patch("server.domains.hiring.ai.analyze_jd", return_value={"summary": "Old"}):
             self.jd(refresh=True)
             self.poll(lambda: self.jd(cached_only=True))
         self.conn.execute("UPDATE job_postings SET jd_text = 'New product focus'")
         result = self.jd(cached_only=True)
-        self.assertTrue(result["cache_miss"])
+        self.assertFalse(result["cache_miss"])
+        self.assertEqual(result["summary"], "Old")
+        self.assertTrue(result["previous_result"])
         self.assertNotIn("generation", result)
 
     def test_polling_keeps_the_jd_job_and_its_input_after_collection_changes(self):
@@ -119,7 +121,20 @@ class HiringAnalysisJobTests(unittest.TestCase):
             self.assertEqual(self.jd(poll=True)["generation"]["status"], "running")
             self.release.set()
             self.assertEqual(self.poll(lambda: self.jd(poll=True))["summary"], "Analysis of original JD")
-            self.assertTrue(self.jd(cached_only=True)["cache_miss"])
+            previous = self.jd(cached_only=True)
+            self.assertTrue(previous["previous_result"])
+            self.assertEqual(previous["summary"], "Analysis of original JD")
+            analyze.assert_called_once()
+
+    def test_retrying_the_same_request_does_not_restart_a_completed_job(self):
+        with patch("server.domains.hiring.ai.is_configured", return_value=True), \
+             patch("server.domains.hiring.ai.analyze_jd", return_value={"summary": "Success"}) as analyze:
+            self.jd(refresh=True, request_id="one-click")
+            self.poll(lambda: self.jd(poll=True))
+            self.conn.execute("UPDATE job_postings SET jd_text = 'Updated after job'")
+            retry = self.jd(refresh=True, request_id="one-click")
+            self.assertEqual(retry["generation"]["status"], "completed")
+            self.assertEqual(retry["summary"], "Success")
             analyze.assert_called_once()
 
     def test_no_jd_data_is_a_cache_miss_and_poll_does_not_start_work(self):

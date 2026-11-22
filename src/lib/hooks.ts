@@ -685,14 +685,17 @@ export function useHiringOrgEstimate() {
   });
 }
 
-type HiringAnalysisRun = Pick<HiringStrategicSignals, "generation">;
+type HiringAnalysisRun = Pick<HiringStrategicSignals, "generation" | "analysis_status" | "previous_result"> & {
+  headline?: unknown;
+  summary?: string;
+};
 
 async function requestHiringAnalysis<T>(request: Promise<T>): Promise<T> {
   try {
     return await request;
   } catch (error) {
-    if (error instanceof ApiError && [502, 503, 504].includes(error.status) &&
-        /^(bad gateway|service unavailable|gateway timeout|HTTP \d+)$/i.test(error.message)) {
+    if (error instanceof ApiError && ([502, 504].includes(error.status) ||
+        /\b(bad gateway|gateway time.?out|service unavailable)\b/i.test(error.message))) {
       throw new ApiError("分析服务暂时无法连接，请稍后重试。", error.status);
     }
     throw error;
@@ -700,13 +703,24 @@ async function requestHiringAnalysis<T>(request: Promise<T>): Promise<T> {
 }
 
 function retryHiringAnalysis(failures: number, error: Error) {
-  return failures < 1 && (!(error instanceof ApiError) || [502, 503, 504].includes(error.status));
+  return failures < 2 && (!(error instanceof ApiError) || [502, 503, 504].includes(error.status));
+}
+
+function hiringRequestId() {
+  return Array.from(crypto.getRandomValues(new Uint32Array(4)), part => part.toString(16)).join("-");
 }
 
 function mergeHiringAnalysisStatus<T extends HiringAnalysisRun>(previous: T, update: Partial<T>): T {
+  if (update.generation && update.analysis_status === "fallback" &&
+      (previous.analysis_status === "complete" || (previous.summary && previous.analysis_status !== "fallback"))) {
+    return { ...previous, previous_result: true, generation: {
+      ...update.generation, error: "本次生成未返回模型结果，已保留上次结果。",
+    } };
+  }
   return {
     ...previous,
     ...update,
+    previous_result: update.headline || update.summary ? update.previous_result : previous.previous_result,
     generation: update.generation ?? { status: "failed", error: "分析任务已中断，请重新生成。" },
   };
 }
@@ -730,10 +744,11 @@ export function useHiringStrategicSignals(brandId?: string) {
     refetchInterval: (query) => query.state.status !== "error" && query.state.data?.generation?.status === "running" ? 2000 : false,
   });
   const refresh = useMutation({
-    mutationFn: () => requestHiringAnalysis(api.get<HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ ...params, refresh: true })}`)),
+    mutationFn: (request_id: string) => requestHiringAnalysis(api.get<HiringStrategicSignals>(`/api/hiring/strategic-signals${qs({ ...params, refresh: true, request_id })}`)),
+    retry: retryHiringAnalysis,
     onSuccess: (data) => qc.setQueryData(queryKey, data),
   });
-  return { ...query, refresh };
+  return { ...query, refresh: { ...refresh, mutate: () => refresh.mutate(hiringRequestId()) } };
 }
 
 export function useJobPostings(brandId?: string, platform?: string, status?: string, filters: { page?: number; pageSize?: number; city?: string; q?: string } = {}) {
@@ -890,10 +905,15 @@ export function useAnalyzeJd(brandId?: string, range?: TimeRange, filters: { pla
     refetchInterval: (query) => query.state.status !== "error" && query.state.data?.generation?.status === "running" ? 2000 : false,
   });
   const generate = useMutation({
-    mutationFn: ({ refresh = false }: { refresh?: boolean }) => requestHiringAnalysis(api.post<any>(`/api/hiring/analyze${qs({ ...params, refresh })}`)),
+    mutationFn: ({ refresh = false, request_id }: { refresh?: boolean; request_id: string }) => requestHiringAnalysis(api.post<any>(`/api/hiring/analyze${qs({ ...params, refresh, request_id })}`)),
+    retry: retryHiringAnalysis,
     onSuccess: (data) => qc.setQueryData(queryKey, data),
   });
-  return { ...query, generate, isGenerating: generate.isPending || (!query.isError && query.data?.generation?.status === "running") };
+  return {
+    ...query,
+    generate: { ...generate, mutate: ({ refresh = false }: { refresh?: boolean }) => generate.mutate({ refresh, request_id: hiringRequestId() }) },
+    isGenerating: generate.isPending || (!query.isError && query.data?.generation?.status === "running"),
+  };
 }
 
 // ---------------------------------------------------------------- web

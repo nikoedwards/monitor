@@ -287,6 +287,7 @@ function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: s
       {error && <p className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
       {result?.summary && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>
+          {result.previous_result && <p className="text-[12px]" style={{ color: "var(--mute)" }}>上次分析{result.generated_at ? ` · ${fmtDateTime(result.generated_at)}` : ""}</p>}
           <p style={{ color: "var(--ink)" }}>{result.summary}</p>
           {result.analysis_status === "fallback" && (
             <p className="text-[12px]" style={{ color: "var(--warning)" }}>

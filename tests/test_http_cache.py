@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from starlette.requests import Request
 from starlette.responses import Response
 
-from server.app import secure_snapshot_archives
+from server.app import secure_snapshot_archives, spa
 
 
 def request_for(path: str) -> Request:
@@ -18,6 +21,15 @@ async def empty_response(_request: Request) -> Response:
 
 
 class HttpCacheTests(unittest.TestCase):
+    def test_hiring_page_shell_is_revalidated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dist = Path(directory)
+            (dist / "index.html").write_text("<html>Monitor</html>", encoding="utf-8")
+            with patch("server.app.DIST", dist):
+                for path in ("", "index.html", "brand/example/hiring"):
+                    with self.subTest(path=path):
+                        self.assertEqual(spa(path).headers["cache-control"], "no-cache, must-revalidate")
+
     def test_dynamic_api_responses_are_not_cached(self):
         response = asyncio.run(secure_snapshot_archives(request_for("/api/web/snapshots"), empty_response))
 
