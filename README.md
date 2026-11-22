@@ -137,6 +137,8 @@ npm run dev         # 终端 B → http://localhost:5173
 - 推送或合并到 GitHub 的 `main` 分支后，`.github/workflows/deploy-monitor.yml` 会先验证前后端和发布回滚测试，再通过 SSH 传输当前提交的源码归档。阿里云服务器在 `/opt/monitor/.deploy-src` 中利用本机 Docker 层缓存构建镜像；切换前会停止旧容器并备份 SQLite，随后检查内网 API、前端资源和公网入口。启动失败、健康检查失败或 SSH 任务中断时，会一起恢复旧 Compose、旧镜像和数据库。
 - GitHub Actions 需要配置 `ALIYUN_MONITOR_SSH_KEY` 和 `ALIYUN_MONITOR_KNOWN_HOSTS` 两个 Actions Secret；部署密钥只用于新 Monitor 服务器。
 - 生产 Docker 镜像会安装 Playwright Chromium，用于生成真实网页 PNG；如果时间线出现 `Generated visual snapshot fallback`，应先检查 GitHub Actions、容器日志和 Chromium 资源限制。
+- 小内存快照保留网站 JavaScript，跳过后台像素追踪、结账预加载和视频流；等待页面加载层消失后分块截图，并在关闭浏览器后拼接 PNG，避免浏览器和整页画布同时占用内存。截图失败不能用禁用 JavaScript 后的加载页替代。
+- `Diagnose production snapshots` 工作流可对现有监控做限次截图、记录内存峰值和 API 健康结果；`candidate=true` 在临时目录验证分支代码，不替换线上程序、不修改监控记录。该工作流与生产发布互斥，避免在小内存主机上同时构建镜像和运行截图。
 - SQLite 数据库与网页快照都存放在新机 `/opt/monitor/data`，容器内挂载到 `/app/data`，避免重新发布后丢失历史数据和截图。
 - 每次功能修改或 Bug 修复完成后，应先运行相关测试与 `npm run build`，必要时同步更新 README，然后提交并推送到 GitHub。
 - 推送后检查 GitHub Actions、`http://47.79.224.196/api/health` 和生产页面。

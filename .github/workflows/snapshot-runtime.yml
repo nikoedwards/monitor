@@ -42,6 +42,13 @@ jobs:
           docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
             --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
             --network=none monitor-snapshot-test python -m unittest tests.test_snapshot_cdp
+      - name: Verify large HTML input and memory-guard worker cleanup
+        run: |
+          docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
+            --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
+            --network=none monitor-snapshot-test python -m unittest \
+            tests.test_web_snapshot_analysis.VisualDiffTests.test_delayed_worker_receives_entire_large_html_payload \
+            tests.test_web_snapshot_analysis.VisualDiffTests.test_running_worker_is_killed_and_staging_removed_on_memory_pressure
       - name: Verify API health, memory pressure, timeout cleanup and live Plaud PNG
         timeout-minutes: 4
         run: |

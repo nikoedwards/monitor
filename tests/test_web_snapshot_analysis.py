@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -109,10 +110,12 @@ class VisualDiffTests(unittest.TestCase):
             launch.assert_not_called()
 
     def test_running_worker_is_killed_and_staging_removed_on_memory_pressure(self):
+        killed = threading.Event()
         def partial_output(request, *, timeout):
             payload = json.loads(request)
             Path(payload["png_path"]).write_bytes(b"partial image")
-            raise subprocess.TimeoutExpired("snapshot", timeout)
+            killed.wait(timeout=3)
+            return b'', b''
 
         process = MagicMock(pid=1234, returncode=None)
         process.communicate.side_effect = partial_output
@@ -120,7 +123,7 @@ class VisualDiffTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmp,
             patch("server.snapshot._available_memory_mb", side_effect=[400, 64, 100]),
             patch("server.snapshot.subprocess.Popen", return_value=process),
-            patch("server.snapshot._kill_capture_process") as kill,
+            patch("server.snapshot._kill_capture_process", side_effect=lambda _process: killed.set()) as kill,
         ):
             root = Path(tmp)
             result = _isolated_playwright_capture("https://example.com", root / "a.png", root / "a.html")
@@ -129,6 +132,34 @@ class VisualDiffTests(unittest.TestCase):
         kill.assert_called_once_with(process)
         process.wait.assert_called_once_with(timeout=2)
         self.assertEqual(process.communicate.call_count, 1)
+
+    def test_delayed_worker_receives_entire_large_html_payload(self):
+        real_popen = subprocess.Popen
+        launches = []
+        code = '''import sys,time,json
+from pathlib import Path
+time.sleep(1.2)
+request=json.load(sys.stdin)
+Path(request['png_path']).write_bytes(b'complete image')
+print(json.dumps({'method':'test','input_length':len(request['source_html'])}))
+'''
+        def launch(_command, **kwargs):
+            process = real_popen([sys.executable, '-c', code], **kwargs)
+            launches.append(process)
+            return process
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            'server.snapshot.subprocess.Popen', side_effect=launch,
+        ), patch('server.snapshot._available_memory_mb', return_value=400), patch(
+            'server.snapshot.CAPTURE_JOB_TIMEOUT_SECONDS', 5,
+        ):
+            root = Path(tmp)
+            result = _isolated_playwright_capture(
+                'https://example.com', root/'large.png', root/'large.html', 'x'*2_000_000,
+            )
+            self.assertEqual(result.get('input_length'), 2_000_000, result)
+            self.assertTrue((root/'large.png').is_file())
+            self.assertEqual(len(launches), 1)
+            self.assertIsNotNone(launches[0].returncode)
 
     def test_memory_pressure_retries_with_fresh_low_memory_browser_after_cleanup(self):
         attempts = []

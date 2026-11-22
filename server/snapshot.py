@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from html import escape as html_escape
@@ -1331,6 +1332,11 @@ def _run_snapshot_worker(
     )
     data = json.dumps(request, ensure_ascii=False).encode("utf-8")
     last_trace = ''
+    # communicate() must own the full input transfer. Retrying it with None
+    # after a short POSIX timeout can leave a large HTML payload half-written,
+    # with the worker forever waiting for EOF. Monitor independently instead.
+    io_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='snapshot-io')
+    communication = io_pool.submit(process.communicate, data, timeout=max(0.1, deadline-time.monotonic()))
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -1338,12 +1344,14 @@ def _run_snapshot_worker(
                 outcome = "deadline"
                 return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止" + last_trace}
             try:
-                stdout, stderr = process.communicate(data, timeout=min(0.5, remaining))
+                stdout, stderr = communication.result(timeout=min(0.5, remaining))
                 break
             except subprocess.TimeoutExpired as exc:
                 if os.environ.get('MONITOR_DIAGNOSTIC_LIVE_ROOT') and exc.stderr:
                     last_trace = '; worker trace: ' + exc.stderr.decode('utf-8', errors='replace')[-650:]
-                data = None
+                outcome = 'deadline'
+                return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止" + last_trace}
+            except FutureTimeout:
                 available = _available_memory_mb()
                 if available is not None:
                     low_water = available if low_water is None else min(low_water, available)
@@ -1374,6 +1382,10 @@ def _run_snapshot_worker(
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             logger.error("Snapshot worker did not reap promptly pid=%s", process.pid)
+        io_pool.shutdown(wait=True)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
         logger.warning(
             "Snapshot finish host=%s pid=%s outcome=%s elapsed_s=%.1f min_available_mib=%s exit=%s",
             target, process.pid, outcome, time.monotonic() - started, low_water, process.returncode,
