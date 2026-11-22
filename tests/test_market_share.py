@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from server.domains.market_share import market_share, market_share_trend, sync_market_share_snapshots
+from server.domains.market_share import market_observations, market_share, market_share_trend, sync_market_share_snapshots
 from server.domains.common import query_records
 
 
@@ -119,6 +119,50 @@ class MarketShareTests(unittest.TestCase):
                 "{}",
             ),
         )
+
+    def test_observations_return_latest_observed_values_and_daily_app_history(self):
+        def add_app(record_id, day, count, *, platform="app_store", region="US", **metrics):
+            source = "app_store_reviews" if platform == "app_store" else "google_play_reviews"
+            url = "https://apps.apple.com/us/app/id123" if platform == "app_store" else "https://play.google.com/store/apps/details?id=com.alpha.app"
+            self.add_record(
+                record_id, "a", dimension="platform", channel="app", platform=platform, source_id=source,
+                data_type="app_metric", region=region, occurred_at=f"2026-07-{day}+00:00",
+                metrics={"rating_count": count, **metrics},
+            )
+            self.conn.execute("UPDATE records SET url = ? WHERE id = ?", (url, record_id))
+
+        add_app("first", "15T08:00:00", 15, rating=4.5, downloads_est=1500)
+        add_app("older", "17T08:00:00", 21)
+        add_app("latest", "17T09:00:00", 12, downloads=0)
+        add_app("play-us", "17T08:00:00", 50, platform="google_play")
+        add_app("play-jp", "17T09:00:00", 50, platform="google_play", region="JP")
+        self.add_record(
+            "user-review", "b", dimension="voc", channel="app", platform="app_store",
+            source_id="app_store_reviews", metrics={"rating": 5},
+        )
+        self.conn.executemany(
+            "INSERT INTO sales_metrics VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [("sale-a", "listing", "a", "2026-07-15", 1000, 100, 20), ("sale-b", "listing", "a", "2026-07-17", 500, 50, 0)],
+        )
+        options = {"start_date": "2026-07-15", "end_date": "2026-07-18", "conn": self.conn}
+
+        summary = market_observations("a,b", **options)
+        self.assertEqual(summary["countries"], ["US"])
+        self.assertEqual(summary["brands"][0]["metrics"], {
+            "app_store_ratings": 12, "google_play_ratings": 50, "product_reviews": 0,
+        })
+        self.assertEqual(summary["brands"][1]["metrics"], {})
+
+        detail = market_observations("a", include_history=True, **options)["brands"][0]
+        self.assertEqual([point["date"] for point in detail["daily"]], ["2026-07-17", "2026-07-15"])
+        self.assertEqual(detail["daily"][1]["metrics"], {"app_store_ratings": 15, "product_reviews": 20})
+        self.assertEqual(len(detail["apps"]), 2)
+        ios = next(app for app in detail["apps"] if app["platform"] == "app_store")
+        self.assertEqual([point["rating_count"] for point in ios["daily"]], [12, 15])
+        self.assertEqual([point["downloads"] for point in ios["daily"]], [0, None])
+        regional = market_observations("a", "US", include_history=True, **options)["brands"][0]
+        self.assertEqual([app["app_id"] for app in regional["apps"]], ["123"])
+        self.assertNotIn("google_play_ratings", regional["metrics"])
 
     def test_combines_signals_and_estimates_app_download_range(self):
         self.add_record("a-app-1", "a", dimension="voc", channel="app", platform="app_store", source_id="app_store_reviews", metrics={"rating": 5})

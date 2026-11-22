@@ -6,9 +6,7 @@ import {
   type Brand,
   type CommunityPostSummary,
   type Link,
-  type MarketShareModelKey,
-  type MarketShareResponse,
-  type MarketShareTrendResponse,
+  type MarketObservationsResponse,
   type Product,
   type RecordItem,
   type SalesMetric,
@@ -168,21 +166,13 @@ export function useCompare(range?: TimeRange) {
   });
 }
 
-export function useMarketShare(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
+export function useMarketObservations(brandIds: string[], country: string, range: TimeRange, includeHistory = false) {
   const rp = rangeParams(range);
+  const params = { brand_ids: brandIds.join(","), country, include_history: includeHistory, ...rp };
   return useQuery({
-    queryKey: ["market-share", brandIds, model, country, rp],
-    queryFn: () => api.get<MarketShareResponse>(`/api/market-share${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
-    enabled: brandIds.length >= 2,
-  });
-}
-
-export function useMarketShareTrend(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
-  const rp = rangeParams(range);
-  return useQuery({
-    queryKey: ["market-share-trend", brandIds, model, country, rp],
-    queryFn: () => api.get<MarketShareTrendResponse>(`/api/market-share/trend${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
-    enabled: brandIds.length >= 2,
+    queryKey: ["market-observations", params],
+    queryFn: () => api.get<MarketObservationsResponse>(`/api/market-share/observations${qs(params)}`),
+    enabled: brandIds.length > 0,
   });
 }
 
@@ -197,11 +187,10 @@ export function useRefreshMarketShareData() {
       return result;
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["market-share"] });
-      qc.invalidateQueries({ queryKey: ["market-share-trend"] });
       qc.invalidateQueries({ queryKey: ["records"] });
       qc.invalidateQueries({ queryKey: ["sources"] });
     },
+    onSettled: () => qc.invalidateQueries({ queryKey: ["market-observations"] }),
   });
 }
 

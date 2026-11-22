@@ -42,6 +42,7 @@ MODEL_PRESETS = {
 
 DOWNLOAD_KEYS = ("downloads", "download_count", "installs", "install_count")
 COMMENT_KEYS = ("comments", "comment_count", "num_comments")
+APP_PLATFORMS = {"app_store_reviews": "app_store", "google_play_reviews": "google_play"}
 
 
 def _number(value) -> float:
@@ -92,7 +93,7 @@ def _record_signals(
     if country:
         params.append(country)
     rows = conn.execute(
-        "SELECT source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, occurred_at, "
+        "SELECT id, source_id, link_id, data_type, dimension, channel, platform, title, body, url, region, occurred_at, "
         "metrics_json, raw_json FROM records WHERE brand_id = ? "
         "AND substr(occurred_at, 1, 10) >= ? AND substr(occurred_at, 1, 10) <= ?"
         + country_filter
@@ -500,6 +501,177 @@ def _trend_shares(brand_ids: list[str], state: dict[str, dict], model: str) -> d
         for brand_id in brand_ids:
             shares[brand_id] += normalized_weight * signal_values[key][brand_id] / total
     return {brand_id: round(value * 100, 2) for brand_id, value in shares.items()}
+
+
+def _observed_number(metrics: dict, *keys: str) -> int | float | None:
+    for key in keys:
+        value = metrics.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(number) and number >= 0:
+            return int(number) if number.is_integer() else number
+    return None
+
+
+def _sum_observations(target: dict, values: dict) -> None:
+    for key, value in values.items():
+        if value is not None:
+            target[key] = target.get(key, 0) + value
+
+
+def _app_observation(row: sqlite3.Row, platform: str, region: str, raw: dict, metrics: dict) -> dict:
+    scope = "global" if platform == "google_play" else region
+    identity = app_id(platform, row["url"], raw) or row["link_id"] or row["url"] or row["id"]
+    return {
+        "key": f"{platform}:{identity}:{scope}",
+        "app_id": identity,
+        "name": raw.get("track_name") or raw.get("app_name") or row["title"] or identity,
+        "publisher": raw.get("seller_name") or raw.get("developer"),
+        "platform": platform,
+        "scope": scope,
+        "version": raw.get("version"),
+        "date": row["occurred_at"][:10],
+        "observed_at": row["occurred_at"],
+        "url": row["url"],
+        "rating_count": (
+            None if metrics.get("rating_count_observed") is False
+            else _observed_number(metrics, "rating_count")
+        ),
+        "rating": _observed_number(metrics, "rating"),
+        "downloads": _observed_number(metrics, "downloads", "download_count"),
+        "installs": _observed_number(metrics, "installs", "install_count"),
+    }
+
+
+def _brand_observations(
+    conn: sqlite3.Connection, brand: sqlite3.Row, start: str, end: str, country: str, include_history: bool,
+) -> tuple[dict, set[str]]:
+    brand_id = brand["id"]
+    countries: set[str] = set()
+    totals: dict = {}
+    daily: dict[str, dict] = defaultdict(dict)
+    apps: dict[str, dict] = {}
+    app_days: dict[str, list[dict]] = defaultdict(list)
+    app_days_seen: set[tuple[str, str]] = set()
+    allowed_apps = configured_app_ids(conn, brand_id)
+    records = conn.execute(
+        "SELECT id, source_id, link_id, data_type, dimension, platform, title, body, url, region, occurred_at, "
+        "metrics_json, raw_json FROM records WHERE brand_id = ? "
+        "AND occurred_at >= ? AND occurred_at < ? "
+        "AND (data_type = 'app_metric' OR dimension = 'marketing') "
+        "ORDER BY occurred_at DESC, rowid DESC",
+        (brand_id, start, end + "\uffff"),
+    )
+    for row in records:
+        region = (row["region"] or "").strip().upper()
+        metrics = _json_object(row["metrics_json"])
+        raw = _json_object(row["raw_json"])
+        day = row["occurred_at"][:10]
+        if row["data_type"] == "app_metric":
+            platform = (row["platform"] or "").lower() or APP_PLATFORMS.get(row["source_id"], "")
+            if platform not in APP_PLATFORMS.values() or not app_record_allowed(
+                {**dict(row), "platform": platform, "raw": raw}, allowed_apps,
+            ):
+                continue
+            region = region or str(raw.get("storefront") or "").strip().upper()
+            if platform == "app_store" and len(region) == 2 and region.isascii() and region.isalpha():
+                countries.add(region)
+            if country != "all" and (platform == "google_play" or country != region):
+                continue
+            observation = _app_observation(row, platform, region, raw, metrics)
+            key = observation["key"]
+            apps.setdefault(key, observation)
+            if include_history and (key, day) not in app_days_seen:
+                app_days_seen.add((key, day))
+                app_days[key].append(observation)
+                _sum_observations(daily[day], {f"{platform}_ratings": observation["rating_count"]})
+            continue
+
+        if country != "all" and country != region:
+            continue
+        if not _record_is_relevant(row, brand["name"], raw):
+            continue
+        comments = _observed_number(metrics, *COMMENT_KEYS)
+        is_reply = row["data_type"] in {"community_reply", "comment", "reply"}
+        values = {
+            "mentions": 1 if not is_reply and row["data_type"] != "community_metric" else None,
+            "comments": 1 if is_reply and comments is None else comments,
+            "engagement": _observed_number(metrics, "engagement"),
+            "views": _observed_number(metrics, "views"),
+        }
+        _sum_observations(totals, values)
+        if include_history:
+            _sum_observations(daily[day], values)
+
+    for app in apps.values():
+        _sum_observations(totals, {f"{app['platform']}_ratings": app["rating_count"]})
+
+    sales = conn.execute(
+        "SELECT sm.id, sm.link_id, sm.snapshot_date, sm.review_count, l.region "
+        "FROM sales_metrics sm LEFT JOIN links l ON l.id = sm.link_id "
+        "WHERE sm.brand_id = ? AND sm.snapshot_date BETWEEN ? AND ? "
+        "ORDER BY sm.snapshot_date DESC, sm.rowid DESC",
+        (brand_id, start, end),
+    )
+    listings_seen: set[str] = set()
+    listing_days_seen: set[tuple[str, str]] = set()
+    for row in sales:
+        if country != "all" and country != (row["region"] or "").strip().upper():
+            continue
+        listing = row["link_id"] or row["id"]
+        day = row["snapshot_date"]
+        values = {"product_reviews": row["review_count"]}
+        if listing not in listings_seen:
+            _sum_observations(totals, values)
+            listings_seen.add(listing)
+        if include_history and (listing, day) not in listing_days_seen:
+            _sum_observations(daily[day], values)
+            listing_days_seen.add((listing, day))
+
+    result = {"brand_id": brand_id, "name": brand["name"], "metrics": totals}
+    if include_history:
+        result["daily"] = [{"date": day, "metrics": daily[day]} for day in sorted(daily, reverse=True) if daily[day]]
+        result["apps"] = [
+            {**app, "daily": app_days[app["key"]]}
+            for app in sorted(apps.values(), key=lambda item: (str(item["name"]).casefold(), item["platform"], item["scope"]))
+        ]
+    return result, countries
+
+
+@router.get("/observations")
+def market_observations(
+    brand_ids: str,
+    country: str = "all",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_history: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    ids = list(dict.fromkeys(part.strip() for part in brand_ids.split(",") if part.strip()))
+    if not ids or len(ids) > 12 or (include_history and len(ids) != 1):
+        raise HTTPException(status_code=400, detail="品牌汇总支持 1–12 个品牌，按日明细一次查看 1 个品牌。")
+    country_code = country.strip().upper() or "ALL"
+    if country_code != "ALL" and (len(country_code) != 2 or not country_code.isascii() or not country_code.isalpha()):
+        raise HTTPException(status_code=400, detail="请选择两位国家代码。")
+    placeholders = ",".join("?" for _ in ids)
+    brands = {row["id"]: row for row in conn.execute(
+        f"SELECT id, name FROM brands WHERE id IN ({placeholders})", ids,
+    )}
+    if missing := [brand_id for brand_id in ids if brand_id not in brands]:
+        raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(missing)}")
+
+    start, end = resolve_window(start_date=start_date, end_date=end_date)
+    countries: set[str] = set()
+    results = []
+    for brand_id in ids:
+        result, scopes = _brand_observations(conn, brands[brand_id], start, end, "all" if country_code == "ALL" else country_code, include_history)
+        countries.update(scopes)
+        results.append(result)
+    return {"countries": sorted(countries), "brands": results}
 
 
 @router.post("/snapshots/refresh")
