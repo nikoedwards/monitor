@@ -421,3 +421,11 @@ def compare(days: int = 30, start_date: str | None = None, end_date: str | None 
         snapshot = _brand_snapshot(conn, brand["id"], start, end)
         rows.append({"brand_id": brand["id"], "name": brand["name"], "is_competitor": bool(brand["is_competitor"]), "is_primary": bool(brand["is_primary"]), **snapshot})
     return {"brands": rows}
+
+
+@router.get("/compare/summary")
+def compare_strategy_summary(days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, cached_only: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+    from ..compare_summary import compare_summary
+
+    start, end = resolve_window(days, start_date, end_date)
+    return compare_summary(conn, start, end, refresh=refresh, cached_only=cached_only)
