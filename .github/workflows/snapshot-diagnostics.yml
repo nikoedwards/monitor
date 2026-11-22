@@ -11,6 +11,9 @@ on:
         type: choice
         options: ['1', '2', '3']
         default: '1'
+      candidate:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +35,7 @@ jobs:
           SSH_KNOWN_HOSTS: ${{ secrets.ALIYUN_MONITOR_KNOWN_HOSTS }}
           MODE: ${{ inputs.mode }}
           ATTEMPTS: ${{ inputs.attempts }}
+          CANDIDATE: ${{ inputs.candidate }}
         shell: bash
         run: |
           set -euo pipefail
@@ -47,8 +51,29 @@ jobs:
             -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$tmp/known_hosts"
             -o ConnectTimeout=20 -o ServerAliveInterval=10 -o ServerAliveCountMax=6)
           ssh "${ssh_args[@]}" "root@$SSH_HOST" 'free -m; df -h /opt/monitor; docker stats --no-stream --format "{{.Name}} {{.MemUsage}} {{.PIDs}}"'
-          # Send only this diagnostic script to the existing app container.
-          # No image build, deployment, database writes, or credential output.
-          ssh "${ssh_args[@]}" "root@$SSH_HOST" \
-            "cid=\$(docker ps -q --filter label=com.docker.compose.service=monitor); test -n \"\$cid\"; docker exec -i -w /app \"\$cid\" python - '$MODE' '$ATTEMPTS'" \
-            < tools/snapshot_diagnostics.py
+          if [[ "$CANDIDATE" == true ]]; then
+            # Test branch code in a disposable directory, alongside the live
+            # API. Never replace running application files or write its DB.
+            tar -czf "$tmp/candidate.tgz" server tools/snapshot_diagnostics.py
+            remote=$(cat <<'REMOTE'
+          set -euo pipefail
+          cid=$(docker ps -q --filter label=com.docker.compose.service=monitor)
+          test -n "$cid"
+          docker exec -i -e DIAG_MODE="$1" -e DIAG_ATTEMPTS="$2" "$cid" sh -c '
+            workspace=$(mktemp -d /tmp/monitor-candidate.XXXXXX)
+            trap '\''rm -rf -- "$workspace"'\'' EXIT
+            tar -xz -C "$workspace"
+            cd "$workspace"
+            MONITOR_DIAGNOSTIC_LIVE_ROOT=/app PYTHONPATH="$workspace" python tools/snapshot_diagnostics.py "$DIAG_MODE" "$DIAG_ATTEMPTS"
+          ' <&3
+          REMOTE
+            )
+            encoded=$(printf '%s' "$remote" | base64 -w0)
+            ssh "${ssh_args[@]}" "root@$SSH_HOST" \
+              "exec 3<&0; printf '%s' '$encoded' | base64 -d | bash -s -- '$MODE' '$ATTEMPTS'" \
+              < "$tmp/candidate.tgz"
+          else
+            ssh "${ssh_args[@]}" "root@$SSH_HOST" \
+              "cid=\$(docker ps -q --filter label=com.docker.compose.service=monitor); test -n \"\$cid\"; docker exec -i -w /app \"\$cid\" python - '$MODE' '$ATTEMPTS'" \
+              < tools/snapshot_diagnostics.py
+          fi

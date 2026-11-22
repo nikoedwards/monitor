@@ -5,6 +5,7 @@ import collections
 import concurrent.futures
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -38,6 +39,10 @@ def capture(url, attempt):
     from server.snapshot import capture_artifacts
     from server.config import SNAPSHOT_DIR
     from PIL import Image
+    if os.environ.get('MONITOR_DIAGNOSTIC_LIVE_ROOT'):
+        import server.snapshot as snapshot
+        SNAPSHOT_DIR = Path(os.environ['MONITOR_DIAGNOSTIC_LIVE_ROOT']) / 'data/snapshots'
+        snapshot.SNAPSHOT_DIR = SNAPSHOT_DIR
 
     start = time.monotonic()
     prefetch_error = ''
@@ -65,6 +70,8 @@ def capture(url, attempt):
 
 def main():
     from server.config import DB_PATH
+    if os.environ.get('MONITOR_DIAGNOSTIC_LIVE_ROOT'):
+        DB_PATH = Path(os.environ['MONITOR_DIAGNOSTIC_LIVE_ROOT']) / 'data/monitor.db'
 
     mode = sys.argv[1] if len(sys.argv) > 1 else 'resources'
     attempts = int(sys.argv[2]) if len(sys.argv) > 2 else 1

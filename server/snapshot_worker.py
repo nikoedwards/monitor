@@ -32,13 +32,13 @@ def main() -> int:
             safe_mode=bool(request.get("safe_mode")),
         )
         if capture is not _playwright_capture and result and result.get("error"):
-            # Heavy storefront scripts can exceed the small host's budget.
-            # Retry with a fresh, real Chromium renderer before resorting to
-            # a text image; static HTML/CSS/images remain browser-rendered.
+            # Retry a transient renderer failure with JavaScript still enabled.
+            # Disabling scripts leaves SPA loaders visible and lazy images
+            # hidden, producing a PNG that is not a usable webpage capture.
             first_error = result["error"]
             result = capture(
                 request["url"], Path(request["png_path"]), Path(request["html_path"]),
-                request.get("source_html") or "", safe_mode=True, scriptless=True,
+                request.get("source_html") or "", safe_mode=True,
             )
             result["previous_browser_error"] = first_error
     except Exception as exc:

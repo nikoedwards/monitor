@@ -26,6 +26,18 @@ from .snapshot import (
 )
 
 CDP_STARTUP_TIMEOUT_SECONDS = int(os.environ.get("MONITOR_CAPTURE_CDP_STARTUP_TIMEOUT_SECONDS", "20"))
+# These background integrations do not contribute to the captured page. Keep
+# storefront scripts, styles, images, and same-origin application APIs enabled.
+_BACKGROUND_URLS = [
+    "*.mp4", "*.webm", "*.m3u8", "*.gif",
+    "*://*.google-analytics.com/*", "*://*.googletagmanager.com/*",
+    "*://connect.facebook.net/*", "*://*.facebook.com/tr/*",
+    "*://*.clarity.ms/*", "*://*.hotjar.com/*", "*://*.hotjar.io/*",
+    "*://*.klaviyo.com/*", "*://*.klaviyo.net/*",
+    "*://analytics.tiktok.com/*", "*://*.doubleclick.net/*",
+    "*://*.luckyorange.com/*", "*://*.luckyorange.net/*",
+    "*://*.replay.io/*", "*://*.fullstory.com/*",
+]
 
 
 def _browser_binary() -> str:
@@ -167,6 +179,8 @@ def capture(
     browser = None
     socket = None
     stage = "launch"
+    started = time.monotonic()
+    timings = {}
     # The outer isolated worker owns a process group. Keep Chromium in it so
     # the supervisor's timeout/SIGKILL reaches every browser child as well.
     # Standalone diagnostics need their own browser group for the same reason.
@@ -186,11 +200,12 @@ def capture(
                     "--disable-dev-shm-usage", "--disable-background-networking",
                     "--disable-extensions", "--disable-sync", "--no-first-run", "--mute-audio",
                     "--renderer-process-limit=1",
+                    "--num-raster-threads=1",
                     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
                     f"--user-data-dir={profile}", f"--window-size={width},{height}", "about:blank",
                 ]
                 if constrained:
-                    browser_args.append("--js-flags=--max-old-space-size=128")
+                    browser_args.append("--js-flags=--max-old-space-size=128 --optimize-for-size")
                 browser = subprocess.Popen(
                     browser_args, stdout=subprocess.DEVNULL, stderr=browser_log,
                     start_new_session=owns_browser_group,
@@ -213,7 +228,8 @@ def capture(
                         suppress_origin=True, enable_multithread=False, http_no_proxy=["127.0.0.1"],
                     )
                     page = _Page(socket)
-                    target = page.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+                    targets = page.call("Target.getTargets")["targetInfos"]
+                    target = next(t["targetId"] for t in targets if t.get("type") == "page")
                     page.session = page.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
                     page.call("Page.enable")
                     page.call("Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0})
@@ -222,11 +238,12 @@ def capture(
                         "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
                     })
                     page.call("Network.setBlockedURLs", {
-                        "urls": ["*.mp4", "*.webm", "*.m3u8", "*.gif"],
+                        "urls": _BACKGROUND_URLS,
                     })
                     if scriptless:
                         page.call("Emulation.setScriptExecutionDisabled", {"value": True})
                     stage = "navigation"
+                    timings["launch"] = round(time.monotonic() - started, 2)
                     source_fallback = False
                     try:
                         data = page.navigate(url)
@@ -244,6 +261,7 @@ def capture(
                       document.head.appendChild(s);
                     }""")
                     stage = "screenshot"
+                    timings["navigation"] = round(time.monotonic() - started - timings["launch"], 2)
                     tiles = _capture_chunked_screenshot(
                         page, png_path, height,
                         max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
@@ -257,6 +275,7 @@ def capture(
                         # Preserve the public method contract while exposing
                         # which low-memory engine produced the image.
                         "method": "playwright", "engine": "chromium_cdp",
+                        "timings": dict(timings, total=round(time.monotonic()-started, 2)),
                         "script_execution_disabled": scriptless,
                         "source_html_fallback": source_fallback,
                         "page": data, "media": {
@@ -301,4 +320,4 @@ def capture(
     except SnapshotCaptureError:
         raise
     except Exception as exc:
-        return {"error": f"{stage}: {str(exc)}"[:500]}
+        return {"error": f"{stage}: {str(exc)}"[:500], "timings": dict(timings, total=round(time.monotonic()-started, 2))}
