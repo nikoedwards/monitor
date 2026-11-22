@@ -6,6 +6,7 @@ Run: `python server/app.py` (serves the built SPA from ./dist).
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 import uvicorn
@@ -14,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .access_gate import AccessGate
 from .config import DIST, HOST, PORT, SCHEDULER_ENABLED, SNAPSHOT_DIR, apply_credential_overrides
 from .connectors.registry import sync_to_db
 from .db import db, init_db
@@ -84,6 +86,11 @@ async def secure_snapshot_archives(request, call_next):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+if access_code := os.environ.get("MONITOR_ACCESS_CODE", "").strip():
+    app.add_middleware(AccessGate, code=access_code)
+
 
 for module in (brands, content, creators, sales, web, sources, insights, integrations, market_share, hiring, settings, media):
     app.include_router(module.router)

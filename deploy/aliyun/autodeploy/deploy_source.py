@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 try:
@@ -45,6 +46,7 @@ MAX_REUSABLE_RUNTIME_LAYERS = 40
 MONITOR_MEMORY_LIMIT = "640m"
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_HEADER_BYTES = 100
+ACCESS_CODE_LINE = re.compile(rb"(?m)^[ \t]*(?:export[ \t]+)?MONITOR_ACCESS_CODE[ \t]*=.*(?:\n|\Z)")
 
 
 def backup_database(source, destination):
@@ -103,6 +105,7 @@ class SourceDeployer:
             self.source_dir / "deploy/aliyun/autodeploy/Dockerfile.release"
         )
         self.stable_base = self.project_dir / "docker-compose.yml"
+        self.runtime_env = self.project_dir / ".env"
         self.database = self.data_dir / "monitor.db"
         self.image = f"monitor-intelligence-hub:{revision}"
         self.stable_image = stable_image
@@ -447,19 +450,48 @@ class SourceDeployer:
         except RuntimeError as exc:
             print(f"Could not remove failed candidate tag: {exc}", file=sys.stderr)
 
-    def _check_http(self, base_url):
+    def install_access_code(self, code, previous_env):
+        contents = ACCESS_CODE_LINE.sub(b"", previous_env or b"")
+        if code:
+            if contents and not contents.endswith(b"\n"):
+                contents += b"\n"
+            contents += f"MONITOR_ACCESS_CODE={code}\n".encode()
+        if contents != previous_env and (contents or previous_env is not None):
+            atomic_write(self.runtime_env, contents, mode=0o600)
+
+    def _check_health(self, base_url):
         with urllib.request.urlopen(base_url + "/api/health", timeout=5) as response:
             if json.load(response).get("ok") is not True:
                 raise ValueError("Unexpected health response")
-        with urllib.request.urlopen(base_url + "/api/brands", timeout=10) as response:
+
+    def _check_gate(self, base_url, assets):
+        for path in ("/", "/api/brands", "/snapshots/", *assets):
+            try:
+                with urllib.request.urlopen(base_url + path, timeout=10):
+                    raise ValueError(f"Access gate is open on {path}")
+            except urllib.error.HTTPError as response:
+                with response:
+                    if response.code != 401 or (
+                        path == "/" and b'action="/_access"' not in response.read(4096)
+                    ):
+                        raise ValueError(f"Unexpected access gate response on {path}") from response
+
+    def _check_http(self, base_url, access_code):
+        headers = {"Authorization": f"Bearer {access_code}"} if access_code else {}
+
+        def fetch(path):
+            request = urllib.request.Request(base_url + path, headers=headers)
+            return urllib.request.urlopen(request, timeout=10)
+
+        with fetch("/api/brands") as response:
             json.load(response)
-        with urllib.request.urlopen(base_url + "/", timeout=10) as response:
+        with fetch("/") as response:
             html = response.read().decode()
         assets = re.findall(r'(?:src|href)="(/assets/[^\"]+)"', html)
         if not assets:
             raise ValueError("Frontend entry point has no assets")
         for asset in assets:
-            with urllib.request.urlopen(base_url + asset, timeout=10) as response:
+            with fetch(asset) as response:
                 if response.status != 200:
                     raise ValueError(f"Frontend asset unavailable: {asset}")
         return tuple(sorted(set(assets)))
@@ -497,7 +529,18 @@ class SourceDeployer:
                     raise ReleaseFailed(
                         f"Monitor is running {running_image}, expected {expected_image}"
                     )
-                assets = self._check_http(base_url)
+                access_code = self.run(
+                    [
+                        "docker", "exec", container, "python", "-c",
+                        'import os; print(os.getenv("MONITOR_ACCESS_CODE", "").strip())',
+                    ],
+                    timeout=15,
+                )
+                self._check_health(base_url)
+                if access_code and base_url != self.local_url and expected_assets is not None:
+                    self._check_gate(base_url, expected_assets)
+                    return expected_assets
+                assets = self._check_http(base_url, access_code)
                 if expected_assets is not None and assets != expected_assets:
                     raise ValueError(
                         f"Frontend assets are {assets}, expected {expected_assets}"
@@ -511,7 +554,8 @@ class SourceDeployer:
         raise RuntimeError(f"Release health check timed out: {last_error}")
 
     def _rollback(
-        self, previous_base, previous_image, previous_override, backup, backup_ready
+        self, previous_base, previous_image, previous_override, backup, backup_ready,
+        *, restore_env=False, previous_env=None,
     ):
         errors = []
         stopped = False
@@ -542,6 +586,14 @@ class SourceDeployer:
             self.restore_override(previous_override)
         except BaseException as exc:
             errors.append(f"Production override restore failed: {exc}")
+        if restore_env:
+            try:
+                if previous_env is None:
+                    self.runtime_env.unlink(missing_ok=True)
+                else:
+                    atomic_write(self.runtime_env, previous_env, mode=0o600)
+            except BaseException as exc:
+                errors.append(f"Runtime environment restore failed: {exc}")
         try:
             self.tag(previous_image, self.stable_image)
         except BaseException as exc:
@@ -659,6 +711,9 @@ class SourceDeployer:
                 shutil.rmtree(old)
 
     def deploy(self):
+        access_code = os.environ.get("MONITOR_DEPLOY_ACCESS_CODE")
+        if access_code and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", access_code):
+            raise ValueError("Invalid Monitor access code format")
         self.validate_inputs()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.build_image()
@@ -670,6 +725,11 @@ class SourceDeployer:
             self.validate_live_data_mount(self.stable_base)
             previous_base = self.stable_base.read_bytes()
             previous_override = self.server_override.read_bytes()
+            previous_env = (
+                self.runtime_env.read_bytes()
+                if access_code is not None and self.runtime_env.exists()
+                else None
+            )
             self.tag(previous_image, self.rollback_image)
 
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -689,6 +749,7 @@ class SourceDeployer:
         backup = release_dir / "before-deploy.db"
         backup_ready = False
         stop_started = False
+        restore_env = False
 
         try:
             stop_started = True
@@ -697,6 +758,9 @@ class SourceDeployer:
             backup_ready = True
             self.install_base(self.source_base.read_bytes())
             self.enable_scheduler_override()
+            if access_code is not None:
+                restore_env = True
+                self.install_access_code(access_code, previous_env)
             self.tag(self.image, self.stable_image)
             self.start(self.stable_base)
             self.validate_live_data_mount(self.stable_base)
@@ -718,6 +782,8 @@ class SourceDeployer:
                         previous_override,
                         backup,
                         backup_ready,
+                        restore_env=restore_env,
+                        previous_env=previous_env,
                     )
                 except BaseException as rollback_error:
                     raise RuntimeError(
