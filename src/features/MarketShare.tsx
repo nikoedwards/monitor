@@ -8,7 +8,7 @@ import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, Select,
 import { fmtNum } from "../lib/format";
 import { useBrands, useMarketShare, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
-import { BrandObservationsCard } from "./MarketShareObservations";
+import { MarketShareBreakdown } from "./MarketShareObservations";
 
 const STORAGE_KEY = "monitor.marketShare.brandIds";
 const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280", "#ef4444", "#14b8a6"];
@@ -275,90 +275,51 @@ export default function MarketShare() {
             )}
           </Card>
 
-          <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4">
-            <Card>
-              <SectionTitle title="App 评分样本份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
-              <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-5 items-center">
-                <div className="h-[260px] relative">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={result.brands} dataKey="share" nameKey="name" innerRadius={66} outerRadius={100} paddingAngle={2} stroke="none">
-                        {result.brands.map((row, index) => <Cell key={row.brand_id} fill={COLORS[index % COLORS.length]} />)}
-                      </Pie>
-                      <Tooltip formatter={(value) => [`${Number(value).toFixed(2)}%`, "估算份额"]} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="absolute inset-0 pointer-events-none grid place-items-center text-center">
-                    <div>
-                      <div className="text-[12px]" style={{ color: "var(--mute)" }}>领先份额</div>
-                      <div className="text-[30px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{leader ? `${leader.share.toFixed(1)}%` : "—"}</div>
-                    </div>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  {result.brands.map((row, index) => (
-                    <div key={row.brand_id}>
-                      <div className="flex items-center justify-between gap-3 text-[13px] mb-1.5">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
-                          <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.rank}. {row.name}</span>
-                        </div>
-                        <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{activeSignals.some(({ key }) => row.signals[key] > 0) ? `${row.share.toFixed(2)}%` : "缺数据"}</span>
-                      </div>
-                      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-                        <div className="h-full rounded-full" style={{ width: `${Math.max(row.share, 0.5)}%`, background: COLORS[index % COLORS.length] }} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </Card>
-
-            <Card>
-              <SectionTitle
-                title="份额拆解"
-                hintSymbol="!"
-                hint="先把每类信号在当前所选品牌内归一化为相对份额，再按当前模型的有效权重合成。它表示样本内相对位置，不等于真实市场占有率；缺失信号会被重新分配权重。"
-                subtitle="每列先在所选品牌内归一化，再按模型权重合成"
-              />
-              <div className="overflow-x-auto">
-                <table className="w-full text-[13px] min-w-[620px]">
-                  <thead>
-                    <tr style={{ color: "var(--mute)", borderBottom: "1px solid var(--hairline)" }}>
-                      <th className="text-left font-medium py-2.5 px-2">品牌</th>
-                      <th className="text-right font-medium py-2.5 px-2">综合份额</th>
-                      {activeSignals.map((signal) => (
-                        <th key={signal.key} className="text-right font-medium py-2.5 px-2">
-                          {signal.label}
-                          <div className="text-[10px] font-normal">权重 {(result.model.active_weights[signal.key] * 100).toFixed(0)}%</div>
-                        </th>
-                      ))}
-                      <th className="text-right font-medium py-2.5 px-2">覆盖度</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.brands.map((row) => (
-                      <tr key={row.brand_id} style={{ borderBottom: "1px solid var(--hairline)", color: "var(--body)" }}>
-                        <td className="py-3 px-2 font-medium" style={{ color: "var(--ink)" }}>{row.name}</td>
-                        <td className="py-3 px-2 text-right font-semibold tabular-nums" style={{ color: "var(--accent)" }}>{row.share.toFixed(2)}%</td>
-                        {activeSignals.map((signal) => (
-                          <td key={signal.key} className="py-3 px-2 text-right tabular-nums">
-                            {`${row.signal_shares[signal.key].toFixed(1)}%`}
-                          </td>
-                        ))}
-                        <td className="py-3 px-2 text-right"><Badge tone={row.coverage >= 75 ? "positive" : row.coverage >= 50 ? "warning" : "negative"}>{row.coverage}%</Badge></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          </div>
-
         </>
       )}
 
-      {selected.length > 0 && <BrandObservationsCard brandIds={selected} country={country} range={range} />}
+      <div className={result ? "grid grid-cols-1 2xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-4" : undefined}>
+        {result && (
+          <Card>
+            <SectionTitle title="App 评分样本份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
+            <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-5 items-center">
+              <div className="h-[260px] relative">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={result.brands} dataKey="share" nameKey="name" innerRadius={66} outerRadius={100} paddingAngle={2} stroke="none">
+                      {result.brands.map((row, index) => <Cell key={row.brand_id} fill={COLORS[index % COLORS.length]} />)}
+                    </Pie>
+                    <Tooltip formatter={(value) => [`${Number(value).toFixed(2)}%`, "估算份额"]} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="absolute inset-0 pointer-events-none grid place-items-center text-center">
+                  <div>
+                    <div className="text-[12px]" style={{ color: "var(--mute)" }}>领先份额</div>
+                    <div className="text-[30px] font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{leader ? `${leader.share.toFixed(1)}%` : "—"}</div>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                {result.brands.map((row, index) => (
+                  <div key={row.brand_id}>
+                    <div className="flex items-center justify-between gap-3 text-[13px] mb-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
+                        <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.rank}. {row.name}</span>
+                      </div>
+                      <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{activeSignals.some(({ key }) => row.signals[key] > 0) ? `${row.share.toFixed(2)}%` : "缺数据"}</span>
+                    </div>
+                    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
+                      <div className="h-full rounded-full" style={{ width: `${Math.max(row.share, 0.5)}%`, background: COLORS[index % COLORS.length] }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Card>
+        )}
+        {selected.length > 0 && <MarketShareBreakdown brandIds={selected} country={country} range={range} result={result} />}
+      </div>
 
       {result && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
