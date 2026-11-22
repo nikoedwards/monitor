@@ -12,7 +12,7 @@ import Web from "./features/Web";
 import Sources from "./features/Sources";
 import Compare from "./features/Compare";
 import Brands from "./features/Brands";
-import MarketShare from "./features/MarketShare";
+import MarketShare, { MarketShareDetail } from "./features/MarketShare";
 import McpCli from "./features/McpCli";
 
 function RootRedirect() {
@@ -31,6 +31,8 @@ export default function App() {
       <Route path="/brand/:brandId/overview" element={<Shell><Overview /></Shell>} />
       <Route path="/brand/:brandId/sales" element={<Shell><Sales /></Shell>} />
       <Route path="/brand/:brandId/market-share" element={<Shell><MarketShare /></Shell>} />
+      <Route path="/brand/:brandId/market-share/brands/:detailBrandId" element={<Shell><MarketShareDetail view="brand" /></Shell>} />
+      <Route path="/brand/:brandId/market-share/apps" element={<Shell><MarketShareDetail view="apps" /></Shell>} />
       <Route path="/brand/:brandId/hiring" element={<Shell><Hiring /></Shell>} />
       <Route path="/brand/:brandId/marketing" element={<Shell><Marketing /></Shell>} />
       <Route path="/brand/:brandId/creators" element={<Shell><Creators /></Shell>} />

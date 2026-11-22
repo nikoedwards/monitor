@@ -1,4 +1,4 @@
-import { NavLink, useNavigate, useParams } from "react-router-dom";
+import { NavLink, useMatch, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   Briefcase,
   ChartPie,
@@ -255,6 +255,14 @@ export function Topbar({ brandId }: { brandId?: string }) {
 }
 
 export function Sidebar({ brandId }: { brandId: string }) {
+  const marketPage = useMatch("/brand/:brandId/market-share/*");
+  const marketBrand = useMatch("/brand/:brandId/market-share/brands/:detailBrandId");
+  const [params] = useSearchParams();
+  const appParams = new URLSearchParams();
+  const country = marketPage && params.get("country");
+  const appBrand = marketBrand?.params.detailBrandId || params.get("brand");
+  if (country) appParams.set("country", country);
+  if (appBrand) appParams.set("brand", appBrand);
   return (
     <aside
       className="w-56 shrink-0 self-start sticky top-14 h-[calc(100vh-3.5rem)] px-3 py-4"
@@ -262,17 +270,33 @@ export function Sidebar({ brandId }: { brandId: string }) {
     >
       <nav className="space-y-0.5">
         {NAV.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={`/brand/${brandId}/${to}`}
-            className="flex items-center gap-2.5 px-3 h-9 rounded-md text-[14px] font-medium transition-colors"
-            style={({ isActive }) => ({
-              color: isActive ? "var(--ink)" : "var(--body)",
-              background: isActive ? "var(--bg-soft-2)" : "transparent",
-            })}
-          >
-            <Icon size={16} /> {label}
-          </NavLink>
+          <div key={to}>
+            <NavLink
+              end
+              to={{ pathname: `/brand/${brandId}/${to}`, search: to === "market-share" && country ? new URLSearchParams({ country }).toString() : "" }}
+              className="flex items-center gap-2.5 px-3 h-9 rounded-md text-[14px] font-medium transition-colors"
+              style={({ isActive }) => {
+                const highlighted = isActive || (to === "market-share" && marketBrand);
+                return { color: highlighted ? "var(--ink)" : "var(--body)", background: highlighted ? "var(--bg-soft-2)" : "transparent" };
+              }}
+            >
+              <Icon size={16} /> {label}
+            </NavLink>
+            {to === "market-share" && marketPage && (
+              <div className="ml-5 pl-2 mt-0.5" style={{ borderLeft: "1px solid var(--hairline-strong)" }}>
+                <NavLink
+                  to={{ pathname: `/brand/${brandId}/market-share/apps`, search: appParams.toString() }}
+                  className="flex items-center px-3 h-8 rounded-md text-[13px] font-medium transition-colors"
+                  style={({ isActive }) => ({
+                    color: isActive ? "var(--ink)" : "var(--body)",
+                    background: isActive ? "var(--bg-soft-2)" : "transparent",
+                  })}
+                >
+                  App 明细
+                </NavLink>
+              </div>
+            )}
+          </div>
         ))}
       </nav>
     </aside>

@@ -665,98 +665,33 @@ export interface MarketingAdsSummary {
   alerts?: { id?: string; type: string; title: string; detail?: string; detected_at?: string; ad_id?: string }[];
 }
 
-export type MarketShareModelKey = "balanced" | "commerce" | "attention";
+export type BrandMetric = "app_store_ratings" | "google_play_ratings" | "product_reviews" | "mentions" | "comments" | "engagement" | "views";
+export type AppMetric = "rating_count" | "rating" | "downloads" | "installs";
 
-export interface MarketShareBrand {
-  brand_id: string;
+export interface AppObservation extends Record<AppMetric, number | null> {
+  key: string;
+  app_id: string;
   name: string;
-  category?: string;
-  is_primary: boolean;
-  is_competitor: boolean;
-  rank: number;
-  share: number;
-  coverage: number;
-  signals: Record<"sales" | "app" | "conversation" | "engagement", number>;
-  signal_shares: Record<"sales" | "app" | "conversation" | "engagement", number>;
-  raw: {
-    mentions: number;
-    voc_records: number;
-    app_reviews: number;
-    app_rating?: number | null;
-    app_store_apps: number;
-    app_rating_count_observed: boolean;
-    comments: number;
-    engagement: number;
-    views: number;
-    app_downloads_est: number;
-    app_downloads_low: number;
-    app_downloads_high: number;
-    app_download_basis: "observed" | "review_proxy" | "unavailable";
-    sales_revenue: number;
-    sales_units: number;
-    product_reviews: number;
-    sales_data_points: number;
-    sales_currency?: string | null;
-    sales_currency_mixed?: boolean;
-  };
-  gaps: string[];
-}
-
-export interface MarketShareResponse {
-  range: { start: string; end: string };
-  country: string;
-  countries: string[];
-  model: {
-    key: MarketShareModelKey;
-    label: string;
-    description: string;
-    sales_basis: "revenue" | "units" | "unavailable";
-    base_weights: Record<"sales" | "app" | "conversation" | "engagement", number>;
-    active_weights: Record<"sales" | "app" | "conversation" | "engagement", number>;
-  };
-  confidence: {
-    score: number;
-    label: "高" | "中" | "低";
-    available_weight: number;
-    coverage_fairness: number;
-    evidence_total: number;
-    download_proxy_ratio: number;
-  };
-  brands: MarketShareBrand[];
-  warnings: string[];
-}
-
-export interface MarketShareTrendPoint {
+  publisher?: string | null;
+  platform: "app_store" | "google_play";
+  scope: string;
+  version?: string | null;
   date: string;
-  shares: Record<string, number>;
-  public_metrics: Record<string, { rating_count: number; average_rating?: number | null; app_count: number }>;
-  fresh_brand_count: number;
-  is_carried_forward: boolean;
-  data_as_of?: string | null;
+  observed_at: string;
+  url?: string | null;
 }
 
-export interface MarketShareTrendSummary {
+export interface BrandObservations {
   brand_id: string;
   name: string;
-  start_share: number;
-  latest_share: number;
-  change_pp: number;
-  start_rating_count: number;
-  latest_rating_count: number;
-  rating_count_change: number;
-  latest_average_rating?: number | null;
+  metrics: Partial<Record<BrandMetric, number>>;
+  daily?: Array<{ date: string; metrics: Partial<Record<BrandMetric, number>> }>;
+  apps?: Array<AppObservation & { daily: AppObservation[] }>;
 }
 
-export interface MarketShareTrendResponse {
-  range: { start: string; end: string };
-  country: string;
-  model: MarketShareModelKey;
-  cadence: "daily";
-  latest_date?: string | null;
-  last_snapshot_at?: string | null;
-  brands: Array<Pick<MarketShareBrand, "brand_id" | "name" | "category" | "is_primary" | "is_competitor">>;
-  points: MarketShareTrendPoint[];
-  summary: MarketShareTrendSummary[];
+export interface MarketObservationsResponse {
+  countries: string[];
+  brands: BrandObservations[];
 }
 
 export interface LlmSettings {
