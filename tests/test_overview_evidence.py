@@ -128,11 +128,17 @@ class OverviewEvidenceTests(unittest.TestCase):
     @patch("server.ai.call_llm")
     def test_llm_receives_packet_and_returns_validated_results(self, llm, _config):
         packet = self.packet()
+        packet["evidence"][0]["detail"] += "岗位详情" * 300 + "END_OF_LONG_EXCERPT"
         llm.return_value = json.dumps({"summary": "可能准备推广", "insights": [self.insight("job", "ad")]})
         result = ai.summarize_overview(self.conn, packet)
         self.assertEqual(1, len(result["insights"]))
         self.assertIn("两个独立来源组", llm.call_args.args[2])
         self.assertIn("Stored fact", llm.call_args.args[2])
+        self.assertNotIn("END_OF_LONG_EXCERPT", llm.call_args.args[2])
+        self.assertNotIn("https://example.com/job", llm.call_args.args[2])
+        self.assertEqual(240, llm.call_args.kwargs["timeout"])
+        self.assertEqual("https://example.com/job", result["insights"][0]["evidence"][0]["url"])
+        self.assertTrue(packet["evidence"][0]["detail"].endswith("END_OF_LONG_EXCERPT"))
         llm.return_value = '{"summary": "truncated"'
         with self.assertRaises(ai.LlmError):
             ai.summarize_overview(self.conn, packet)

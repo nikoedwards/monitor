@@ -168,7 +168,10 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
       return { ...next, pollingSince, takingLonger: pollingSince != null && Date.now() - pollingSince >= 120_000 };
     },
     enabled: !!brandId,
-    retry: false,
+    retry: (failures, error) =>
+      failures < 3 &&
+      client.getQueryData<OverviewSummaryState>(queryKey)?.generation?.status === "running" &&
+      (!(error instanceof ApiError) || [502, 503, 504].includes(error.status)),
     refetchInterval: (current) => {
       if (current.state.status === "error" || current.state.data?.generation?.status !== "running") return false;
       return current.state.data.takingLonger ? 10_000 : 3000;
