@@ -202,7 +202,7 @@ class SourceDeploymentTests(unittest.TestCase):
         with patch.object(self.deployer, "run", side_effect=("", "")) as run:
             module.SourceDeployer.build_image(self.deployer)
 
-        build_call = run.call_args_list[1]
+        build_call, mount_check = run.call_args_list
         self.assertEqual(build_call.kwargs["timeout"], module.IMAGE_BUILD_TIMEOUT)
         self.assertEqual(
             build_call.kwargs["env"],
@@ -211,7 +211,11 @@ class SourceDeploymentTests(unittest.TestCase):
         self.assertTrue(build_call.kwargs["stream_output"])
         self.assertNotIn("BUILDKIT_INLINE_CACHE=1", build_call.args[0])
         self.assertNotIn("--cache-from", build_call.args[0])
-        self.assertIn(f"BASE_IMAGE={self.deployer.stable_image}", build_call.args[0])
+        self.assertNotIn("--build-arg", build_call.args[0])
+        self.assertEqual(
+            mount_check.args[0],
+            ["docker", "run", "--rm", "--network", "none", "--entrypoint", "/bin/true", self.deployer.image],
+        )
 
     def test_run_timeout_terminates_the_command_process_group(self):
         with self.assertRaises(module.CommandTimedOut):

@@ -6,14 +6,15 @@ tests before it contacts production.
 
 GitHub adds the validated frontend `dist/` to a `git archive` for the exact
 commit and sends it to `/opt/monitor/.deploy-src/<commit>`. The server builds the
-Python runtime image locally with `Dockerfile.release`, so it reuses the current
-runtime dependency layers without repeating `npm ci`, and large images do not
-have to pass through the Actions SSH connection.
+Python runtime image locally with `Dockerfile.release` from a pinned Python
+base, so Docker can cache the dependency layers across releases. The archive
+includes the validated frontend, so the server skips npm and the workflow
+avoids transferring an image over SSH.
 
 `deploy_source.py` owns the production transaction:
 
-1. Validate the tracked Compose file and build the candidate image while the old
-   service is still running.
+1. Validate the tracked Compose file, build the candidate image, and verify that
+   Docker can mount it while the old service is still running.
 2. Record the old container image, stop Monitor, and create a consistent SQLite
    backup with the SQLite backup API.
 3. Install the release's tracked `docker-compose.yml`, move the stable image tag,
