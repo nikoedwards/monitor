@@ -71,6 +71,7 @@ CAPTURE_BROWSER_TIMEOUT_SECONDS = 25
 CAPTURE_JOB_TIMEOUT_SECONDS = int(os.environ.get("MONITOR_CAPTURE_JOB_TIMEOUT_SECONDS", "90"))
 CAPTURE_START_HEADROOM_MB = int(os.environ.get("MONITOR_CAPTURE_START_HEADROOM_MB", "192"))
 CAPTURE_RESERVE_MB = int(os.environ.get("MONITOR_CAPTURE_RESERVE_MB", "96"))
+CAPTURE_IO_FULL_LIMIT = float(os.environ.get("MONITOR_CAPTURE_IO_FULL_LIMIT", "35"))
 CAPTURE_ISOLATED = os.environ.get("MONITOR_CAPTURE_ISOLATED", "0").strip().lower() in {"1", "true", "yes"}
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
 _ARCHIVE_GUARD_MARKER = f'data-monitor-archive-guard="{ARCHIVE_REPLAY_VERSION}"'
@@ -92,6 +93,15 @@ class SnapshotCaptureError(RuntimeError):
 
 class SnapshotCaptureBusy(RuntimeError):
     """A Chromium capture is already running in this process."""
+
+
+def _io_pressure_percent() -> float | None:
+    """Measure how much of the last ten seconds all runnable work waited on I/O."""
+    try:
+        full = next(line for line in Path("/proc/pressure/io").read_text().splitlines() if line.startswith("full "))
+        return float(full.split()[1].removeprefix("avg10="))
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
 
 
 def _capture_error_reason(status: int | None, page_url: str, body_text: str) -> str:
@@ -1237,17 +1247,34 @@ def _isolated_playwright_capture(
     parsed_url = urlparse(url)
     target = parsed_url.hostname or parsed_url.scheme
     available = _available_memory_mb()
+    io_pressure = _io_pressure_percent()
+    if io_pressure is not None and io_pressure >= CAPTURE_IO_FULL_LIMIT:
+        logger.warning("Snapshot deferred host=%s io_full_avg10=%.1f%%", target, io_pressure)
+        return {"error": f"截图暂缓：主机 I/O 阻塞率为 {io_pressure:.1f}%"}
     if available is not None and available < CAPTURE_START_HEADROOM_MB:
         logger.warning("Snapshot deferred host=%s available_mib=%s", target, available)
         return {"error": f"截图暂缓：可用内存 {available} MiB，低于启动余量 {CAPTURE_START_HEADROOM_MB} MiB"}
-    deadline = time.monotonic() + CAPTURE_JOB_TIMEOUT_SECONDS
-    result = _capture_in_staging(url, png_path, html_path, source_html, safe_mode, available, target, deadline)
-    if result.get("resource_pressure") and sys.platform.startswith("linux") and time.monotonic() < deadline:
+    started = time.monotonic()
+    deadline = started + CAPTURE_JOB_TIMEOUT_SECONDS
+    can_retry = sys.platform.startswith("linux")
+    # Keep time for a fresh browser when a site hangs during rendering. Both
+    # attempts together still have the original hard deadline.
+    first_deadline = deadline
+    if can_retry and CAPTURE_JOB_TIMEOUT_SECONDS >= 24:
+        first_deadline = started + CAPTURE_JOB_TIMEOUT_SECONDS / 2
+    result = _capture_in_staging(url, png_path, html_path, source_html, safe_mode, available, target, first_deadline)
+    if can_retry and result.get("retry_reason") and deadline - time.monotonic() >= 2:
         available = _available_memory_mb()
-        if available is None or available >= CAPTURE_START_HEADROOM_MB:
-            logger.warning("Snapshot retry host=%s reason=memory_reserve mode=scriptless", target)
+        io_pressure = _io_pressure_percent()
+        if (
+            (available is None or available >= CAPTURE_START_HEADROOM_MB)
+            and (io_pressure is None or io_pressure < CAPTURE_IO_FULL_LIMIT)
+        ):
+            reason = result["retry_reason"]
+            logger.warning("Snapshot retry host=%s reason=%s mode=scriptless", target, reason)
             result = _capture_in_staging(
                 url, png_path, html_path, source_html, True, available, target, deadline, scriptless=True,
+                prefer_prefetched=reason == "deadline",
             )
     return result
 
@@ -1263,6 +1290,7 @@ def _capture_in_staging(
     deadline: float,
     *,
     scriptless: bool = False,
+    prefer_prefetched: bool = False,
 ) -> dict:
     # Keep every intermediate file in a directory owned by the supervising
     # process. A killed renderer cannot clean up its tiles or Chromium profile.
@@ -1277,6 +1305,7 @@ def _capture_in_staging(
             "source_html": source_html[:1_000_000 if safe_mode else 3_000_000],
             "safe_mode": safe_mode,
             "scriptless": scriptless,
+            "prefer_prefetched": prefer_prefetched,
         }
         result = _run_snapshot_worker(request, staging, available, target, deadline)
         if not result.get("error"):
@@ -1304,6 +1333,7 @@ def _run_snapshot_worker(
     started = time.monotonic()
     low_water = available
     outcome = "worker_error"
+    stderr = b""
     logger.warning(
         "Snapshot start host=%s safe_mode=%s scriptless=%s available_mib=%s",
         target, request["safe_mode"], request["scriptless"], available,
@@ -1323,12 +1353,13 @@ def _run_snapshot_worker(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 outcome = "deadline"
-                return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止"}
+                return {"error": "隔离截图进程超过本次渲染时限，已强制终止", "retry_reason": "deadline"}
             try:
                 stdout, stderr = process.communicate(data, timeout=min(0.5, remaining))
                 break
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 data = None
+                stderr = exc.stderr or stderr
                 available = _available_memory_mb()
                 if available is not None:
                     low_water = available if low_water is None else min(low_water, available)
@@ -1336,8 +1367,12 @@ def _run_snapshot_worker(
                         outcome = "memory_reserve"
                         return {
                             "error": f"截图已结束以保护服务器：可用内存 {available} MiB，低于保留量 {CAPTURE_RESERVE_MB} MiB",
-                            "resource_pressure": True,
+                            "retry_reason": "memory_reserve",
                         }
+                io_pressure = _io_pressure_percent()
+                if io_pressure is not None and io_pressure >= CAPTURE_IO_FULL_LIMIT:
+                    outcome = "io_pressure"
+                    return {"error": f"截图已结束以保护服务器：主机 I/O 阻塞率为 {io_pressure:.1f}%"}
         if process.returncode:
             detail = stderr or stdout or f"worker exit {process.returncode}".encode()
             return {"error": detail.decode("utf-8", errors="replace").strip()[-500:]}
@@ -1359,9 +1394,11 @@ def _run_snapshot_worker(
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             logger.error("Snapshot worker did not reap promptly pid=%s", process.pid)
+        stages = re.findall(rb"(?m)^SNAPSHOT_STAGE=([a-z_]+)\r?$", stderr)
+        stage = stages[-1].decode("ascii") if stages else "-"
         logger.warning(
-            "Snapshot finish host=%s pid=%s outcome=%s elapsed_s=%.1f min_available_mib=%s exit=%s",
-            target, process.pid, outcome, time.monotonic() - started, low_water, process.returncode,
+            "Snapshot finish host=%s pid=%s outcome=%s stage=%s elapsed_s=%.1f min_available_mib=%s exit=%s",
+            target, process.pid, outcome, stage, time.monotonic() - started, low_water, process.returncode,
         )
 
 
