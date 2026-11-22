@@ -321,54 +321,6 @@ export default function MarketShare() {
         {selected.length > 0 && <MarketShareBreakdown brandIds={selected} country={country} range={range} result={result} />}
       </div>
 
-      {result && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <Card>
-            <SectionTitle title="估算模型" subtitle={result.model.description} />
-            <div className="space-y-3">
-              {activeSignals.map((signal) => {
-                const active = result.model.active_weights[signal.key] * 100;
-                return (
-                  <div key={signal.key}>
-                    <div className="flex justify-between text-[13px] mb-1">
-                      <span style={{ color: "var(--body)" }}>{signal.label}</span>
-                      <span className="tabular-nums" style={{ color: "var(--ink)" }}>{active.toFixed(0)}%</span>
-                    </div>
-                    <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-                      <div className="h-full rounded-full" style={{ width: `${active}%`, background: "var(--accent)" }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt-4 p-3 rounded-md text-[12px] leading-relaxed" style={{ background: "var(--bg-soft)", color: "var(--mute)" }}>
-              每项数据先计算所选品牌中的占比，再按本次生效的权重合成。Google Play 全球评分在“全部国家”中计入一次。
-            </div>
-          </Card>
-
-          <Card>
-            <SectionTitle title="数据完整性" subtitle="补齐这些数据可明显提升估算可信度" />
-            <div className="space-y-4">
-              {result.brands.map((row) => (
-                <div key={row.brand_id} className="pb-4 last:pb-0" style={{ borderBottom: "1px solid var(--hairline)" }}>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="font-medium text-[13px]" style={{ color: "var(--ink)" }}>{row.name}</span>
-                    <Badge tone={row.gaps.length <= 1 ? "positive" : row.gaps.length <= 2 ? "warning" : "negative"}>{row.coverage}% 覆盖</Badge>
-                  </div>
-                  {row.gaps.length ? (
-                    <div className="flex flex-wrap gap-1.5">
-                      {row.gaps.map((gap) => <span key={gap} className="text-[12px] px-2 py-1 rounded" style={{ background: "var(--bg-soft-2)", color: "var(--mute)" }}>{gap}</span>)}
-                    </div>
-                  ) : (
-                    <div className="text-[12px]" style={{ color: "var(--accent)" }}>核心信号已覆盖</div>
-                  )}
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </div>
-      )}
-
       <Modal open={pickerOpen} onClose={() => setPickerOpen(false)} title="选择市占分析品牌" width={520}>
         <div className="space-y-2 max-h-[52vh] overflow-y-auto pr-1">
           {brands.map((brand) => {
