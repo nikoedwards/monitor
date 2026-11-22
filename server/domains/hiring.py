@@ -10,7 +10,7 @@ import re
 import sqlite3
 import hashlib
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import Annotated
 from urllib.parse import urlparse
@@ -887,6 +887,7 @@ def hiring_strategic_signals(
     refresh: bool = False,
     background: bool = False,
     poll: bool = False,
+    request_id: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     """Return the cross-board strategic signal card for the hiring surface.
@@ -908,11 +909,12 @@ def hiring_strategic_signals(
         job = analysis_job(
             conn, key,
             lambda worker: build_strategic_signals(worker, brand_id, scope=scope, start_date=start_date, end_date=end_date, refresh=True),
-            start=refresh or not baseline.get("cached"), refresh=refresh, revision=revision,
+            start=refresh or not baseline.get("cached") or baseline.get("previous_result", False),
+            refresh=refresh, revision=revision, request_id=request_id,
         )
         if job.get("generation", {}).get("status") == "failed" and not baseline.get("cached"):
             baseline["headline"]["summary"] = "战略研判生成失败，点击刷新可重试。"
-        return {**baseline, **job}
+        return _merge_hiring_result(baseline, job)
     return build_strategic_signals(
         conn,
         brand_id,
@@ -977,6 +979,17 @@ def _empty_trend(start: str, end: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------- LLM analysis
+def _merge_hiring_result(baseline: dict, job: dict) -> dict:
+    if baseline.get("cached") and job.get("analysis_status") == "fallback":
+        return {**baseline, "previous_result": True, "generation": {
+            **job["generation"], "error": "本次生成未返回模型结果，已保留上次结果。",
+        }}
+    merged = {**baseline, **job}
+    if job.get("headline") or job.get("summary"):
+        merged.pop("previous_result", None)
+    return merged
+
+
 def _fallback_jd_analysis(postings: list[dict], start: str, end: str) -> dict:
     """Return a deterministic, bounded result when the model is unavailable."""
     department_counts: dict[str, int] = defaultdict(int)
@@ -1022,6 +1035,7 @@ def analyze_hiring(
     cached_only: bool = False,
     background: bool = False,
     poll: bool = False,
+    request_id: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     start, end = resolve_window(days, start_date, end_date)
@@ -1029,6 +1043,7 @@ def analyze_hiring(
     status = status if status and status != "all" else None
     scope = (brand_id, start, end, platform or "", status or "")
     key = "jd:" + json.dumps(scope, ensure_ascii=False)
+    persistent_prefix = "hiring-analysis:" + "|".join(scope) + "|"
     if background and poll:
         return analysis_job(conn, key, start=False)
     brand = fetch_brand(conn, brand_id)
@@ -1047,24 +1062,33 @@ def analyze_hiring(
     postings = [dict(r) for r in rows]
     if not postings:
         if cached_only:
+            previous = ai.get_latest_saved_summary(conn, persistent_prefix)
+            if previous is not None:
+                return {**previous, "cache_miss": False}
             return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
         raise HTTPException(status_code=400, detail="该时间窗内暂无职位数据，请先采集。")
     revision = hashlib.sha256(json.dumps(postings, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:20]
-    persistent_key = "hiring-analysis:" + "|".join((*scope, revision))
+    persistent_key = persistent_prefix + revision
     baseline = {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
     if background or not refresh:
         persistent = ai.get_cached_summary(conn, persistent_key)
         if persistent is not None:
             baseline = {**persistent, "cached": True}
+        elif background or cached_only:
+            previous = ai.get_latest_saved_summary(conn, persistent_prefix)
+            if previous is not None:
+                baseline = previous
     if background:
         if not cached_only and not ai.is_configured(conn):
             raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
         job = analysis_job(
             conn, key,
             lambda worker: _generate_jd(worker, brand, postings, start, end, platform, status, persistent_key),
-            start=not cached_only and (refresh or baseline.get("cache_miss", False)), refresh=refresh, revision=revision,
+            start=not cached_only and (refresh or persistent is None), refresh=refresh,
+            revision=revision, request_id=request_id,
         )
-        return {**baseline, **job, "cache_miss": not bool(job.get("summary") or baseline.get("summary"))}
+        result = _merge_hiring_result(baseline, job)
+        return {**result, "cache_miss": not bool(result.get("summary"))}
     if cached_only or baseline.get("cached"):
         return baseline
     if not ai.is_configured(conn):
@@ -1075,9 +1099,11 @@ def analyze_hiring(
 def _generate_jd(conn, brand, postings, start, end, platform, status, persistent_key):
     try:
         result = ai.analyze_jd(conn, postings, {"brand": brand.get("name"), "start": start, "end": end, "filters": {"platform": platform, "status": status}})
+        result = {**result, "analysis_status": "complete"}
     except (ai.LlmError, TimeoutError, OSError):
         result = _fallback_jd_analysis(postings, start, end)
-    result = {**result, "cached": False, "range": {"start": start, "end": end}, "filters": {"platform": platform, "status": status}}
+    result = {**result, "cached": False, "range": {"start": start, "end": end}, "filters": {"platform": platform, "status": status},
+              "generated_at": datetime.now(timezone.utc).isoformat()}
     if result.get("analysis_status") != "fallback":
         ai.put_cached_summary(conn, persistent_key, result)
     return result

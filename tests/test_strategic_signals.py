@@ -118,6 +118,20 @@ class StrategicSignalsTests(unittest.TestCase):
         self.assertTrue(all(len(row["detail"]) <= 340 and "raw" not in row["metrics"] for row in result))
         self.assertEqual(len(rows[0]["detail"]), 1000)
 
+    def test_previous_strategy_survives_a_changed_history_window(self):
+        ai.put_cached_summary(
+            self.conn, "strategic-signals:strategic-signals-v3|brand-1|all_history|2026-01-01|2026-10-01|old",
+            {"headline": {"summary": "Earlier verified result"}, "analysis_status": "complete",
+             "window": {"scope": "all_history", "start": "2026-01-01", "end": "2026-10-01"}},
+        )
+        result = build_strategic_signals(self.conn, "brand-1")
+        self.assertEqual(result["headline"]["summary"], "Earlier verified result")
+        self.assertEqual(result["window"]["end"], "2026-10-01")
+        self.assertTrue(result["previous_result"])
+        self.assertTrue(result["generated_at"])
+        other_range = build_strategic_signals(self.conn, "brand-1", scope="range", start_date="2026-11-01", end_date="2026-11-20")
+        self.assertFalse(other_range.get("previous_result"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Badge, Button, Card, EmptyState, SectionTitle, Spinner } from "./ui";
 import { useHiringStrategicSignals } from "../lib/hooks";
+import { fmtDateTime } from "../lib/format";
 import type { HiringStrategicSignal, HiringStrategicSignals as HiringStrategicSignalsData } from "../lib/api";
 
 const DOMAIN_LABEL: Record<string, string> = {
@@ -53,7 +54,7 @@ export function HiringStrategicSignals({ brandId }: { brandId?: string }) {
         <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
           <div className="max-w-3xl">
             <div className="text-[20px] leading-7 font-semibold" style={{ color: "var(--ink)" }}>{data.headline.summary}</div>
-            <div className="mt-2 text-[12px]" style={{ color: "var(--mute)" }}>{data.window.start} 至 {data.window.end} · 置信度 {data.headline.confidence === "high" ? "较高" : data.headline.confidence === "medium" ? "中等" : "较低"}</div>
+            <div className="mt-2 text-[12px]" style={{ color: "var(--mute)" }}>{data.window.start} 至 {data.window.end} · 置信度 {data.headline.confidence === "high" ? "较高" : data.headline.confidence === "medium" ? "中等" : "较低"}{data.previous_result && ` · 上次研判${data.generated_at ? ` ${fmtDateTime(data.generated_at)}` : ""}`}</div>
           </div>
           <RadarOverview data={data} />
         </div>

@@ -112,12 +112,12 @@ if _ASSETS.exists():
 def spa(full_path: str):
     if full_path.startswith("api/"):
         return JSONResponse({"detail": "Not found"}, status_code=404)
-    candidate = (DIST / full_path)
-    if full_path and candidate.is_file():
-        return FileResponse(str(candidate))
     index = DIST / "index.html"
+    candidate = DIST / full_path
+    if full_path and candidate != index and candidate.is_file():
+        return FileResponse(str(candidate))
     if index.is_file():
-        return FileResponse(str(index))
+        return FileResponse(str(index), headers={"Cache-Control": "no-cache, must-revalidate"})
     return JSONResponse(
         {"detail": "Frontend not built. Run `npm run build` first."}, status_code=503
     )

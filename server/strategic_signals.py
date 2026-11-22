@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import os
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from . import ai
 from .overview_evidence import _diverse, build_overview_evidence
@@ -245,6 +245,12 @@ def build_strategic_signals(
         cached = ai.get_cached_summary(conn, cache_key)
         if isinstance(cached, dict):
             return {**cached, "cached": True, "refresh": False}
+        scope_prefix = f"strategic-signals:{_STRATEGIC_SIGNALS_VERSION}|{brand_id}|{scope}|"
+        if scope == "range":
+            scope_prefix += f"{start}|{end}|"
+        previous = ai.get_latest_saved_summary(conn, scope_prefix)
+        if previous is not None:
+            return {**previous, "refresh": False}
         return _quick_strategic_response(conn, brand_id, start, end, scope)
 
     # React can issue the initial query and a refetch close together. Serialize
@@ -334,6 +340,7 @@ def build_strategic_signals(
                 "caveats": list(dict.fromkeys((result.get("caveats") if isinstance(result.get("caveats"), list) else []) + packet.get("caveats", []))),
                 "cached": False,
                 "analysis_status": "complete" if model_succeeded else "fallback",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "refresh": refresh,
             }
             if model_succeeded:
