@@ -24,6 +24,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from html import escape as html_escape
+from itertools import chain
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
 
@@ -674,7 +675,7 @@ def _capture_chunk_height(available_memory_mb: int | None) -> int:
 def _capture_chunked_screenshot(
     page, png_path: Path, chunk_height: int, *, max_height: int | None = None,
 ) -> dict:
-    """Capture a long page one viewport at a time and stitch it on disk."""
+    """Capture and stitch one viewport at a time, writing only the final PNG."""
     from PIL import Image
 
     dimensions = page.evaluate(
@@ -691,22 +692,19 @@ def _capture_chunked_screenshot(
     output_width = max(1, int(round(width * scale)))
     output_height = max(1, int(round(document_height * scale)))
     viewport_height = max(1, min(chunk_height, int(dimensions.get("viewport") or chunk_height)))
-    positions = list(range(0, max(1, document_height - viewport_height + 1), viewport_height))
+    positions = range(0, max(1, document_height - viewport_height + 1), viewport_height)
     bottom = max(0, document_height - viewport_height)
-    if not positions or positions[-1] != bottom:
-        positions.append(bottom)
+    tail = (bottom,) if positions[-1] != bottom else ()
 
-    with tempfile.TemporaryDirectory(prefix=f".{png_path.stem}.", dir=str(png_path.parent)) as temp_dir:
-        canvas = Image.new("RGB", (output_width, output_height), (255, 255, 255))
+    with Image.new("RGB", (output_width, output_height), (255, 255, 255)) as canvas:
         previous_end = 0
-        for index, y in enumerate(dict.fromkeys(positions)):
+        for y in chain(positions, tail):
             page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
             page.wait_for_timeout(80)
-            chunk_path = Path(temp_dir) / f"chunk-{index}.png"
-            page.screenshot(path=str(chunk_path), full_page=False, animations="disabled", caret="hide")
+            png_data = page.screenshot(full_page=False, animations="disabled", caret="hide")
             source_top = max(0, previous_end - y)
             visible_height = min(viewport_height - source_top, document_height - y)
-            with Image.open(chunk_path) as chunk:
+            with Image.open(io.BytesIO(png_data)) as chunk:
                 piece = chunk.convert("RGB").crop((0, source_top, width, source_top + visible_height))
                 if scale < 1.0:
                     piece = piece.resize(
@@ -714,18 +712,16 @@ def _capture_chunked_screenshot(
                         Image.Resampling.LANCZOS,
                     )
                 canvas.paste(piece, (0, int(round((y + source_top) * scale))))
-            chunk_path.unlink()
             previous_end = max(previous_end, y + viewport_height)
         page.evaluate("window.scrollTo(0, 0)")
         canvas.save(png_path, format="PNG", optimize=False)
-        canvas.close()
     return {
         "width": width,
         "output_width": output_width,
         "height": output_height,
         "document_height": document_height,
         "chunk_height": viewport_height,
-        "chunks": len(dict.fromkeys(positions)),
+        "chunks": len(positions) + len(tail),
         "scaled": scale < 1.0,
         "scale": round(scale, 4),
     }
@@ -1334,6 +1330,16 @@ def _run_snapshot_worker(
     low_water = available
     outcome = "worker_error"
     stderr = b""
+
+    def last_stage():
+        stages = re.findall(rb"(?m)^SNAPSHOT_STAGE=([a-z_]+)\r?$", stderr)
+        return stages[-1].decode("ascii") if stages else "-"
+
+    def stage_hint():
+        names = {"launch": "启动浏览器", "navigation": "打开网页", "prepare": "准备页面",
+                 "screenshot": "渲染截图", "archive": "写入归档"}
+        label = names.get(last_stage())
+        return f"（{label}）" if label else ""
     logger.warning(
         "Snapshot start host=%s safe_mode=%s scriptless=%s available_mib=%s",
         target, request["safe_mode"], request["scriptless"], available,
@@ -1353,7 +1359,7 @@ def _run_snapshot_worker(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 outcome = "deadline"
-                return {"error": "隔离截图进程超过本次渲染时限，已强制终止", "retry_reason": "deadline"}
+                return {"error": f"隔离截图进程超过本次渲染时限{stage_hint()}，已强制终止", "retry_reason": "deadline"}
             try:
                 stdout, stderr = process.communicate(data, timeout=min(0.5, remaining))
                 break
@@ -1394,11 +1400,9 @@ def _run_snapshot_worker(
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             logger.error("Snapshot worker did not reap promptly pid=%s", process.pid)
-        stages = re.findall(rb"(?m)^SNAPSHOT_STAGE=([a-z_]+)\r?$", stderr)
-        stage = stages[-1].decode("ascii") if stages else "-"
         logger.warning(
             "Snapshot finish host=%s pid=%s outcome=%s stage=%s elapsed_s=%.1f min_available_mib=%s exit=%s",
-            target, process.pid, outcome, stage, time.monotonic() - started, low_water, process.returncode,
+            target, process.pid, outcome, last_stage(), time.monotonic() - started, low_water, process.returncode,
         )
 
 

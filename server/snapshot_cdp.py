@@ -29,6 +29,14 @@ from .snapshot import (
 CDP_STARTUP_TIMEOUT_SECONDS = int(os.environ.get("MONITOR_CAPTURE_CDP_STARTUP_TIMEOUT_SECONDS", "20"))
 
 
+def _has_browser_shared_memory() -> bool:
+    try:
+        filesystem = os.statvfs("/dev/shm")
+        return filesystem.f_bavail * filesystem.f_frsize >= 128 * 1024**2
+    except (AttributeError, OSError):
+        return False
+
+
 def _browser_binary() -> str:
     explicit = os.environ.get("SNAPSHOT_BROWSER", "").strip()
     if explicit:
@@ -115,11 +123,12 @@ class _Page:
     def wait_for_timeout(self, milliseconds):
         time.sleep(milliseconds / 1000)
 
-    def screenshot(self, path, **_options):
+    def screenshot(self, **_options):
         result = self.call("Page.captureScreenshot", {
             "format": "png", "captureBeyondViewport": False, "fromSurface": True,
+            "optimizeForSpeed": True,
         }, timeout=15)
-        Path(path).write_bytes(base64.b64decode(result["data"], validate=True))
+        return base64.b64decode(result["data"], validate=True)
 
     def navigate(self, url):
         self.status = None
@@ -192,12 +201,14 @@ def capture(
             with tempfile.TemporaryFile() as browser_log:
                 browser_args = [
                     _browser_binary(), "--headless", "--no-sandbox", "--disable-gpu",
-                    "--disable-dev-shm-usage", "--disable-background-networking",
+                    "--disable-background-networking",
                     "--disable-extensions", "--disable-sync", "--no-first-run", "--mute-audio",
                     "--renderer-process-limit=1", "--disk-cache-size=16777216",
                     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
                     f"--user-data-dir={profile}", f"--window-size={width},{height}", "about:blank",
                 ]
+                if not _has_browser_shared_memory():
+                    browser_args.append("--disable-dev-shm-usage")
                 if constrained:
                     browser_args.append("--js-flags=--max-old-space-size=128")
                 browser = subprocess.Popen(
@@ -207,7 +218,14 @@ def capture(
                 try:
                     port_file = Path(profile) / "DevToolsActivePort"
                     deadline = time.monotonic() + CDP_STARTUP_TIMEOUT_SECONDS
-                    while not port_file.is_file():
+                    while True:
+                        try:
+                            address = port_file.read_text().splitlines()
+                        except OSError:
+                            address = []
+                        if len(address) >= 2 and address[0].isdigit() and address[1].startswith("/"):
+                            port, endpoint = address[:2]
+                            break
                         if browser.poll() is not None:
                             browser_log.seek(0)
                             raise RuntimeError(browser_log.read().decode(errors="replace")[-500:])
@@ -216,7 +234,6 @@ def capture(
                                 f"Chromium DevTools did not start within {CDP_STARTUP_TIMEOUT_SECONDS} seconds"
                             )
                         time.sleep(0.05)
-                    port, endpoint = port_file.read_text().splitlines()[:2]
                     socket = websocket.create_connection(
                         f"ws://127.0.0.1:{port}{endpoint}", timeout=6,
                         suppress_origin=True, enable_multithread=False, http_no_proxy=["127.0.0.1"],

@@ -45,7 +45,7 @@ jobs:
       - name: Verify API health, memory pressure, timeout cleanup and live Plaud PNG
         timeout-minutes: 4
         run: |
-          docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
+          docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 --shm-size=1g \
             --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
             -e MONITOR_TEST_SNAPSHOT_URL=https://www.plaud.ai/ \
             -e MONITOR_CAPTURE_MIN_AVAILABLE_MB=320 \
