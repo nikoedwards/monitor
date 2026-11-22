@@ -2,14 +2,36 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
+from server.ai import LlmError
 from server.domains.content import (
     _marketing_channel_snapshot,
     _marketing_fallback_summary,
     _marketing_previous_window,
+    marketing_overview_summary,
 )
 
 
 class MarketingOverviewTests(unittest.TestCase):
+    @patch("server.domains.content._marketing_overview_payload")
+    @patch("server.domains.content.ai.get_cached_summary", return_value={"summary": "已有分析"})
+    def test_cached_summary_does_not_rebuild_overview(self, _cache, payload):
+        result = marketing_overview_summary("brand-1", start_date="2026-10-01", end_date="2026-10-30", conn=object())
+        self.assertEqual({"summary": "已有分析", "cached": True}, result)
+        payload.assert_not_called()
+
+    @patch("server.domains.content.ai.put_cached_summary")
+    @patch("server.domains.content.ai.summarize_marketing_overview", side_effect=LlmError("temporary error"))
+    @patch("server.domains.content.ai.is_configured", return_value=True)
+    @patch("server.domains.content._marketing_overview_payload", return_value={
+        "range": {"start": "2026-10-01", "end": "2026-10-30"},
+        "coverage": {}, "yesterday": {}, "signals": [], "modules": {},
+    })
+    def test_model_failure_returns_fallback_without_caching_it(self, _payload, _config, _model, save):
+        result = marketing_overview_summary("brand-1", start_date="2026-10-01", end_date="2026-10-30",
+                                            refresh=True, conn=object())
+        self.assertEqual("fallback", result["mode"])
+        save.assert_not_called()
+
     def test_previous_window_matches_equal_length(self):
         self.assertEqual(("2026-09-01", "2026-09-30"), _marketing_previous_window("2026-10-01", "2026-10-30"))
 

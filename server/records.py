@@ -433,7 +433,7 @@ def insert_record_if_new(conn: sqlite3.Connection, payload: dict) -> dict | None
     return insert_record(conn, payload)
 
 
-def record_to_dict(row: sqlite3.Row) -> dict:
+def record_to_dict(row: sqlite3.Row, *, include_sentiment_explanation: bool = True) -> dict:
     item = dict(row)
     item["topics"] = json.loads(item.pop("topics_json") or "[]")
     item["metrics"] = json.loads(item.pop("metrics_json") or "{}")
@@ -454,6 +454,8 @@ def record_to_dict(row: sqlite3.Row) -> dict:
         thumbnail = _youtube_thumbnail_from_url(item.get("url") or "")
         if thumbnail:
             item["metrics"]["thumbnail_url"] = thumbnail
+    if not include_sentiment_explanation:
+        return item
     analysis = analyze_text(f"{item.get('title') or ''} {item.get('body') or ''}")
     if item.get("sentiment") == analysis["sentiment"]:
         item["sentiment_explanation"] = analysis["sentiment_explanation"]

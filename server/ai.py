@@ -7,12 +7,17 @@ the browser. Uses stdlib urllib (no extra dependency).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger("uvicorn.error.monitor.ai")
 
 DEFAULTS = {
     "llm_base_url": "https://agent-api.shuiditech.com/api/v1/messages",
@@ -83,6 +88,15 @@ def is_configured(conn: sqlite3.Connection) -> bool:
     return bool(get_config(conn).get("llm_api_key"))
 
 
+@contextmanager
+def measure_preparation(stage: str):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        logger.info("AI preparation stage=%s elapsed_ms=%.1f", stage, (time.monotonic() - started) * 1000)
+
+
 def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeout: float = 90) -> str:
     if not cfg.get("llm_api_key"):
         raise LlmError("尚未配置大模型 Token，请先在设置中填写。")
@@ -96,9 +110,10 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeo
         "system": system,
         "messages": [{"role": "user", "content": content}],
     }
+    request_body = json.dumps(payload).encode("utf-8")
     request = Request(
         cfg["llm_base_url"] or DEFAULTS["llm_base_url"],
-        data=json.dumps(payload).encode("utf-8"),
+        data=request_body,
         method="POST",
         headers={
             "Authorization": f"Bearer {cfg['llm_api_key']}",
@@ -106,14 +121,23 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeo
             "Content-Type": "application/json",
         },
     )
+    started = time.monotonic()
+    headers_ms = None
+    outcome = "error"
     try:
         with urlopen(request, timeout=timeout) as response:
+            headers_ms = round((time.monotonic() - started) * 1000, 1)
             raw = response.read()
+        outcome = "received"
     except HTTPError as exc:
+        outcome = f"http_{exc.code}"
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise LlmError(f"大模型返回错误 {exc.code}: {detail}") from exc
     except (URLError, OSError) as exc:
         raise LlmError(f"调用大模型失败: {exc}") from exc
+    finally:
+        logger.info("AI model request model=%s outcome=%s request_bytes=%d headers_ms=%s elapsed_ms=%.1f",
+                    payload["model"], outcome, len(request_body), headers_ms, (time.monotonic() - started) * 1000)
 
     try:
         data = json.loads(raw.decode("utf-8", errors="replace"))

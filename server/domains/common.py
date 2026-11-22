@@ -115,7 +115,8 @@ def build_record_query(filters: dict) -> tuple[str, list]:
     return where, params
 
 
-def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> list[dict]:
+def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200, *,
+                  include_sentiment_explanation: bool = True) -> list[dict]:
     where, params = build_record_query(filters)
     requested = max(1, min(limit, 1000))
     rows = conn.execute(
@@ -178,7 +179,7 @@ def query_records(conn: sqlite3.Connection, filters: dict, limit: int = 200) -> 
                 relevance_record, brand_name
             ):
                 continue
-        item = record_to_dict(row)
+        item = record_to_dict(row, include_sentiment_explanation=include_sentiment_explanation)
         if row["channel"] == "creators" or row["data_type"] == "creator_post":
             brand_id = row["brand_id"] or ""
             if brand_id:

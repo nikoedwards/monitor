@@ -21,6 +21,7 @@ _LOCK = threading.Lock()
 _JOBS: dict[tuple[str, str], dict] = {}
 _TTL = 24 * 60 * 60
 logger = logging.getLogger(__name__)
+timing_logger = logging.getLogger("uvicorn.error.monitor.analysis_jobs")
 
 
 def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3.Connection], dict],
@@ -40,7 +41,7 @@ def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3
                 raise HTTPException(status_code=503, detail="分析任务较多，请稍后重试。")
             job = {"status": "running", "updated": now}
             _JOBS[job_key] = job
-            _EXECUTOR.submit(_generate, path, job, generate)
+            _EXECUTOR.submit(_generate, path, key.partition(":")[0], job, generate)
         if job is None:
             return {}
         return {**job.get("result", {}), "generation": {
@@ -48,7 +49,9 @@ def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3
         }}
 
 
-def _generate(path: str, job: dict, generate: Callable[[sqlite3.Connection], dict]) -> None:
+def _generate(path: str, kind: str, job: dict, generate: Callable[[sqlite3.Connection], dict]) -> None:
+    started = time.monotonic()
+    queue_ms = (started - job["updated"]) * 1000
     try:
         conn = sqlite3.connect(path, timeout=15, isolation_level=None, factory=ResilientConnection)
         try:
@@ -63,3 +66,6 @@ def _generate(path: str, job: dict, generate: Callable[[sqlite3.Connection], dic
         logger.exception("Background analysis failed")
         with _LOCK:
             job.update(status="failed", error="分析生成失败，请重试；已有结果仍可查看。", updated=time.monotonic())
+    finally:
+        timing_logger.info("AI background task kind=%s status=%s queue_ms=%.1f run_ms=%.1f",
+                           kind, job["status"], queue_ms, (time.monotonic() - started) * 1000)

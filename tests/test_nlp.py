@@ -25,9 +25,17 @@ class NlpTests(unittest.TestCase):
         self.assertIn("bad", result["sentiment_explanation"]["negative_terms"])
         self.assertIn("ads", result["topics"])
 
+    def test_invalid_first_occurrence_does_not_hide_a_valid_word(self):
+        result = analyze_text("badger, bad. great2, but not great.")
+        explanation = result["sentiment_explanation"]
+        self.assertEqual(["bad"], explanation["negative_terms"])
+        self.assertEqual(["great"], explanation["positive_terms"])
+        self.assertEqual(["not"], explanation["negation_terms"])
+
     def test_repairs_existing_false_positive_sentiment(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
         conn.execute(
             "CREATE TABLE records (id TEXT PRIMARY KEY, title TEXT, body TEXT, sentiment TEXT, sentiment_score REAL, intent TEXT, topics_json TEXT)"
         )

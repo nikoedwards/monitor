@@ -141,8 +141,9 @@ def compare_summary(conn, start, end, *, refresh=False, cached_only=False):
         ).fetchone() is None:
             return {"cache_miss": True, "cached": False, "range": _compare_window(start, end)}
     brands = conn.execute("SELECT * FROM brands ORDER BY is_primary DESC, name, id").fetchall()
-    packet = build_compare_packet(conn, brands, start, end)
-    fingerprint = hashlib.sha256((SYSTEM + PROMPT + json.dumps(packet, ensure_ascii=False, sort_keys=True)).encode()).hexdigest()
+    with ai.measure_preparation("compare-strategy"):
+        packet = build_compare_packet(conn, brands, start, end)
+        fingerprint = hashlib.sha256((SYSTEM + PROMPT + json.dumps(packet, ensure_ascii=False, sort_keys=True)).encode()).hexdigest()
     cache_key = key_prefix + fingerprint
     if not refresh:
         cached = ai.get_cached_summary(conn, cache_key)
