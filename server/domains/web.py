@@ -562,7 +562,11 @@ def check_monitor(conn: sqlite3.Connection, monitor: dict) -> dict:
         """
         UPDATE web_monitors
         SET last_check_at = ?, last_change_score = ?, last_change_summary = ?,
-            last_status = ?, last_error = ?, updated_at = ?
+            last_status = CASE WHEN next_snapshot_retry_at IS NOT NULL
+                AND snapshot_retry_count > 0 THEN 'error' ELSE ? END,
+            last_error = CASE WHEN next_snapshot_retry_at IS NOT NULL
+                AND snapshot_retry_count > 0 THEN last_error ELSE ? END,
+            updated_at = ?
         WHERE id = ?
         """,
         (now, max_score, summary, "ok" if checked else "error", "; ".join(errors)[:500], now, monitor["id"]),

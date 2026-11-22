@@ -694,6 +694,27 @@ class ArchiveFallbackTests(unittest.TestCase):
 
 
 class SnapshotSchedulingTests(unittest.TestCase):
+    def test_successful_text_check_does_not_clear_pending_screenshot_failure(self):
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        conn.execute('''CREATE TABLE web_monitors (
+            id TEXT, last_check_at TEXT, last_change_score REAL, last_change_summary TEXT,
+            last_status TEXT, last_error TEXT, updated_at TEXT,
+            next_snapshot_retry_at TEXT, snapshot_retry_count INTEGER)''')
+        conn.execute("INSERT INTO web_monitors VALUES ('monitor-1',NULL,0,'','error','renderer timeout',NULL,'2026-11-22T00:00:00+00:00',2)")
+        with patch.object(web_domain, 'fetch_page', return_value={'text':'Page content'}), patch.object(
+            web_domain, '_latest_valid_snapshot', return_value=None,
+        ):
+            result = web_domain.check_monitor(conn, {'id':'monitor-1','url':'https://example.com'})
+        row = dict(conn.execute('SELECT * FROM web_monitors').fetchone())
+        self.assertEqual(result['checked'], 1)
+        self.assertEqual(row['last_status'], 'error')
+        self.assertEqual(row['last_error'], 'renderer timeout')
+        self.assertEqual(row['snapshot_retry_count'], 2)
+        self.assertEqual(row['next_snapshot_retry_at'], '2026-11-22T00:00:00+00:00')
+        self.assertTrue(row['last_check_at'])
+        conn.close()
+
     def test_error_images_are_neither_reused_nor_used_as_baseline(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

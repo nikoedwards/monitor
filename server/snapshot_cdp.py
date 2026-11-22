@@ -39,6 +39,10 @@ _BACKGROUND_URLS = [
     "*://*.replay.io/*", "*://*.fullstory.com/*",
     "*://*.ptengine.com/*", "*://*.promptmonitor.io/*",
     "*://*.albss.com/*", "*://*.dwin1.com/*", "*/shopifycloud/perf-kit/*",
+    "*/wpm/*", "*web-pixels-manager*", "*web-pixels*",
+    "*/checkouts/*", "*://shop.app/*", "*/shopify_pay/*",
+    "*facebook-pixel*", "*applovin-shop-integration*", "*adtr-shopify*",
+    "*flying-pages.js*",
 ]
 
 
@@ -182,17 +186,9 @@ class _Page:
         return result
 
     def screenshot(self, path, **_options):
-        # Freeze page timers only after its application has rendered. Continuous
-        # storefront animation/analytics otherwise compete with rasterization.
-        was_disabled = getattr(self, 'scriptless', False)
-        self.call('Emulation.setScriptExecutionDisabled', {'value': True})
-        try:
-            result = self.call("Page.captureScreenshot", {
-                "format": "png", "captureBeyondViewport": False, "fromSurface": True,
-            }, timeout=15)
-        finally:
-            if not was_disabled:
-                self.call('Emulation.setScriptExecutionDisabled', {'value': False})
+        result = self.call("Page.captureScreenshot", {
+            "format": "png", "captureBeyondViewport": False, "fromSurface": True,
+        }, timeout=15)
         Path(path).write_bytes(base64.b64decode(result["data"], validate=True))
 
     def navigate(self, url):
@@ -236,7 +232,7 @@ def capture(
         240,
         min(
             _capture_chunk_height(0 if memory is None else memory),
-            420 if constrained else 900,
+            420 if emergency else 900,
         ),
     )
     browser = None
