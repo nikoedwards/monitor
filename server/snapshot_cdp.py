@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -43,6 +44,9 @@ _BACKGROUND_URLS = [
     "*/checkouts/*", "*://shop.app/*", "*/shopify_pay/*",
     "*facebook-pixel*", "*applovin-shop-integration*", "*adtr-shopify*",
     "*flying-pages.js*",
+    "*upcart-*", "*essential-cart-drawer*", "*affirm-cart*", "*lb-upsell*",
+    "*gift-card-pro*", "*airwallex-fraud-protection*", "*bixgrow*",
+    "*affliate-by-secomapp*", "*pushowl*",
 ]
 
 
@@ -109,6 +113,8 @@ class _Page:
         return self.sequence
 
     def call(self, method, params=None, timeout=12):
+        if os.environ.get('MONITOR_DIAGNOSTIC_LIVE_ROOT'):
+            print('CDP start '+method, file=sys.stderr, flush=True)
         identifier = self._send(method, params or {})
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -187,18 +193,7 @@ class _Page:
 
     def screenshot(self, path, **_options):
         if not getattr(self, 'scriptless', False):
-            self.evaluate("""() => new Promise(resolve => setTimeout(() => {
-          // Finish one-shot opacity reveals, leaving carousels and looping
-          // animations alone. Scroll-triggered fades must settle before PNG.
-          if (window.gsap?.globalTimeline) {
-            for (const tween of window.gsap.globalTimeline.getChildren(true,true,false)) {
-              if (!tween.repeat() && (tween.vars.opacity!==undefined || tween.vars.autoAlpha!==undefined)) {
-                tween.progress(1);
-              }
-            }
-          }
-          resolve(true);
-        }, 300))""")
+            self.wait_for_timeout(500)
         result = self.call("Page.captureScreenshot", {
             "format": "png", "captureBeyondViewport": False, "fromSurface": True,
         }, timeout=15)

@@ -1330,16 +1330,19 @@ def _run_snapshot_worker(
         env=env,
     )
     data = json.dumps(request, ensure_ascii=False).encode("utf-8")
+    last_trace = ''
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 outcome = "deadline"
-                return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止"}
+                return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止" + last_trace}
             try:
                 stdout, stderr = process.communicate(data, timeout=min(0.5, remaining))
                 break
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
+                if os.environ.get('MONITOR_DIAGNOSTIC_LIVE_ROOT') and exc.stderr:
+                    last_trace = '; worker trace: ' + exc.stderr.decode('utf-8', errors='replace')[-650:]
                 data = None
                 available = _available_memory_mb()
                 if available is not None:
