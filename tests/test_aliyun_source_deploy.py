@@ -108,6 +108,30 @@ class SourceDeploymentTests(unittest.TestCase):
         state = json.loads((self.state / "current.json").read_text())
         self.assertEqual(state["revision"], REVISION)
 
+    def test_access_code_is_persisted_for_restarts(self):
+        dotenv = self.project / ".env"
+        dotenv.write_bytes(b"OTHER_SETTING=kept\nMONITOR_ACCESS_CODE=old-code\n")
+        with patch.dict(os.environ, {"MONITOR_DEPLOY_ACCESS_CODE": "new-code"}):
+            self.deployer.deploy()
+        self.assertEqual(dotenv.read_bytes(), b"OTHER_SETTING=kept\nMONITOR_ACCESS_CODE=new-code\n")
+
+    def test_disabling_access_gate_removes_the_code(self):
+        dotenv = self.project / ".env"
+        dotenv.write_bytes(b"OTHER_SETTING=kept\nMONITOR_ACCESS_CODE=old-code\n")
+        with patch.dict(os.environ, {"MONITOR_DEPLOY_ACCESS_CODE": ""}):
+            self.deployer.deploy()
+        self.assertEqual(dotenv.read_bytes(), b"OTHER_SETTING=kept\n")
+
+    def test_failed_deploy_restores_previous_access_code(self):
+        dotenv = self.project / ".env"
+        before = b"MONITOR_ACCESS_CODE=old-code\n"
+        dotenv.write_bytes(before)
+        self.wait_ready.side_effect = [RuntimeError("candidate failed"), ()]
+        with patch.dict(os.environ, {"MONITOR_DEPLOY_ACCESS_CODE": "new-code"}):
+            with self.assertRaisesRegex(RuntimeError, "candidate failed"):
+                self.deployer.deploy()
+        self.assertEqual(dotenv.read_bytes(), before)
+
     def test_enable_scheduler_override_replaces_incident_pause(self):
         self.override.write_text(
             "services:\n"

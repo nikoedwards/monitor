@@ -141,6 +141,14 @@ npm run dev         # 终端 B → http://localhost:5173
 - 每次功能修改或 Bug 修复完成后，应先运行相关测试与 `npm run build`，必要时同步更新 README，然后提交并推送到 GitHub。
 - 推送后检查 GitHub Actions、`http://47.79.224.196/api/health` 和生产页面。
 
+### 公网访问口令
+
+在 GitHub Actions 的仓库 Secrets 中设置 `MONITOR_ACCESS_CODE`，再运行 **Deploy Monitor to Aliyun**。把原来的网址和同一个口令发给朋友即可。浏览器会保存 30 天的访问凭证。更换口令并重新发布后，旧凭证随即失效。删除 Secret 后重新发布即可关闭门槛。
+
+首页、API、静态资源和快照都由服务器拦截。健康检查 `/api/health` 继续只返回 `{"ok":true}`。脚本访问可发送 `Authorization: Bearer <口令>`。公网使用 HTTP 时，网络传输是明文的。
+
+本机 Docker Compose 可在 `.env` 设置同名变量。直接运行 Python 时通过进程环境传入，并在 FastAPI 端口打开构建后的站点。
+
 ### Codex 代码交付约定
 
 - Codex 完成任何代码修改后，默认必须运行与改动风险相匹配的测试或构建检查。
