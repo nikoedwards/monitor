@@ -217,24 +217,9 @@ class SourceDeployer:
             "--file",
             str(self.release_dockerfile),
         ]
-        try:
-            self.run(["docker", "image", "inspect", self.stable_image], timeout=30)
-        except CommandFailed:
-            pass
-        else:
-            # The stable image already contains Playwright, Chromium, and the
-            # Debian runtime packages. Reusing it avoids a slow CDN download
-            # on every release; the Dockerfile falls back to a full install if
-            # the cached runtime is incomplete.
-            # Reuse installed dependencies as the base, without recursively
-            # importing/exporting its inline cache. Cache metadata export can
-            # stall for minutes on the small production host.
-            command += [
-                "--build-arg",
-                f"BASE_IMAGE={self.stable_image}",
-                "--build-arg",
-                "REUSE_RUNTIME=1",
-            ]
+        # Rebuild from the pinned runtime base and reuse Docker's layer cache.
+        # Basing a release on the live image stacks layers on every deploy
+        # until overlayfs can no longer mount the candidate container.
         command.append(str(self.source_dir))
         self.run(
             command,
