@@ -26,6 +26,7 @@ from ..snapshot import (
     compare_visuals,
     SnapshotCaptureError,
     SnapshotCaptureBusy,
+    SnapshotResourceDeferred,
     text_hash,
     visual_comparison_image,
 )
@@ -56,6 +57,7 @@ DEFAULT_INTERVAL_MINUTES = 1440
 VISUAL_CHANGE_THRESHOLD = 0.025
 TEXT_CHANGE_THRESHOLD = 0.15
 SNAPSHOT_RETRY_DELAYS_MINUTES = (10, 30, 60, 180)
+SNAPSHOT_RESOURCE_RETRY_MINUTES = SNAPSHOT_RETRY_DELAYS_MINUTES[0]
 SNAPSHOT_RECOVERY_RETRY_MINUTES = 360
 SNAPSHOT_CIRCUIT_BREAKER_AFTER = 8
 SNAPSHOT_CIRCUIT_BREAKER_MINUTES = 1440
@@ -478,11 +480,16 @@ def _capture_monitor_pages(conn: sqlite3.Connection, monitor: dict, *, wait_for_
         else [monitor["url"]]
     )
     snapshots, errors = [], []
+    resource_deferred = False
     for url in urls:
         try:
             snapshots.append(_capture_one(conn, monitor, url, wait_for_browser=wait_for_browser))
         except SnapshotCaptureBusy:
             raise
+        except SnapshotResourceDeferred as exc:
+            errors.append(str(exc))
+            resource_deferred = True
+            break
         except FetchError as exc:
             errors.append(str(exc))
         except Exception as exc:
@@ -503,8 +510,12 @@ def _capture_monitor_pages(conn: sqlite3.Connection, monitor: dict, *, wait_for_
             (now, now, top_change[0], top_change[1], "; ".join(errors)[:500], now, now, monitor["id"]),
         )
     else:
-        failure_count = max(0, int(monitor.get("snapshot_retry_count") or 0)) + 1
-        retry_at = _snapshot_retry_at(failure_count, attempted_at).isoformat()
+        failure_count = max(0, int(monitor.get("snapshot_retry_count") or 0))
+        if resource_deferred:
+            retry_at = attempted_at + timedelta(minutes=SNAPSHOT_RESOURCE_RETRY_MINUTES)
+        else:
+            failure_count += 1
+            retry_at = _snapshot_retry_at(failure_count, attempted_at)
         conn.execute(
             """
             UPDATE web_monitors
@@ -513,7 +524,7 @@ def _capture_monitor_pages(conn: sqlite3.Connection, monitor: dict, *, wait_for_
                 last_snapshot_attempt_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (now, "; ".join(errors)[:500], failure_count, retry_at, now, now, monitor["id"]),
+            (now, "; ".join(errors)[:500], failure_count, retry_at.isoformat(), now, now, monitor["id"]),
         )
     return snapshots
 

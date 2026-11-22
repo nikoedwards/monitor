@@ -92,6 +92,10 @@ class SnapshotCaptureError(RuntimeError):
     """A rendered page is not a trustworthy visual snapshot and must not be persisted."""
 
 
+class SnapshotResourceDeferred(SnapshotCaptureError):
+    """Host pressure interrupted a capture that should be retried after cooldown."""
+
+
 class SnapshotCaptureBusy(RuntimeError):
     """A Chromium capture is already running in this process."""
 
@@ -1246,10 +1250,13 @@ def _isolated_playwright_capture(
     io_pressure = _io_pressure_percent()
     if io_pressure is not None and io_pressure >= CAPTURE_IO_FULL_LIMIT:
         logger.warning("Snapshot deferred host=%s io_full_avg10=%.1f%%", target, io_pressure)
-        return {"error": f"截图暂缓：主机 I/O 阻塞率为 {io_pressure:.1f}%"}
+        return {"error": f"截图暂缓：主机 I/O 阻塞率为 {io_pressure:.1f}%", "resource_deferred": True}
     if available is not None and available < CAPTURE_START_HEADROOM_MB:
         logger.warning("Snapshot deferred host=%s available_mib=%s", target, available)
-        return {"error": f"截图暂缓：可用内存 {available} MiB，低于启动余量 {CAPTURE_START_HEADROOM_MB} MiB"}
+        return {
+            "error": f"截图暂缓：可用内存 {available} MiB，低于启动余量 {CAPTURE_START_HEADROOM_MB} MiB",
+            "resource_deferred": True,
+        }
     started = time.monotonic()
     deadline = started + CAPTURE_JOB_TIMEOUT_SECONDS
     can_retry = sys.platform.startswith("linux")
@@ -1344,16 +1351,20 @@ def _run_snapshot_worker(
         "Snapshot start host=%s safe_mode=%s scriptless=%s available_mib=%s",
         target, request["safe_mode"], request["scriptless"], available,
     )
-    process = subprocess.Popen(
-        [sys.executable, "-m", "server.snapshot_worker"],
-        cwd=str(ROOT),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=(os.name != "nt"),
-        env=env,
-    )
-    data = json.dumps(request, ensure_ascii=False).encode("utf-8")
+    # After communicate() times out, POSIX cannot resume a partially sent
+    # stdin pipe on later polls. Give the child a complete, seekable stdin.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", dir=staging) as worker_input:
+        json.dump(request, worker_input, ensure_ascii=False)
+        worker_input.seek(0)
+        process = subprocess.Popen(
+            [sys.executable, "-m", "server.snapshot_worker"],
+            cwd=str(ROOT),
+            stdin=worker_input,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=(os.name != "nt"),
+            env=env,
+        )
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -1361,10 +1372,9 @@ def _run_snapshot_worker(
                 outcome = "deadline"
                 return {"error": f"隔离截图进程超过本次渲染时限{stage_hint()}，已强制终止", "retry_reason": "deadline"}
             try:
-                stdout, stderr = process.communicate(data, timeout=min(0.5, remaining))
+                stdout, stderr = process.communicate(timeout=min(0.5, remaining))
                 break
             except subprocess.TimeoutExpired as exc:
-                data = None
                 stderr = exc.stderr or stderr
                 available = _available_memory_mb()
                 if available is not None:
@@ -1374,11 +1384,15 @@ def _run_snapshot_worker(
                         return {
                             "error": f"截图已结束以保护服务器：可用内存 {available} MiB，低于保留量 {CAPTURE_RESERVE_MB} MiB",
                             "retry_reason": "memory_reserve",
+                            "resource_deferred": True,
                         }
                 io_pressure = _io_pressure_percent()
                 if io_pressure is not None and io_pressure >= CAPTURE_IO_FULL_LIMIT:
                     outcome = "io_pressure"
-                    return {"error": f"截图已结束以保护服务器：主机 I/O 阻塞率为 {io_pressure:.1f}%"}
+                    return {
+                        "error": f"截图已结束以保护服务器：主机 I/O 阻塞率为 {io_pressure:.1f}%{stage_hint()}",
+                        "resource_deferred": True,
+                    }
         if process.returncode:
             detail = stderr or stdout or f"worker exit {process.returncode}".encode()
             return {"error": detail.decode("utf-8", errors="replace").strip()[-500:]}
@@ -1688,6 +1702,8 @@ def _capture_artifacts_unlocked(
         png_path.unlink(missing_ok=True)
         html_path.unlink(missing_ok=True)
         error = (pw_result or {}).get("error", "") or "隔离截图进程不可用"
+        if (pw_result or {}).get("resource_deferred"):
+            raise SnapshotResourceDeferred(error)
         raise SnapshotCaptureError(f"浏览器截图失败：{error}")
 
     if prefetch_error:
