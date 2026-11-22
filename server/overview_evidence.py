@@ -57,7 +57,7 @@ def _diverse(rows, limit, key):
     return selected
 
 
-def build_overview_evidence(conn, brand_id, payload):
+def build_overview_evidence(conn, brand_id, payload, *, record_sources=None):
     window = payload["range"]
     start, end, previous_start = window["start"], window["end"], window["previous_start"]
     span = min(7, (date.fromisoformat(end) - date.fromisoformat(start)).days + 1)
@@ -91,7 +91,7 @@ def build_overview_evidence(conn, brand_id, payload):
         ("marketing", "social"), ("marketing", "community"),
         ("marketing", "creators"), ("marketing", "ads"), ("hiring", None),
     ]
-    for dimension, channel in source_groups:
+    for dimension, channel in source_groups if record_sources is None else record_sources:
         source = f"{dimension}/{channel or 'all'}"
         records = query_records(conn, {"brand_id": brand_id, "dimension": dimension, "channel": channel,
                                       "start_date": min(previous_start, baseline_start), "end_date": end},
