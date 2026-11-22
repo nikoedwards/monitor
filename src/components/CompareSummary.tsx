@@ -27,8 +27,7 @@ interface Finding {
 }
 
 interface StrategySummary {
-  cache_miss?: boolean;
-  mode?: "ai" | "empty";
+  mode: "ai" | "empty";
   cached: boolean;
   summary: string;
   range: { start: string; end: string; previous_start: string; previous_end: string };
@@ -45,6 +44,17 @@ interface StrategySummary {
   opportunities: Finding[];
   risks: Finding[];
   caveats: string[];
+}
+
+type StrategyReply = (StrategySummary | { mode?: undefined; cache_miss?: true }) & {
+  generation?: { status: "running" | "completed" | "failed"; error?: string };
+};
+
+function keepPreviousSummary(previous: StrategyReply | undefined, next: StrategyReply): StrategyReply {
+  if (previous?.mode && !next.mode && next.generation) {
+    return { ...previous, generation: next.generation };
+  }
+  return next;
 }
 
 function FindingCard({ item }: { item: Finding }) {
@@ -90,21 +100,32 @@ export function CompareSummary({ range, brandIds }: { range: TimeRange; brandIds
   const qc = useQueryClient();
   const queryKey = ["compare-strategy-v1", range.start_date, range.end_date, [...brandIds].sort().join(",")];
   const params = { start_date: range.start_date, end_date: range.end_date };
+  const endpoint = "/api/compare/summary";
   const cached = useQuery({
     queryKey,
-    queryFn: () => api.get<StrategySummary>(`/api/compare/summary${qs({ ...params, cached_only: true })}`),
+    queryFn: async () => {
+      const previous = qc.getQueryData<StrategyReply>(queryKey);
+      if (previous?.generation?.status !== "running") {
+        return api.get<StrategyReply>(`${endpoint}${qs({ ...params, cached_only: true })}`);
+      }
+      const next = await api.get<StrategyReply>(`${endpoint}${qs({ ...params, background: true })}`);
+      return keepPreviousSummary(previous, next.generation ? next : {
+        generation: { status: "failed", error: "生成任务已中断，请重试。" },
+      });
+    },
     staleTime: 60_000,
     refetchOnWindowFocus: false,
+    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 3000 : false,
     retry: false,
   });
   const generate = useMutation({
     mutationKey: queryKey,
-    mutationFn: () => api.get<StrategySummary>(`/api/compare/summary${qs({ ...params, refresh: true })}`),
-    onSuccess: (result) => qc.setQueryData(queryKey, result),
+    mutationFn: () => api.get<StrategyReply>(`${endpoint}${qs({ ...params, refresh: true, background: true })}`),
+    onSuccess: (result) => qc.setQueryData<StrategyReply>(queryKey, (previous) => keepPreviousSummary(previous, result)),
   });
-  const data = cached.data?.cache_miss ? undefined : cached.data;
-  const error = generate.error || cached.error;
-  const pending = generate.isPending;
+  const data = cached.data?.mode ? cached.data : undefined;
+  const error = generate.error?.message || cached.error?.message || cached.data?.generation?.error;
+  const pending = generate.isPending || cached.data?.generation?.status === "running";
 
   return (
     <Card className="space-y-5">
@@ -126,7 +147,7 @@ export function CompareSummary({ range, brandIds }: { range: TimeRange; brandIds
         </div>
       </div>
 
-      {error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{error.message}</p>}
+      {error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
       {!data && !pending && <div className="rounded-lg p-4" style={{ background: "var(--bg-soft)" }}>
         <p className="text-[14px] font-medium" style={{ color: "var(--ink)" }}>这段时间，行业的竞争重心发生了什么变化？</p>
         <p className="text-[13px] leading-relaxed mt-1" style={{ color: "var(--mute)" }}>{cached.isFetching ? "正在读取此时间范围的总结…" : "结合各品牌的真实动作和前期对照，梳理行业共性、品牌策略分化、机会与风险。切换时间后，分析范围同步更新。"}</p>
