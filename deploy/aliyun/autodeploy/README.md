@@ -6,9 +6,10 @@ tests before it contacts production.
 
 GitHub adds the validated frontend `dist/` to a `git archive` for the exact
 commit and sends it to `/opt/monitor/.deploy-src/<commit>`. The server builds the
-Python runtime image locally with `Dockerfile.release`, so it reuses the current
-runtime dependency layers without repeating `npm ci`, and large images do not
-have to pass through the Actions SSH connection.
+Python runtime image locally with `Dockerfile.release`, starting from a pinned
+Python base and caching the installed runtime dependencies. This keeps image
+depth stable across releases. The server uses the frontend build from Actions,
+and large images do not have to pass through the Actions SSH connection.
 
 `deploy_source.py` owns the production transaction:
 

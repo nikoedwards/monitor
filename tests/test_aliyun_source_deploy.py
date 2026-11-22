@@ -198,11 +198,12 @@ class SourceDeploymentTests(unittest.TestCase):
         self.assertEqual((self.project / "docker-compose.yml").read_bytes(), self.old_base)
         self.assertFalse(list(self.state.glob("release-*")))
 
-    def test_image_build_streams_progress_with_an_extended_timeout(self):
-        with patch.object(self.deployer, "run", side_effect=("", "")) as run:
+    def test_image_build_does_not_extend_the_stable_image(self):
+        with patch.object(self.deployer, "run") as run:
             module.SourceDeployer.build_image(self.deployer)
 
-        build_call = run.call_args_list[1]
+        run.assert_called_once()
+        build_call = run.call_args
         self.assertEqual(build_call.kwargs["timeout"], module.IMAGE_BUILD_TIMEOUT)
         self.assertEqual(
             build_call.kwargs["env"],
@@ -211,7 +212,8 @@ class SourceDeploymentTests(unittest.TestCase):
         self.assertTrue(build_call.kwargs["stream_output"])
         self.assertNotIn("BUILDKIT_INLINE_CACHE=1", build_call.args[0])
         self.assertNotIn("--cache-from", build_call.args[0])
-        self.assertIn(f"BASE_IMAGE={self.deployer.stable_image}", build_call.args[0])
+        self.assertNotIn("--build-arg", build_call.args[0])
+        self.assertNotIn(self.deployer.stable_image, build_call.args[0])
 
     def test_run_timeout_terminates_the_command_process_group(self):
         with self.assertRaises(module.CommandTimedOut):
