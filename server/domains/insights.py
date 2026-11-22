@@ -81,7 +81,7 @@ def _summary_records(
             records = [record for record in records if record.get("voice_source") in selected]
         if channel:
             records = [record for record in records if record.get("channel") == channel]
-        return _filter_summary_records(records, filters)[:150]
+        return _filter_summary_records(records, filters)
     filters = filters or {}
     records = query_records(
         conn,
@@ -419,7 +419,9 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         "region": region, "data_type": data_type,
     }.items() if value not in (None, "")}
     filter_key = json.dumps(filters, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    cache_key = "insights:" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
+    is_voice = dimension == "voc"
+    namespace = "insights-voc-v2" if is_voice else "insights"
+    cache_key = namespace + ":" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
     if not refresh:
         cached = ai.get_cached_summary(conn, cache_key)
         if cached is not None:
@@ -430,13 +432,30 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
     with ai.measure_preparation("insights"):
         records = _summary_records(conn, brand_id, dimension, channel, start, end, filters)
-    if not records:
+    if not records and not is_voice:
         return {"summary": "所选时间范围与筛选条件下暂无数据，无法生成总结。", "highlights": [], "themes": [], "sentiment": {}, "representative": [], "record_count": 0, "range": {"start": start, "end": end}, "filters": filters}
     try:
-        result = ai.summarize_records(conn, records, {"start": start, "end": end, "channel": channel, "dimension": dimension, "filters": filters})
+        if is_voice:
+            from ..voice_insights import summarize_voice
+
+            cross_domain = {}
+            if brand_id and records:
+                with ai.measure_preparation("voice-cross-domain"):
+                    previous_start, previous_end = _previous_window(start, end)
+                    market = _market_module(conn, brand_id, start, end, None)
+                    cross_domain = build_overview_evidence(conn, brand_id, {
+                        "range": {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end},
+                        "modules": {"market": market},
+                        "coverage": {},
+                        "kpis": {},
+                    }, record_sources=(("marketing", "media"), ("marketing", "ads"), ("hiring", None)))
+            result = summarize_voice(conn, records, start, end, cross_domain)
+        else:
+            result = ai.summarize_records(conn, records, {"start": start, "end": end, "channel": channel, "dimension": dimension, "filters": filters})
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    result["record_count"] = len(records)
+    if not is_voice:
+        result["record_count"] = len(records)
     result["range"] = {"start": start, "end": end}
     result["filters"] = filters
     result["cached"] = False

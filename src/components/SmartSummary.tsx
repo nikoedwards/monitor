@@ -6,6 +6,7 @@ import { fmtNum } from "../lib/format";
 import { dailyPersistentTaskKey, persistTaskValue, PERSISTENT_TASK_EVENT, readPersistentTask } from "../lib/persistentTask";
 import { AsyncProgress, Badge, Button } from "./ui";
 import { OverviewResearch } from "./OverviewResearch";
+import { VoiceSummaryOpening } from "./VoiceSummaryOpening";
 
 function usePersistentSummary<T>(key: string, fetched: T | undefined): T | null {
   const [cached, setCached] = useState<T | null>(() => {
@@ -157,9 +158,10 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
   );
 }
 
-export function SmartSummary({ brandId, dimension, channel, range, filters, label = "智能总结" }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; filters?: SummaryFilters; label?: string }) {
+export function SmartSummary({ brandId, dimension, channel, range, filters, label = "智能总结", sourceLabels }: { brandId?: string; dimension?: string; channel?: string; range: TimeRange; filters?: SummaryFilters; label?: string; sourceLabels?: Record<string, string> }) {
   const summarize = useInsightsSummary(brandId, dimension, channel, range, filters);
   const data = summarize.data;
+  const voiceOpening = dimension === "voc" ? data?.voice_opening : undefined;
 
   const run = () => {
     if (brandId) summarize.generate.mutate({ refresh: !!summarize.data });
@@ -185,9 +187,11 @@ export function SmartSummary({ brandId, dimension, channel, range, filters, labe
 
       {data && (
         <div className="mt-4 space-y-4">
-          {data.summary && <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{data.summary}</p>}
+          {voiceOpening ? (
+            <VoiceSummaryOpening summary={data.summary} sentiment={data.sentiment} opening={voiceOpening} recordCount={data.record_count} sourceLabels={sourceLabels} />
+          ) : data.summary && <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{data.summary}</p>}
 
-          {data.sentiment && (data.sentiment.overall || data.sentiment.positive != null) && (
+          {!voiceOpening && data.sentiment && (data.sentiment.overall || data.sentiment.positive != null) && (
             <div className="flex items-center gap-2 flex-wrap">
               {data.sentiment.overall && <Badge tone={data.sentiment.overall === "negative" ? "negative" : data.sentiment.overall === "positive" ? "positive" : "neutral"}>整体 {data.sentiment.overall}</Badge>}
               {data.sentiment.positive != null && <span className="text-[12px]" style={{ color: "var(--mute)" }}>正 {fmtNum(data.sentiment.positive)} · 中 {fmtNum(data.sentiment.neutral || 0)} · 负 {fmtNum(data.sentiment.negative || 0)}</span>}

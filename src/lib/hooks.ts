@@ -456,8 +456,9 @@ export function useInsightsSummary(brandId?: string, dimension?: string, channel
   const rp = rangeParams(range);
   const filterParams = { ...filters, sources: filters.sources?.join(","), platforms: filters.platforms?.join(",") };
   const queryClient = useQueryClient();
-  const queryKey = ["insights-summary", brandId, dimension, channel, rp, filterParams];
-  const storageKey = persistentTaskKey("insights-summary", [brandId, dimension, channel, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
+  const namespace = dimension === "voc" ? "insights-summary-voc-v2" : "insights-summary";
+  const queryKey = [namespace, brandId, dimension, channel, rp, filterParams];
+  const storageKey = persistentTaskKey(namespace, [brandId, dimension, channel, rp.start_date, rp.end_date, JSON.stringify(filterParams)]);
   const query = useQuery({
     queryKey,
     queryFn: () => api.get<any>(`/api/insights/summary${qs({ brand_id: brandId, dimension, channel, cached_only: true, ...filterParams, ...rp })}`),
