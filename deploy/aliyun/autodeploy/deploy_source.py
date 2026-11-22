@@ -40,6 +40,8 @@ class CommandTimedOut(RuntimeError):
 
 MIN_RESTART_HEADROOM = 3 * 1024**3
 IMAGE_BUILD_TIMEOUT = 35 * 60
+RUNTIME_BASE_IMAGE = "monitor-intelligence-hub:runtime-base"
+MAX_REUSABLE_RUNTIME_LAYERS = 40
 MONITOR_MEMORY_LIMIT = "640m"
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_HEADER_BYTES = 100
@@ -204,6 +206,37 @@ class SourceDeployer:
                 f"Monitor Compose image is {monitor_image!r}, expected {self.stable_image!r}"
             )
 
+    def shallow_runtime_image(self, references):
+        for reference in references:
+            try:
+                layers = int(self.run(
+                    ["docker", "image", "inspect", reference, "--format", "{{len .RootFS.Layers}}"],
+                    timeout=30,
+                ))
+            except (CommandFailed, ValueError):
+                continue
+            if 0 < layers <= MAX_REUSABLE_RUNTIME_LAYERS:
+                return reference
+        return None
+
+    def cached_runtime_image(self):
+        cached = self.shallow_runtime_image((RUNTIME_BASE_IMAGE, self.stable_image))
+        if cached:
+            return cached
+
+        # Existing release images can avoid a cold Chromium install when the
+        # live image itself has grown too deep for an OverlayFS mount.
+        try:
+            tags = self.run(
+                ["docker", "image", "ls", "monitor-intelligence-hub", "--format", "{{.Tag}}"],
+                timeout=30,
+            ).splitlines()
+        except CommandFailed:
+            return None
+        return self.shallow_runtime_image(
+            f"monitor-intelligence-hub:{tag}" for tag in tags if re.fullmatch(r"[0-9a-f]{40}", tag)
+        )
+
     def build_image(self):
         command = [
             "docker",
@@ -217,24 +250,9 @@ class SourceDeployer:
             "--file",
             str(self.release_dockerfile),
         ]
-        try:
-            self.run(["docker", "image", "inspect", self.stable_image], timeout=30)
-        except CommandFailed:
-            pass
-        else:
-            # The stable image already contains Playwright, Chromium, and the
-            # Debian runtime packages. Reusing it avoids a slow CDN download
-            # on every release; the Dockerfile falls back to a full install if
-            # the cached runtime is incomplete.
-            # Reuse installed dependencies as the base, without recursively
-            # importing/exporting its inline cache. Cache metadata export can
-            # stall for minutes on the small production host.
-            command += [
-                "--build-arg",
-                f"BASE_IMAGE={self.stable_image}",
-                "--build-arg",
-                "REUSE_RUNTIME=1",
-            ]
+        runtime_base = self.cached_runtime_image()
+        if runtime_base:
+            command += ["--build-arg", f"BASE_IMAGE={runtime_base}", "--build-arg", "REUSE_RUNTIME=1"]
         command.append(str(self.source_dir))
         self.run(
             command,
@@ -242,6 +260,10 @@ class SourceDeployer:
             env={"DOCKER_BUILDKIT": "1"},
             stream_output=True,
         )
+        # Pin a low-layer base so successful deploys do not inherit one
+        # another's application layers. The live and rollback tags stay separate.
+        if runtime_base != RUNTIME_BASE_IMAGE:
+            self.tag(runtime_base or self.image, RUNTIME_BASE_IMAGE)
 
     def image_id(self, reference):
         return self.run(

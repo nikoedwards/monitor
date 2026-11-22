@@ -199,7 +199,7 @@ class SourceDeploymentTests(unittest.TestCase):
         self.assertFalse(list(self.state.glob("release-*")))
 
     def test_image_build_streams_progress_with_an_extended_timeout(self):
-        with patch.object(self.deployer, "run", side_effect=("", "")) as run:
+        with patch.object(self.deployer, "run", side_effect=("12", "")) as run:
             module.SourceDeployer.build_image(self.deployer)
 
         build_call = run.call_args_list[1]
@@ -211,7 +211,35 @@ class SourceDeploymentTests(unittest.TestCase):
         self.assertTrue(build_call.kwargs["stream_output"])
         self.assertNotIn("BUILDKIT_INLINE_CACHE=1", build_call.args[0])
         self.assertNotIn("--cache-from", build_call.args[0])
-        self.assertIn(f"BASE_IMAGE={self.deployer.stable_image}", build_call.args[0])
+        self.assertIn(f"BASE_IMAGE={module.RUNTIME_BASE_IMAGE}", build_call.args[0])
+        self.tag.assert_not_called()
+
+    def test_deep_runtime_uses_and_pins_a_shallow_previous_release(self):
+        historical = "a" * 40
+        with patch.object(self.deployer, "run", side_effect=(
+            module.CommandFailed("missing pinned runtime"),
+            "120",
+            f"rollback\n{historical}",
+            "18",
+            "",
+        )) as run:
+            module.SourceDeployer.build_image(self.deployer)
+
+        base = f"monitor-intelligence-hub:{historical}"
+        self.assertIn(f"BASE_IMAGE={base}", run.call_args_list[-1].args[0])
+        self.tag.assert_called_once_with(base, module.RUNTIME_BASE_IMAGE)
+
+    def test_missing_shallow_runtime_builds_and_pins_a_fresh_base(self):
+        with patch.object(self.deployer, "run", side_effect=(
+            module.CommandFailed("missing pinned runtime"),
+            "120",
+            "",
+            "",
+        )) as run:
+            module.SourceDeployer.build_image(self.deployer)
+
+        self.assertNotIn("--build-arg", run.call_args_list[-1].args[0])
+        self.tag.assert_called_once_with(self.deployer.image, module.RUNTIME_BASE_IMAGE)
 
     def test_run_timeout_terminates_the_command_process_group(self):
         with self.assertRaises(module.CommandTimedOut):
