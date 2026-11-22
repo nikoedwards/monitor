@@ -421,7 +421,7 @@ def insights_summary(brand_id: str | None = None, dimension: str | None = None, 
     filter_key = json.dumps(filters, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     namespace = "insights-voc-v2" if dimension == "voc" else "insights"
     cache_key = namespace + ":" + "|".join((brand_id or "", dimension or "", channel or "", start, end, filter_key))
-    background = background and dimension == "marketing"
+    background = background and dimension in {"marketing", "voc"}
     cached = ai.get_cached_summary(conn, cache_key) if background or not refresh else None
     snapshot = {**cached, "cached": True} if cached is not None else {
         "cache_miss": True, "cached": False, "range": {"start": start, "end": end},

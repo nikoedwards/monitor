@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import unittest
+from contextlib import closing
 from unittest.mock import patch
 
 from server import ai
@@ -11,7 +12,7 @@ from server.voice_insights import summarize_voice
 
 class VoiceInsightsTests(unittest.TestCase):
     def test_scoped_opening_uses_real_counts_and_resolves_cross_domain_evidence(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn:
             conn.row_factory = sqlite3.Row
             conn.executescript(SCHEMA)
             conn.execute("INSERT INTO brands (id,name,created_at,updated_at) VALUES ('b','Nova','2026-10-01','2026-10-01')")
@@ -31,7 +32,8 @@ class VoiceInsightsTests(unittest.TestCase):
                 "VALUES ('w','m','b','2026-10-23','https://example.com/nova','Nova 产品页','主打说话人标签','2026-10-23')"
             )
 
-            def mock_model(_config, _system, prompt):
+            def mock_model(_config, _system, prompt, *, timeout):
+                self.assertGreater(timeout, 90)
                 data = json.loads(prompt.split("\n分析资料：\n", 1)[1])
                 self.assertEqual({"positive": 1, "negative": 2, "neutral": 0}, data["sentiment_counts"])
                 self.assertEqual({"record:a", "record:b", "record:c"}, {r["id"] for r in data["feedback"]})
@@ -68,6 +70,23 @@ class VoiceInsightsTests(unittest.TestCase):
             self.assertEqual(["record:a", "web:w"], [item["id"] for item in insight["evidence"]])
             self.assertEqual("https://example.com/nova", insight["evidence"][1]["url"])
             self.assertTrue(insights_summary(**args, cached_only=True)["cached"])
+
+    def test_voice_background_request_starts_and_polls_the_same_scoped_job(self):
+        options = {"brand_id": "b", "dimension": "voc", "sources": "app_reviews",
+                   "start_date": "2026-10-24", "end_date": "2026-11-22", "background": True, "conn": None}
+        with patch.object(ai, "get_cached_summary", return_value=None), \
+             patch.object(ai, "is_configured", return_value=True), \
+             patch("server.domains.insights.analysis_job", return_value={"generation": {"status": "running"}}) as job:
+            started = insights_summary(**options)
+            polled = insights_summary(**options, cached_only=True)
+        self.assertEqual("running", started["generation"]["status"])
+        self.assertEqual(started, polled)
+        self.assertEqual(2, job.call_count)
+        begin, poll = job.call_args_list
+        self.assertTrue(begin.kwargs["start"])
+        self.assertFalse(poll.kwargs["start"])
+        self.assertEqual(begin.args[1], poll.args[1])
+        self.assertIn('"sources":"app_reviews"', begin.args[1])
 
     def test_official_and_sponsored_posts_alone_do_not_produce_a_feedback_summary(self):
         records = [
