@@ -129,7 +129,7 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeo
         "system": system,
         "messages": [{"role": "user", "content": content}],
     }
-    request_body = json.dumps(payload).encode("utf-8")
+    request_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     request = Request(
         cfg["llm_base_url"] or DEFAULTS["llm_base_url"],
         data=request_body,
@@ -153,6 +153,7 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeo
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise LlmError(f"大模型返回错误 {exc.code}: {detail}") from exc
     except (URLError, OSError) as exc:
+        outcome = type(getattr(exc, "reason", exc)).__name__
         raise LlmError(f"调用大模型失败: {exc}") from exc
     finally:
         logger.info("AI model request model=%s outcome=%s request_bytes=%d headers_ms=%s elapsed_ms=%.1f",
@@ -330,13 +331,22 @@ OVERVIEW_SUMMARY_PROMPT = """研究周期：{start} 至 {end}。请回答：这�
 }}"""
 
 
-def summarize_overview(conn: sqlite3.Connection, overview: dict, *, timeout: float = 90) -> dict:
+def summarize_overview(conn: sqlite3.Connection, overview: dict, *, timeout: float = 240) -> dict:
     """Generate a cross-dimension executive summary from normalized evidence."""
     context = overview.get("range") or {}
+    # Citations are resolved against the full evidence packet after generation.
+    model_evidence = []
+    for item in overview["evidence"]:
+        excerpt = {key: value for key, value in item.items()
+                   if key != "url" and value not in (None, "", [], {})}
+        if "detail" in excerpt:
+            excerpt["detail"] = excerpt["detail"][:480]
+        model_evidence.append(excerpt)
+    model_overview = {**overview, "evidence": model_evidence}
     prompt = OVERVIEW_SUMMARY_PROMPT.format(
         start=context.get("start") or "",
         end=context.get("end") or "",
-        overview=json.dumps(overview, ensure_ascii=False),
+        overview=json.dumps(model_overview, ensure_ascii=False, separators=(",", ":")),
     )
     text = call_llm(get_config(conn), OVERVIEW_SUMMARY_SYSTEM, prompt, timeout=timeout)
     try:
