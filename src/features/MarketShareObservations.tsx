@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronRight, ExternalLink } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
-import { Badge, Card, EmptyState, SectionTitle, Select, Spinner } from "../components/ui";
+import { Card, EmptyState, SectionTitle, Select, Spinner } from "../components/ui";
 import type { AppMetric, AppObservation, BrandMetric, BrandObservations, MarketShareResponse } from "../lib/api";
 import { useBrands, useMarketObservations } from "../lib/hooks";
 import { useTimeRange, type TimeRange } from "../lib/timeRange";
@@ -29,6 +29,11 @@ function countryLabel(code: string) {
 
 function numberText(value?: number | null) {
   return value == null ? "—" : numberFormat.format(value);
+}
+
+function observationDomain([min, max]: readonly [number, number]): [number, number] {
+  const margin = Math.max(1, (max - min) * 0.1);
+  return [Math.max(0, Math.floor(min - margin)), Math.ceil(max + margin)];
 }
 
 function appScope(app: AppObservation) {
@@ -88,7 +93,7 @@ function ObservationTrend({ dates, metrics, hint }: {
     <Card>
       <SectionTitle
         title="每日趋势"
-        subtitle={hint}
+        subtitle={`${hint} 纵轴按当前指标的数值范围缩放。`}
         action={
           <Select value={metric.key} onChange={(event) => setMetricKey(event.target.value)} aria-label="趋势指标">
             {available.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
@@ -99,7 +104,7 @@ function ObservationTrend({ dates, metrics, hint }: {
         <LineChart data={points} margin={{ top: 12, right: 16, left: 18, bottom: 4 }}>
           <CartesianGrid stroke="var(--hairline)" strokeDasharray="3 3" vertical={false} />
           <XAxis type="number" dataKey="time" scale="utc" domain={["dataMin", "dataMax"]} tickFormatter={(value) => dateLabel(value).slice(5)} tick={AXIS_STYLE} />
-          <YAxis width={68} tickFormatter={numberText} tick={AXIS_STYLE} />
+          <YAxis domain={observationDomain} allowDecimals={false} width={68} tickFormatter={numberText} tick={AXIS_STYLE} />
           <Tooltip labelFormatter={(value) => typeof value === "number" ? dateLabel(value) : value} formatter={(value) => numberText(Number(value))} />
           <Line dataKey="value" name={metric.label} stroke="var(--accent)" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
         </LineChart>
@@ -162,7 +167,7 @@ export function MarketShareBreakdown({ brandIds, country, range, result }: {
       {query.isError && <p role="status" className="mb-3 text-[13px]" style={{ color: "var(--danger)" }}>原始数据加载失败，{query.error.message}</p>}
       {brands.length > 0 && (
         <ObservationTable
-          headers={["品牌", "综合份额", ...metrics.map(({ label }) => label), ...components.map(({ label }) => label), "覆盖度"]}
+          headers={["品牌", "综合份额", ...metrics.map(({ label }) => label), ...components.map(({ label }) => label)]}
           rows={brands.map((brand) => {
             const entry = estimates.get(brand.brand_id);
             const raw = observations.get(brand.brand_id);
@@ -175,7 +180,6 @@ export function MarketShareBreakdown({ brandIds, country, range, result }: {
                 entry ? <span className="font-semibold" style={{ color: "var(--accent)" }}>{entry.share.toFixed(2)}%</span> : "—",
                 ...metrics.map(({ key }) => numberText(raw?.[key])),
                 ...components.map(({ key }) => entry ? `${entry.signal_shares[key].toFixed(1)}%` : "—"),
-                entry ? <Badge tone={entry.coverage >= 75 ? "positive" : entry.coverage >= 50 ? "warning" : "negative"}>{entry.coverage}%</Badge> : "—",
               ],
             };
           })}
