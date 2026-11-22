@@ -726,6 +726,7 @@ def hiring_org_radar(
     start_date: str | None = None,
     end_date: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
+    scope: str = "range",
 ):
     """Build an explainable organization picture from hiring signals.
 
@@ -739,6 +740,10 @@ def hiring_org_radar(
         params.append(platform)
     where = " AND ".join(clauses)
     postings = [dict(row) for row in conn.execute(f"SELECT * FROM job_postings WHERE {where}", params).fetchall()]
+    if scope == "all_history" and not start_date and not end_date:
+        start = min(((item["first_seen"] or end)[:10] for item in postings), default=end)
+        start, end = resolve_window(1, start, end)
+    postings.sort(key=lambda item: (item.get("status") != "closed", item.get("first_seen") or "", item["id"]), reverse=True)
     profiles = [
         dict(row)
         for row in conn.execute(
@@ -750,12 +755,14 @@ def hiring_org_radar(
     departments: dict[str, dict] = {}
     locations: dict[str, dict] = {}
     role_families: dict[str, dict] = {}
+    city_departments: dict[str, dict[str, dict]] = defaultdict(dict)
 
     def bucket(store: dict[str, dict], key: str, label_key: str) -> dict:
         if key not in store:
             store[key] = {
                 label_key: key,
                 "open_roles": 0,
+                "postings_total": 0,
                 "released": 0,
                 "closed": 0,
                 "net_change": 0,
@@ -763,7 +770,6 @@ def hiring_org_radar(
                 "evidence": [],
                 "evidence_days": set(),
                 "titles": defaultdict(int),
-                "departments": defaultdict(int),
             }
         return store[key]
 
@@ -779,8 +785,12 @@ def hiring_org_radar(
         is_open = posting.get("status") != "closed"
         released = in_window(posting.get("first_seen"))
         closed = in_window(posting.get("closed_at"))
-        for store, key, label_key in ((departments, department, "department"), (locations, city, "city")):
+        for store, key, label_key in (
+            (departments, department, "department"), (locations, city, "city"),
+            (city_departments[city], department, "department"), (role_families, role, "role_family"),
+        ):
             item = bucket(store, key, label_key)
+            item["postings_total"] += 1
             if is_open:
                 item["open_roles"] += 1
             if released:
@@ -788,35 +798,20 @@ def hiring_org_radar(
             if closed:
                 item["closed"] += 1
             item["net_change"] = item["released"] - item["closed"]
-            if len(item["evidence"]) < 5 and (is_open or released or closed):
+            if len(item["evidence"]) < 5 and (scope == "all_history" or is_open or released or closed):
                 item["evidence"].append(posting)
             if released:
                 item["evidence_days"].add((posting.get("first_seen") or "")[:10])
             if closed:
                 item["evidence_days"].add((posting.get("closed_at") or "")[:10])
             item["titles"][title] += 1
-            item["departments"][department] += 1
-
-        family = bucket(role_families, role, "role_family")
-        if is_open:
-            family["open_roles"] += 1
-        if released:
-            family["released"] += 1
-        if closed:
-            family["closed"] += 1
-        family["net_change"] = family["released"] - family["closed"]
-        if len(family["evidence"]) < 5 and (is_open or released or closed):
-            family["evidence"].append(posting)
-        if released:
-            family["evidence_days"].add((posting.get("first_seen") or "")[:10])
-        if closed:
-            family["evidence_days"].add((posting.get("closed_at") or "")[:10])
 
     for profile in profiles:
         department = infer_department("", profile.get("title"), profile.get("headline"))
-        if department not in departments:
-            bucket(departments, department, "department")
-        departments[department]["known_people"] += 1
+        bucket(departments, department, "department")["known_people"] += 1
+        if clean_text(profile.get("title")):
+            role = infer_role_family(profile["title"], department)
+            bucket(role_families, role, "role_family")["known_people"] += 1
 
     def serialize(store: dict[str, dict], label_key: str) -> list[dict]:
         out = []
@@ -824,18 +819,22 @@ def hiring_org_radar(
             evidence = item.pop("evidence")
             evidence_days = item.pop("evidence_days")
             titles = item.pop("titles")
-            department_breakdown = item.pop("departments", {})
             item["top_roles"] = [{"title": title, "count": count} for title, count in sorted(titles.items(), key=lambda pair: (-pair[1], pair[0]))[:5]]
             item["evidence"] = _radar_evidence(evidence)
             item["confidence"] = _radar_confidence(len(evidence), len(evidence_days), item.get("known_people", 0))
-            if label_key == "city":
-                item["departments"] = [{"department": department, "count": count} for department, count in sorted(department_breakdown.items(), key=lambda pair: (-pair[1], pair[0]))[:5]]
             out.append(item)
-        return sorted(out, key=lambda item: (-item["open_roles"], -item["released"], item[label_key]))[:20]
+        return sorted(out, key=lambda item: (-item["open_roles"], -item["known_people"], -item["released"], item[label_key]))[:20]
 
     department_rows = serialize(departments, "department")
     location_rows = serialize(locations, "city")
     role_rows = serialize(role_families, "role_family")
+    for item in location_rows:
+        local_rows = serialize(city_departments[item["city"]], "department")
+        item["department_details"] = local_rows
+        item["departments"] = [
+            {"department": row["department"], "count": row["postings_total"]}
+            for row in sorted(local_rows, key=lambda row: (-row["postings_total"], row["department"]))[:5]
+        ]
 
     trend = _empty_trend(start, end)
     trend_index = {item["date"]: item for item in trend}
@@ -853,15 +852,15 @@ def hiring_org_radar(
         if row["snapshot_date"] in trend_index:
             trend_index[row["snapshot_date"]]["active"] = row["active"] or 0
 
-    evidence_total = sum(item["released"] + item["closed"] for item in department_rows)
+    evidence_total = sum(item["released"] + item["closed"] for item in departments.values())
     overview_confidence = _radar_confidence(evidence_total, len({day for item in postings for day in ((item.get("first_seen") or "")[:10], (item.get("closed_at") or "")[:10]) if start <= day <= end}), len(profiles))
     return {
         "window": {"start": start, "end": end},
         "overview": {
-            "open_roles": sum(item["open_roles"] for item in department_rows),
+            "open_roles": sum(item["open_roles"] for item in departments.values()),
             "known_people": len(profiles),
-            "city_count": len([item for item in location_rows if item["city"] != "未标注地区"]),
-            "department_count": len(department_rows),
+            "city_count": len(locations) - int("未标注地区" in locations),
+            "department_count": len(departments),
             "confidence": overview_confidence,
         },
         "departments": department_rows,
@@ -925,6 +924,43 @@ def hiring_strategic_signals(
     )
 
 
+def _org_estimate_context(conn, brand_id, platform, days, start_date, end_date, scope, refresh=False):
+    radar = hiring_org_radar(
+        brand_id=brand_id,
+        platform=platform,
+        days=days,
+        start_date=start_date,
+        end_date=end_date,
+        conn=conn,
+        scope=scope,
+    )
+    context = {
+        "brand": fetch_brand(conn, brand_id),
+        "platform": platform or "all",
+        "scope": "all_history" if scope == "all_history" and not start_date and not end_date else "range",
+        "refresh": refresh,
+        **radar["window"],
+        "radar": radar,
+    }
+    inputs, cache_key = ai.hiring_org_estimate_input(context)
+    return context, inputs, cache_key
+
+
+@router.get("/org-estimate")
+def cached_hiring_org_estimate(
+    brand_id: str,
+    platform: str | None = None,
+    days: int = 90,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    scope: str = "range",
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    _, _, cache_key = _org_estimate_context(conn, brand_id, platform, days, start_date, end_date, scope)
+    job = analysis_job(conn, cache_key, start=False)
+    return {"estimate": ai.get_cached_summary(conn, cache_key, max_age=None), "generation": job.get("generation")}
+
+
 @router.post("/org-estimate")
 def hiring_org_estimate(
     brand_id: str,
@@ -934,30 +970,26 @@ def hiring_org_estimate(
     end_date: str | None = None,
     refresh: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
+    scope: str = "range",
+    background: bool = False,
 ):
     """Generate a model-assisted headcount range from the radar evidence."""
-    brand = fetch_brand(conn, brand_id)
-    start, end = resolve_window(days, start_date, end_date)
-    radar = hiring_org_radar(
-        brand_id=brand_id,
-        platform=platform,
-        days=days,
-        start_date=start,
-        end_date=end,
-        conn=conn,
-    )
-    try:
-        return ai.estimate_hiring_org(
-            conn,
-            {
-                "brand": brand,
-                "start": start,
-                "end": end,
-                "platform": platform or "all",
-                "radar": radar,
-                "refresh": refresh,
-            },
+    context, inputs, cache_key = _org_estimate_context(conn, brand_id, platform, days, start_date, end_date, scope, refresh)
+    if background:
+        cached = ai.get_cached_summary(conn, cache_key, max_age=None)
+        if not ai.is_configured(conn):
+            raise HTTPException(status_code=400, detail="请先在系统设置中配置大模型。")
+        overview = inputs["radar"]["overview"]
+        if not (overview["known_people"] or inputs["radar"]["data_quality"]["postings_total"]):
+            raise HTTPException(status_code=400, detail="暂无可用于推演的招聘或公开员工数据。")
+        job = analysis_job(
+            conn, cache_key,
+            lambda worker: {"estimate": ai.estimate_hiring_org(worker, context, inputs, cache_key)},
+            start=refresh or cached is None, refresh=True,
         )
+        return {"estimate": cached, "generation": job.get("generation")}
+    try:
+        return ai.estimate_hiring_org(conn, context, inputs, cache_key)
     except ai.LlmError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

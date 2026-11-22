@@ -351,7 +351,7 @@ export interface HiringOrgRadar {
   window: { start: string; end: string };
   overview: { open_roles: number; known_people: number; city_count: number; department_count: number; confidence: string };
   departments: HiringOrgRadarGroup[];
-  locations: (HiringOrgRadarGroup & { city: string; departments: { department: string; count: number }[] })[];
+  locations: (HiringOrgRadarGroup & { city: string; department_details: (HiringOrgRadarGroup & { department: string })[] })[];
   role_families: (HiringOrgRadarGroup & { role_family: string })[];
   trend: { date: string; released: number; closed: number; active: number }[];
   data_quality: { postings_total: number; with_city: number; with_department: number; people_total: number; limitations: string[] };
@@ -360,6 +360,7 @@ export interface HiringOrgRadar {
 export interface HiringOrgRadarGroup {
   department?: string;
   open_roles: number;
+  postings_total: number;
   released: number;
   closed: number;
   net_change: number;
@@ -372,6 +373,7 @@ export interface HiringOrgRadarGroup {
 export interface HiringOrgEstimateGroup {
   department?: string;
   city?: string;
+  role_family?: string;
   low: number;
   high: number;
   confidence: string;
@@ -381,13 +383,20 @@ export interface HiringOrgEstimateGroup {
 
 export interface HiringOrgEstimate {
   summary: string;
-  overall: { low: number; high: number; confidence: string; basis: string[] };
+  overall: { low: number; high: number; confidence: string; basis: string[] } | null;
   departments: HiringOrgEstimateGroup[];
-  locations: HiringOrgEstimateGroup[];
+  locations: (HiringOrgEstimateGroup & { departments: HiringOrgEstimateGroup[] })[];
+  role_families: HiringOrgEstimateGroup[];
   assumptions: string[];
   limitations: string[];
   cached?: boolean;
   model?: string;
+  generated_at?: string;
+}
+
+export interface HiringOrgEstimateState {
+  estimate: HiringOrgEstimate | null;
+  generation: { status: "running" | "completed" | "failed"; error?: string } | null;
 }
 
 export interface HiringStrategicSignalEvidence {

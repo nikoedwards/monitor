@@ -46,8 +46,8 @@ function BrandSwitcher({ brandId }: { brandId?: string }) {
         <span className="h-5 w-5 rounded grid place-items-center text-[11px] font-bold" style={{ background: "var(--ink)", color: "var(--bg)" }}>
           {(current?.name || "?").slice(0, 1).toUpperCase()}
         </span>
-        <span className="text-[14px] font-medium" style={{ color: "var(--ink)" }}>{current?.name || "选择品牌"}</span>
-        {current?.is_competitor && <Badge tone="warning">竞品</Badge>}
+        <span className="max-w-28 truncate text-[14px] font-medium sm:max-w-none" style={{ color: "var(--ink)" }}>{current?.name || "选择品牌"}</span>
+        {current?.is_competitor && <span className="hidden sm:inline"><Badge tone="warning">竞品</Badge></span>}
         <ChevronDown size={14} style={{ color: "var(--mute)" }} />
       </button>
       {open && (
@@ -222,25 +222,26 @@ export function Topbar({ brandId }: { brandId?: string }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   return (
     <header
-      className="h-14 flex items-center justify-between px-5 sticky top-0 z-30"
+      className="h-14 flex items-center justify-between px-3 sm:px-5 sticky top-0 z-30"
       style={{ background: "var(--bg)", borderBottom: "1px solid var(--hairline)" }}
     >
       <div className="flex items-center gap-3">
-        <NavLink to="/" className="flex items-center gap-2 pr-2 cursor-pointer">
+        <NavLink to="/" aria-label="Monitor Hub" className="flex items-center gap-2 pr-2 cursor-pointer">
           <div className="h-6 w-6 rounded-md grid place-items-center" style={{ background: "var(--ink)" }}>
             <span style={{ color: "var(--bg)" }} className="text-[13px] font-bold">M</span>
           </div>
-          <span className="text-[14px] font-semibold tracking-tight" style={{ color: "var(--ink)" }}>Monitor Hub</span>
+          <span className="hidden sm:inline text-[14px] font-semibold tracking-tight" style={{ color: "var(--ink)" }}>Monitor Hub</span>
         </NavLink>
         <BrandSwitcher brandId={brandId} />
       </div>
       <div className="flex items-center gap-2">
         <NavLink
           to="/compare"
-          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-[14px] font-medium cursor-pointer"
+          aria-label="竞品对比"
+          className="inline-flex items-center gap-1.5 h-9 px-2 sm:px-3 rounded-md text-[14px] font-medium cursor-pointer"
           style={({ isActive }) => ({ color: isActive ? "var(--ink)" : "var(--body)", background: isActive ? "var(--bg-soft-2)" : "transparent" })}
         >
-          <Users size={15} /> 竞品对比
+          <Users size={15} /> <span className="hidden sm:inline">竞品对比</span>
         </NavLink>
         <button onClick={toggle} className="h-9 w-9 grid place-items-center rounded-md cursor-pointer" style={{ border: "1px solid var(--hairline-strong)", color: "var(--body)" }}>
           {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
@@ -260,7 +261,7 @@ export function Sidebar({ brandId }: { brandId: string }) {
   const country = marketPage && params.get("country");
   return (
     <aside
-      className="w-56 shrink-0 self-start sticky top-14 h-[calc(100vh-3.5rem)] px-3 py-4"
+      className="w-12 sm:w-56 shrink-0 self-start sticky top-14 h-[calc(100vh-3.5rem)] px-1 sm:px-3 py-4"
       style={{ borderRight: "1px solid var(--hairline)" }}
     >
       <nav className="space-y-0.5">
@@ -268,13 +269,15 @@ export function Sidebar({ brandId }: { brandId: string }) {
           <NavLink
             key={to}
             to={{ pathname: `/brand/${brandId}/${to}`, search: to === "market-share" && country ? new URLSearchParams({ country }).toString() : "" }}
-            className="flex items-center gap-2.5 px-3 h-9 rounded-md text-[14px] font-medium transition-colors"
+            aria-label={label}
+            title={label}
+            className="flex items-center justify-center sm:justify-start gap-2.5 sm:px-3 h-9 rounded-md text-[14px] font-medium transition-colors"
             style={({ isActive }) => ({
               color: isActive ? "var(--ink)" : "var(--body)",
               background: isActive ? "var(--bg-soft-2)" : "transparent",
             })}
           >
-            <Icon size={16} /> {label}
+            <Icon size={16} /> <span className="hidden sm:inline">{label}</span>
           </NavLink>
         ))}
       </nav>
@@ -289,7 +292,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <Topbar brandId={brandId} />
       <div className="flex flex-1">
         {brandId && <Sidebar brandId={brandId} />}
-        <main className="flex-1 min-w-0 p-6 max-w-[1400px]">{children}</main>
+        <main className="flex-1 min-w-0 p-3 sm:p-6 max-w-[1400px]">{children}</main>
       </div>
     </div>
   );
