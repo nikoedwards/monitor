@@ -29,7 +29,7 @@ CDP_STARTUP_TIMEOUT_SECONDS = int(os.environ.get("MONITOR_CAPTURE_CDP_STARTUP_TI
 # These background integrations do not contribute to the captured page. Keep
 # storefront scripts, styles, images, and same-origin application APIs enabled.
 _BACKGROUND_URLS = [
-    "*.mp4", "*.webm", "*.m3u8", "*.gif",
+    "*.mp4*", "*.webm*", "*.m3u8*", "*.gif*",
     "*://*.google-analytics.com/*", "*://*.googletagmanager.com/*",
     "*://connect.facebook.net/*", "*://*.facebook.com/tr/*",
     "*://*.clarity.ms/*", "*://*.hotjar.com/*", "*://*.hotjar.io/*",
@@ -37,7 +37,28 @@ _BACKGROUND_URLS = [
     "*://analytics.tiktok.com/*", "*://*.doubleclick.net/*",
     "*://*.luckyorange.com/*", "*://*.luckyorange.net/*",
     "*://*.replay.io/*", "*://*.fullstory.com/*",
+    "*://*.ptengine.com/*", "*://*.promptmonitor.io/*",
+    "*://*.albss.com/*", "*://*.dwin1.com/*", "*/shopifycloud/perf-kit/*",
 ]
+
+
+def _stop_browser(browser, owns_browser_group):
+    if owns_browser_group:
+        _kill_capture_process(browser)
+    else:
+        # This disposable worker is the process-group owner. Its children
+        # belong to this capture only; never signal the API's process group.
+        for entry in Path('/proc').iterdir():
+            if entry.name.isdigit() and int(entry.name) != os.getpid():
+                try:
+                    if os.getpgid(int(entry.name)) == os.getpgrp():
+                        os.kill(int(entry.name), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+    try:
+        browser.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _browser_binary() -> str:
@@ -102,7 +123,9 @@ class _Page:
                 if value.get("frameId") == self.frame:
                     self.status = int(value["response"]["status"])
             elif event == "Fetch.requestPaused":
-                if self.source_html is not None and not self.source_served:
+                if value.get("resourceType") == "Media":
+                    self._send("Fetch.failRequest", {"requestId": value["requestId"], "errorReason": "BlockedByClient"})
+                elif self.source_html is not None and not self.source_served:
                     self.source_served = True
                     self._send("Fetch.fulfillRequest", {
                         "requestId": value["requestId"], "responseCode": 200,
@@ -240,6 +263,8 @@ def capture(
                     page.call("Network.setBlockedURLs", {
                         "urls": _BACKGROUND_URLS,
                     })
+                    page.call("Fetch.enable", {"patterns": [{"resourceType": "Media", "requestStage": "Request"}]})
+                    page.call("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
                     if scriptless:
                         page.call("Emulation.setScriptExecutionDisabled", {"value": True})
                     stage = "navigation"
@@ -251,7 +276,10 @@ def capture(
                         if not source_html:
                             raise
                         page.source_html = source_html
-                        page.call("Fetch.enable", {"patterns": [{"resourceType": "Document", "requestStage": "Request"}]})
+                        page.call("Fetch.enable", {"patterns": [
+                            {"resourceType": "Document", "requestStage": "Request"},
+                            {"resourceType": "Media", "requestStage": "Request"},
+                        ]})
                         data = page.navigate(url)
                         source_fallback = True
                     page.evaluate("""() => {
@@ -265,6 +293,7 @@ def capture(
                     tiles = _capture_chunked_screenshot(
                         page, png_path, height,
                         max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
+                        on_tiles_captured=lambda: _stop_browser(browser, owns_browser_group),
                     )
                     _write_fallback_archive(
                         html_path.name, data.get("final_url") or url, data.get("title", ""),
@@ -293,30 +322,7 @@ def capture(
                             socket.close(timeout=0)
                         except Exception:
                             pass
-                    if owns_browser_group:
-                        _kill_capture_process(browser)
-                    else:
-                        # The outer supervisor kills remaining group members
-                        # after reading our result (including success).
-                        try:
-                            browser.kill()
-                        except (OSError, ProcessLookupError):
-                            pass
-                        # Reap the failed attempt before any scriptless
-                        # retry. All of these processes belong to this
-                        # disposable worker's own group, never the API.
-                        for entry in Path("/proc").iterdir():
-                            if not entry.name.isdigit() or int(entry.name) == os.getpid():
-                                continue
-                            try:
-                                if os.getpgid(int(entry.name)) == os.getpgrp():
-                                    os.kill(int(entry.name), signal.SIGKILL)
-                            except (OSError, ProcessLookupError):
-                                pass
-                    try:
-                        browser.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
+                    _stop_browser(browser, owns_browser_group)
     except SnapshotCaptureError:
         raise
     except Exception as exc:

@@ -684,6 +684,7 @@ def _capture_chunk_height(available_memory_mb: int | None) -> int:
 
 def _capture_chunked_screenshot(
     page, png_path: Path, chunk_height: int, *, max_height: int | None = None,
+    on_tiles_captured=None,
 ) -> dict:
     """Capture a long page one viewport at a time and stitch it on disk."""
     from PIL import Image
@@ -708,8 +709,8 @@ def _capture_chunked_screenshot(
         positions.append(bottom)
 
     with tempfile.TemporaryDirectory(prefix=f".{png_path.stem}.", dir=str(png_path.parent)) as temp_dir:
-        canvas = Image.new("RGB", (output_width, output_height), (255, 255, 255))
         previous_end = 0
+        pieces = []
         for index, y in enumerate(dict.fromkeys(positions)):
             page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
             page.wait_for_timeout(80)
@@ -724,9 +725,20 @@ def _capture_chunked_screenshot(
                         (output_width, max(1, int(round(visible_height * scale)))),
                         Image.Resampling.LANCZOS,
                     )
-                canvas.paste(piece, (0, int(round((y + source_top) * scale))))
+                piece_path = Path(temp_dir) / f"piece-{index}.png"
+                piece.save(piece_path)
+                piece.close()
+                pieces.append((piece_path, int(round((y + source_top) * scale))))
             previous_end = max(previous_end, y + viewport_height)
         page.evaluate("window.scrollTo(0, 0)")
+        # Do not hold a full-page canvas alongside a busy Chromium renderer.
+        # CDP captures can release the renderer before assembling the PNG.
+        if on_tiles_captured:
+            on_tiles_captured()
+        canvas = Image.new("RGB", (output_width, output_height), (255, 255, 255))
+        for piece_path, top in pieces:
+            with Image.open(piece_path) as piece:
+                canvas.paste(piece, (0, top))
         canvas.save(png_path, format="PNG", optimize=False)
         canvas.close()
     return {
