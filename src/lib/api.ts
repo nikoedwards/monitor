@@ -373,6 +373,7 @@ export interface HiringSummary {
 
 export interface HiringOrgRadar {
   window: { start: string; end: string };
+  headcount_reference?: { count: number; source: string; as_of: string } | null;
   overview: { open_roles: number; known_people: number; city_count: number; department_count: number; confidence: string };
   departments: HiringOrgRadarGroup[];
   locations: (HiringOrgRadarGroup & { city: string; department_details: (HiringOrgRadarGroup & { department: string })[] })[];
@@ -391,7 +392,7 @@ export interface HiringOrgRadarGroup {
   known_people: number;
   top_roles: { title: string; count: number }[];
   confidence: string;
-  evidence: { id: string; title: string; url?: string; first_seen?: string; closed_at?: string; city?: string; status?: string }[];
+  evidence: { id: string; title: string; url?: string; first_seen?: string; closed_at?: string; city?: string; city_source?: "linkedin_title" | null; status?: string }[];
 }
 
 export interface HiringOrgEstimateGroup {

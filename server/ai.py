@@ -645,7 +645,7 @@ ORG_ESTIMATE_SYSTEM = (
 )
 
 ORG_ESTIMATE_PROMPT = """目标公司：{brand}
-公司公开元数据（可能为空）：{public_context}
+公司资料与外部规模情报（可能为空）：{public_context}
 统计窗口：{start} 至 {end}
 
 岗位与员工样本汇总：
@@ -666,6 +666,7 @@ ORG_ESTIMATE_PROMPT = """目标公司：{brand}
 - low/high 必须是非负整数，low <= high。证据不足时 overall 返回 null，分组条目省略。0 不表示未知。
 - 公开员工样本是可见下界。整体及分组的 low 不得低于各自样本量。样本没有地区字段时不得按城市分配。
 - 在招和历史招聘量只支持推断岗位需求。仅凭职位数量无法推算员工人数，不得应用通用招聘倍率。
+- headcount_reference 是有来源与日期的全球人数近似值，优先作为整体估算的参考。若输出整体区间，应覆盖该近似值，并在 basis 中说明来源。城市、部门和岗位族仍需各自的规模证据。
 - 地区值是招聘地点，可能包含远程、多地或仅有历史记录的岗位。不得确认物理办公室、办公地址或汇报线。
 - 只估算输入中已有且分类明确的分组。局部估算须有地区内证据，上界不得超过所属地区或公司上界。
 - evidence_ids 只能引用当前分组的 evidence 字段中的职位 ID，最多 6 个。如果只依据公开员工样本，可返回空数组。缺乏可靠规模依据时置信度应为 low。
@@ -681,6 +682,7 @@ def hiring_org_estimate_input(context: dict) -> tuple[dict, str]:
         "description": (brand.get("description") or "")[:800],
         "official_website": brand.get("official_website") or "",
         "category": brand.get("category") or "",
+        "headcount_reference": radar.get("headcount_reference"),
     }
 
     def compact_group(row: dict, label: str) -> dict:
@@ -765,6 +767,9 @@ def estimate_hiring_org(conn: sqlite3.Connection, context: dict, inputs: dict, c
         return groups
 
     overall = clean_range(parsed.get("overall"), radar["overview"]["known_people"])
+    reference = inputs["public_context"].get("headcount_reference")
+    if overall and reference and not overall["low"] <= reference["count"] <= overall["high"]:
+        overall = None
     if overall is not None:
         overall["basis"] = [str(value)[:240] for value in as_list(parsed["overall"].get("basis"))[:6]]
     ceiling = overall["high"] if overall else None

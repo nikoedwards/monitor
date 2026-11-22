@@ -1,6 +1,7 @@
 """Pydantic request models for the API."""
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -18,6 +19,12 @@ class BrandIn(BaseModel):
     monitoring_keywords: list[str] = Field(default_factory=list)
     social_links: dict[str, str] = Field(default_factory=dict)
     ecommerce_links: dict[str, str] = Field(default_factory=dict)
+
+
+class HiringHeadcountReferenceIn(BaseModel):
+    count: int = Field(gt=0)
+    as_of: date
+    source: str = Field(min_length=1, max_length=240)
 
 
 class BrandAnalyzeIn(BaseModel):
