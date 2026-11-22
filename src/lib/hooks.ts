@@ -139,28 +139,56 @@ export function useOverview(brandId?: string, range?: TimeRange, marketBrandIds?
   });
 }
 
-export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[], refreshKey = 0) {
+type OverviewSummaryResponse = {
+  mode?: "ai" | "fallback";
+  summary?: string;
+  summary_notice?: string;
+  generation?: { status: "running" | "completed" | "failed"; error?: string };
+};
+
+type OverviewSummaryState = OverviewSummaryResponse & { pollingSince?: number };
+
+export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[]) {
   const rp = rangeParams(range);
-  const storageKey = dailyPersistentTaskKey("executive-summary-research-v3", [brandId, rp.start_date, rp.end_date, marketBrandIds?.join(",")]);
-  const stored = readPersistentTask<any>(storageKey);
-  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < PERSISTENT_TASK_PENDING_TTL_MS;
-  return useQuery({
-    queryKey: ["overview-summary-research-v3", brandId, rp, marketBrandIds, refreshKey],
-    queryFn: async () => {
-      persistTaskPending(storageKey);
-      try {
-        const data = await api.get<any>(`/api/overview/summary${qs({ brand_id: brandId, market_brand_ids: marketBrandIds?.join(","), refresh: refreshKey > 0, ...rp })}`);
-        persistTaskValue(storageKey, data);
-        return data;
-      } catch (error) {
-        persistTaskError(storageKey, error);
-        throw error;
+  const client = useQueryClient();
+  const queryKey = ["overview-summary-research-v3", brandId, rp, marketBrandIds];
+  const params = { brand_id: brandId, market_brand_ids: marketBrandIds?.join(","), ...rp, background: true };
+  const read = (options: { refresh?: boolean; cached_only?: boolean } = {}) =>
+    api.get<OverviewSummaryResponse>(`/api/overview/summary${qs({ ...params, ...options })}`);
+  const query = useQuery<OverviewSummaryState>({
+    queryKey,
+    queryFn: async (): Promise<OverviewSummaryState> => {
+      const previous = client.getQueryData<OverviewSummaryState>(queryKey);
+      const pollingSince = previous?.pollingSince;
+      const polling = previous?.generation?.status === "running";
+      if (polling && pollingSince && Date.now() - pollingSince >= 120_000) {
+        return { ...previous, generation: { status: "failed", error: "AI 研判耗时较长，可点击「重新研判」继续查看进度。" } };
       }
+      const next = await read({ cached_only: polling });
+      if (polling && !next.generation && !next.mode) {
+        return { ...previous, generation: { status: "failed", error: "研判任务已中断，请点击「重新研判」重试。" } };
+      }
+      return { ...next, pollingSince: next.generation?.status === "running" ? pollingSince ?? Date.now() : undefined };
     },
-    enabled: !!brandId && (!activeTask || refreshKey > 0),
+    enabled: !!brandId,
+    retry: false,
+    refetchInterval: (current) => current.state.status !== "error" && current.state.data?.generation?.status === "running" ? 3000 : false,
     staleTime: 10 * 60_000,
     gcTime: 24 * 60 * 60_000,
   });
+  const refresh = useMutation({
+    mutationFn: () => read({ refresh: true }),
+    onSuccess: (next) => client.setQueryData<OverviewSummaryState>(queryKey, (previous) => ({
+      ...(next.mode ? next : { ...previous, ...next }),
+      pollingSince: Date.now(),
+    })),
+  });
+  return {
+    data: query.data?.mode ? query.data : undefined,
+    error: refresh.error?.message || query.error?.message || query.data?.generation?.error,
+    pending: refresh.isPending || query.isFetching || (!query.isError && query.data?.generation?.status === "running"),
+    refresh: () => refresh.mutate(),
+  };
 }
 
 export function useCompare(range?: TimeRange) {

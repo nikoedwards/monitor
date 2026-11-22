@@ -54,13 +54,9 @@ function highlightSource(highlight: string, representative: any[] = []) {
   return bestScore >= 2 ? best : null;
 }
 
-export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { brandId?: string; range: TimeRange; marketBrandIds?: string[] }) {
-  const [refreshKey, setRefreshKey] = useState(0);
-  const summary = useOverviewSummary(brandId, range, marketBrandIds, refreshKey);
-  const cacheKey = dailyPersistentTaskKey("executive-summary-research-v3", [brandId, range.start_date, range.end_date, marketBrandIds?.join(",")]);
-  const cached = usePersistentSummary<any>(cacheKey, summary.data);
-  const data = cached || summary.data;
-  const pending = summary.isFetching || readPersistentTask<any>(cacheKey)?.status === "pending";
+export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview }: { brandId?: string; range: TimeRange; marketBrandIds?: string[]; preview?: { mode: "fallback" } }) {
+  const { data: analyzed, pending, error, refresh } = useOverviewSummary(brandId, range, marketBrandIds);
+  const data = analyzed || preview;
 
   return (
     <div className="space-y-4">
@@ -70,16 +66,16 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds }: { bran
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 跨板块证据研判</span>
         </div>
         <div className="flex flex-col items-end">
-          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={pending}>
+          <Button size="sm" onClick={refresh} disabled={pending}>
             <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
             {pending ? "更新中…" : "重新研判"}
           </Button>
-          <AsyncProgress active={pending} label="正在交叉分析经营证据" />
+          <AsyncProgress active={pending} label="正在后台分析经营证据" />
         </div>
       </div>
 
-      {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在交叉分析经营证据…</p>}
-      {summary.isError && <p className="text-[13px]" style={{ color: "var(--danger)" }}>经营总结暂时不可用，下面的业务指标仍可正常查看。</p>}
+      {error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
+      {!pending && !error && analyzed?.summary_notice && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>{analyzed.summary_notice}</p>}
       {data && <OverviewResearch data={data} brandId={brandId} />}
     </div>
   );
