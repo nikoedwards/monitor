@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - server/snapshot*.py
+      - server/domains/web.py
       - server/browser_jobs.py
       - server/collector_worker.py
       - server/worker_support.py
@@ -15,6 +16,7 @@ on:
       - tests/*snapshot*.py
       - requirements.txt
       - Dockerfile
+      - docker-compose.yml
       - .github/workflows/snapshot-runtime.yml
 
 permissions:
@@ -40,7 +42,7 @@ jobs:
           docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \
             --mount type=bind,src="$PWD/tests",dst=/app/tests,readonly \
             --network=none monitor-snapshot-test python -m unittest tests.test_snapshot_cdp
-      - name: Verify API health, timeout cleanup and live Plaud PNG
+      - name: Verify API health, memory pressure, timeout cleanup and live Plaud PNG
         timeout-minutes: 4
         run: |
           docker run --rm --init --memory=640m --memory-swap=640m --pids-limit=128 --cpus=1 \

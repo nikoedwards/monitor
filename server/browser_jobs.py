@@ -15,7 +15,7 @@ from .config import ROOT
 from .fetchers import FetchError
 
 logger = logging.getLogger(__name__)
-_SLOT = threading.Lock()
+BROWSER_SLOT = threading.Lock()
 _COOLDOWN: dict[str, float] = {}
 
 
@@ -78,7 +78,7 @@ def run_browser_job(kind: str, payload: dict) -> dict:
     """One job, a hard wall-clock deadline, resource guard and failure backoff."""
     if kind not in {'meta_ads', 'instagram'}:
         raise ValueError('Unknown browser collector')
-    if not _SLOT.acquire(blocking=False):
+    if not BROWSER_SLOT.acquire(blocking=False):
         raise FetchError('Browser collector busy; retry later')
     started = time.monotonic()
     process = None
@@ -148,7 +148,7 @@ def run_browser_job(kind: str, payload: dict) -> dict:
                 logger.error('Browser collector worker did not reap promptly kind=%s pid=%s', kind, process.pid)
             logger.warning('Browser collector finish kind=%s pid=%s elapsed=%.1fs peak_group_rss_mb=%s exit=%s',
                            kind, process.pid, time.monotonic() - started, peak, process.returncode)
-        _SLOT.release()
+        BROWSER_SLOT.release()
 
 
 def chromium_args(constrained: bool) -> list[str]:

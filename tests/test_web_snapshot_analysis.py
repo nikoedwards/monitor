@@ -5,6 +5,7 @@ import io
 import json
 import re
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageDraw
 
@@ -36,6 +37,7 @@ from server.snapshot import (
     _capture_error_reason,
     _capture_chunk_height,
     _capture_chunked_screenshot,
+    _isolated_playwright_capture,
     _optimize_archive_image,
     _playwright_capture,
     analyze_change,
@@ -83,8 +85,8 @@ class VisualDiffTests(unittest.TestCase):
         finally:
             CAPTURE_SLOT.release()
 
-    def test_capture_attempts_browser_when_memory_is_low(self):
-        with patch("server.snapshot._available_memory_mb", return_value=64), patch(
+    def test_capture_uses_safe_mode_when_memory_is_low(self):
+        with patch("server.snapshot._available_memory_mb", return_value=250), patch(
             "server.snapshot._capture_artifacts_unlocked",
             return_value=("low-memory.png", "low-memory.html", {"method": "playwright"}),
         ) as capture:
@@ -93,6 +95,95 @@ class VisualDiffTests(unittest.TestCase):
             )
         self.assertEqual(result[2]["method"], "playwright")
         self.assertTrue(capture.call_args.kwargs["safe_mode"])
+
+    def test_isolated_capture_defers_before_launch_below_start_headroom(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.snapshot._available_memory_mb", return_value=100),
+            patch("server.snapshot.subprocess.Popen") as launch,
+        ):
+            root = Path(tmp)
+            result = _isolated_playwright_capture("https://example.com", root / "a.png", root / "a.html")
+            self.assertIn("启动余量", result["error"])
+            self.assertEqual(list(root.iterdir()), [])
+            launch.assert_not_called()
+
+    def test_running_worker_is_killed_and_staging_removed_on_memory_pressure(self):
+        def partial_output(request, *, timeout):
+            payload = json.loads(request)
+            Path(payload["png_path"]).write_bytes(b"partial image")
+            raise subprocess.TimeoutExpired("snapshot", timeout)
+
+        process = MagicMock(pid=1234, returncode=None)
+        process.communicate.side_effect = partial_output
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.snapshot._available_memory_mb", side_effect=[400, 64, 100]),
+            patch("server.snapshot.subprocess.Popen", return_value=process),
+            patch("server.snapshot._kill_capture_process") as kill,
+        ):
+            root = Path(tmp)
+            result = _isolated_playwright_capture("https://example.com", root / "a.png", root / "a.html")
+            self.assertIn("低于保留量", result["error"])
+            self.assertEqual(list(root.iterdir()), [])
+        kill.assert_called_once_with(process)
+        process.wait.assert_called_once_with(timeout=2)
+        self.assertEqual(process.communicate.call_count, 1)
+
+    def test_memory_pressure_retries_with_fresh_low_memory_browser_after_cleanup(self):
+        attempts = []
+        def complete_retry(request, staging, *_args):
+            attempts.append(request)
+            self.assertFalse(request['scriptless'])
+            if len(attempts) == 1:
+                (staging / "partial").touch()
+                return {"error": "memory reserve", "resource_pressure": True}
+            self.assertTrue(request["safe_mode"])
+            self.assertEqual(list(staging.parent.glob(".capture-*")), [staging])
+            Path(request["png_path"]).write_bytes(b"complete PNG")
+            return {"method": "playwright", "engine": "chromium_cdp"}
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.snapshot.sys.platform", "linux"),
+            patch("server.snapshot._available_memory_mb", side_effect=[400, 370]),
+            patch("server.snapshot._run_snapshot_worker", side_effect=complete_retry) as worker,
+        ):
+            root = Path(tmp)
+            result = _isolated_playwright_capture("https://example.com", root / "a.png", root / "a.html")
+            self.assertEqual(result["engine"], "chromium_cdp")
+            self.assertEqual(list(root.iterdir()), [root / "a.png"])
+            self.assertEqual(worker.call_count, 2)
+
+    def test_worker_publishes_png_and_archive_after_success(self):
+        def write_capture(request, *, timeout):
+            payload = json.loads(request)
+            Path(payload["png_path"]).write_bytes(b"complete PNG")
+            Path(payload["html_path"]).write_text("archive")
+            return b'{"method":"playwright"}', b""
+
+        process = MagicMock(pid=1234, returncode=0)
+        process.communicate.side_effect = write_capture
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.snapshot._available_memory_mb", return_value=400),
+            patch("server.snapshot.subprocess.Popen", return_value=process),
+            patch("server.snapshot._kill_capture_process"),
+        ):
+            root = Path(tmp)
+            png, html = root / "a.png", root / "a.html"
+            result = _isolated_playwright_capture("https://example.com", png, html)
+            self.assertEqual(result["method"], "playwright")
+            self.assertEqual(png.read_bytes(), b"complete PNG")
+            self.assertEqual(html.read_text(), "archive")
+            self.assertEqual(sorted(root.iterdir()), [html, png])
+
+    def test_browser_collector_and_screenshots_share_the_same_capacity(self):
+        from server import browser_jobs
+
+        with CAPTURE_SLOT:
+            with self.assertRaisesRegex(FetchError, "busy"):
+                browser_jobs.run_browser_job("meta_ads", {})
 
     def test_emergency_memory_uses_small_chunks(self):
         self.assertEqual(_capture_chunk_height(64), 420)
@@ -107,6 +198,19 @@ class VisualDiffTests(unittest.TestCase):
             })())
         self.assertTrue(result["queued"])
         queue.assert_called_once_with(row)
+
+    def test_repeated_manual_requests_share_one_worker_and_one_queue_entry(self):
+        with (
+            patch.object(web_domain, "_manual_pending", {}),
+            patch.object(web_domain, "_manual_worker_running", False),
+            patch.object(web_domain.threading, "Thread") as thread,
+        ):
+            web_domain._queue_capture({"id": "first"})
+            web_domain._queue_capture({"id": "first"})
+            web_domain._queue_capture({"id": "second"})
+            self.assertEqual(list(web_domain._manual_pending), ["first", "second"])
+            thread.assert_called_once()
+            thread.return_value.start.assert_called_once()
 
     def test_capture_uses_safe_mode_before_raster_fallback(self):
         with patch("server.snapshot._available_memory_mb", return_value=600), patch(

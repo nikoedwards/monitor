@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -43,6 +44,13 @@ from .common import get_conn
 from ..db import db
 
 router = APIRouter(prefix="/api/web", tags=["web"])
+logger = logging.getLogger(__name__)
+_CAPTURE_RUN_SLOT = threading.Lock()
+_MANUAL_QUEUE_LOCK = threading.Lock()
+_MANUAL_CAPTURE_LIMIT = 32
+_manual_pending: dict[str, None] = {}
+_manual_active: str | None = None
+_manual_worker_running = False
 
 DEFAULT_INTERVAL_MINUTES = 1440
 VISUAL_CHANGE_THRESHOLD = 0.025
@@ -380,7 +388,7 @@ def _reuse_recent_shared_capture(
     return None
 
 
-def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
+def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str, *, wait_for_browser: bool = False) -> dict:
     base_name = f"{monitor['id']}_{new_id()[:8]}"
     shared = _reuse_recent_shared_capture(conn, monitor, url, base_name)
     shared_text_hash = ""
@@ -407,6 +415,7 @@ def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
             page.get("html", ""),
             base_name,
             prefetch_error=prefetch_error,
+            wait_for_browser=wait_for_browser,
         )
         if _failed_capture_metadata(json.dumps(capture_meta)):
             raise SnapshotCaptureError(capture_meta.get("error") or "截图引擎未生成真实网页截图")
@@ -451,7 +460,18 @@ def _capture_one(conn: sqlite3.Connection, monitor: dict, url: str) -> dict:
     return snapshot_to_dict(conn.execute("SELECT * FROM web_snapshots WHERE id = ?", (snapshot_id,)).fetchone())
 
 
-def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
+def capture_monitor(conn: sqlite3.Connection, monitor: dict, *, queued: bool = False) -> list[dict]:
+    # Serialize the full pipeline, including HTML prefetch, file cloning and
+    # decoding the screenshots for comparison after the browser has exited.
+    if not _CAPTURE_RUN_SLOT.acquire(blocking=queued):
+        raise SnapshotCaptureBusy("正在生成其他网页快照，请稍后重试")
+    try:
+        return _capture_monitor_pages(conn, monitor, wait_for_browser=queued)
+    finally:
+        _CAPTURE_RUN_SLOT.release()
+
+
+def _capture_monitor_pages(conn: sqlite3.Connection, monitor: dict, *, wait_for_browser: bool) -> list[dict]:
     urls = (
         _discover_pages(monitor["url"], monitor.get("crawl_limit") or DEFAULT_CRAWL_LIMIT)
         if monitor.get("scope") == "domain"
@@ -460,7 +480,7 @@ def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
     snapshots, errors = [], []
     for url in urls:
         try:
-            snapshots.append(_capture_one(conn, monitor, url))
+            snapshots.append(_capture_one(conn, monitor, url, wait_for_browser=wait_for_browser))
         except SnapshotCaptureBusy:
             raise
         except FetchError as exc:
@@ -498,30 +518,46 @@ def capture_monitor(conn: sqlite3.Connection, monitor: dict) -> list[dict]:
     return snapshots
 
 
-def _capture_monitor_background(monitor: dict) -> None:
-    """Run a manual capture outside the HTTP request lifetime."""
-    try:
-        with db() as conn:
-            capture_monitor(conn, monitor)
-    except Exception:
-        # capture_monitor records expected page failures on the monitor. Keep
-        # the worker exception out of the request server and log it through
-        # the application's standard exception hook when available.
-        import logging
-
-        logging.getLogger(__name__).exception(
-            "Background web snapshot failed for %s", monitor.get("id")
-        )
+def _capture_monitor_background() -> None:
+    """Drain coalesced requests in order with one background worker."""
+    global _manual_active, _manual_worker_running
+    while True:
+        with _MANUAL_QUEUE_LOCK:
+            if not _manual_pending:
+                _manual_worker_running = False
+                return
+            monitor_id = next(iter(_manual_pending))
+            del _manual_pending[monitor_id]
+            _manual_active = monitor_id
+        try:
+            with db() as conn:
+                row = conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone()
+                if row:
+                    capture_monitor(conn, dict(row), queued=True)
+        except Exception:
+            logger.exception("Background web snapshot failed for %s", monitor_id)
+        finally:
+            with _MANUAL_QUEUE_LOCK:
+                _manual_active = None
 
 
 def _queue_capture(monitor: dict) -> None:
-    thread = threading.Thread(
-        target=_capture_monitor_background,
-        args=(dict(monitor),),
-        name=f"web-snapshot-{monitor.get('id', 'unknown')[:8]}",
-        daemon=True,
-    )
-    thread.start()
+    global _manual_worker_running
+    monitor_id = monitor["id"]
+    with _MANUAL_QUEUE_LOCK:
+        if monitor_id == _manual_active or monitor_id in _manual_pending:
+            return
+        if len(_manual_pending) >= _MANUAL_CAPTURE_LIMIT:
+            raise HTTPException(status_code=429, detail="截图队列已满，请稍后重试", headers={"Retry-After": "30"})
+        _manual_pending[monitor_id] = None
+        if not _manual_worker_running:
+            thread = threading.Thread(target=_capture_monitor_background, name="web-snapshot-queue", daemon=True)
+            try:
+                thread.start()
+            except RuntimeError:
+                del _manual_pending[monitor_id]
+                raise
+            _manual_worker_running = True
 
 
 def check_monitor(conn: sqlite3.Connection, monitor: dict) -> dict:
@@ -735,12 +771,17 @@ def create_monitor(payload: WebMonitorIn, conn: sqlite3.Connection = Depends(get
         ),
     )
     monitor = dict(conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone())
+    capture_queued = False
     try:
         snapshots = capture_monitor(conn, monitor) if payload.capture_now else []
-    except SnapshotCaptureBusy as exc:
-        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
+    except SnapshotCaptureBusy:
+        _queue_capture(monitor)
+        snapshots = []
+        capture_queued = True
     result = monitor_to_dict(conn, conn.execute("SELECT * FROM web_monitors WHERE id = ?", (monitor_id,)).fetchone())
     result["snapshots"] = snapshots
+    if capture_queued:
+        result["capture_queued"] = True
     return result
 
 
@@ -816,7 +857,7 @@ def capture(monitor_id: str, conn: sqlite3.Connection = Depends(get_conn)):
     return {
         "queued": True,
         "monitor_id": monitor_id,
-        "message": "截图任务已开始，完成后会出现在时间线中",
+        "message": "截图任务已排队，完成后会出现在时间线中",
     }
 
 
