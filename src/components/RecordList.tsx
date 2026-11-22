@@ -359,7 +359,7 @@ function SocialMeta({ metrics }: { metrics: Record<string, unknown> }) {
   );
 }
 
-function SentimentBadge({ record }: { record: RecordItem }) {
+export function SentimentBadge({ record }: { record: RecordItem }) {
   const sentiment = record.sentiment;
   if (!sentiment) return null;
   const explanation = record.sentiment_explanation;
