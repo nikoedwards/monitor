@@ -334,6 +334,10 @@ def capture(
                       document.head.appendChild(s);
                     }""")
                     readiness = page.wait_for_render()
+                    data = page.evaluate("""() => ({
+                      final_url:location.href, title:document.title,
+                      text:(document.body?.innerText||'').slice(0,200000)
+                    })""")
                     stage = "screenshot"
                     timings["navigation"] = round(time.monotonic() - started - timings["launch"], 2)
                     tiles = _capture_chunked_screenshot(

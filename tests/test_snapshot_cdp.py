@@ -19,6 +19,24 @@ def _has_browser() -> bool:
 
 @unittest.skipUnless(_has_browser(), "Chromium is not installed")
 class SnapshotCdpIntegrationTests(unittest.TestCase):
+    def test_waits_for_application_to_replace_fullscreen_loader(self):
+        source = """<html><body>
+          <div id='c-preloaderapp' style='position:fixed;inset:0;background:white'>Loading</div>
+          <main style='height:1400px;background:#123456'>Initial content</main>
+          <script>setTimeout(() => {
+            document.querySelector('#c-preloaderapp').style.display='none';
+            document.querySelector('main').textContent='Application rendered';
+          }, 500)</script></body></html>"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = capture('data:text/html;charset=utf-8,'+quote(source),
+                             root/'app.png', root/'app.html', source)
+            self.assertNotIn('error', result)
+            self.assertIn('Application rendered', result['page']['text'])
+            self.assertTrue(result['readiness']['ready'])
+            self.assertFalse(result['script_execution_disabled'])
+            self.assertTrue((root/'app.png').is_file())
+
     def test_cdp_emergency_mode_writes_real_chunked_png(self):
         source = (
             "<html><body><main style='height:1400px;background:linear-gradient(red,blue)'>"
