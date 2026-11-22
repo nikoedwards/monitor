@@ -15,12 +15,11 @@ import logging
 import mimetypes
 import os
 import re
-import signal
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
+import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
@@ -28,6 +27,9 @@ from html import escape as html_escape
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
 
+from .browser_jobs import BROWSER_SLOT as CAPTURE_SLOT
+from .browser_jobs import available_memory_mb as _available_memory_mb
+from .browser_jobs import kill_process_tree
 from .config import ROOT, SNAPSHOT_DIR
 from .fetchers import _is_blocked_host
 from .util import clean_text
@@ -44,7 +46,6 @@ ARCHIVE_IMAGE_MAX_DIMENSION = 1600
 ARCHIVE_IMAGE_WEBP_QUALITY = 78
 CAPTURE_MAX_ATTEMPTS = 2
 CAPTURE_RETRY_DELAYS_MS = (2_000,)
-CAPTURE_SLOT = threading.BoundedSemaphore(1)
 # Chromium routinely needs several hundred MB at startup. Keep a large safety
 # margin on small VPS hosts so a screenshot cannot take down SSH/Docker itself.
 # The production container is capped at 640 MB. The 320 MB floor reserves
@@ -68,6 +69,8 @@ CAPTURE_NAVIGATION_TIMEOUT_MS = 15_000
 CAPTURE_RENDER_WAIT_TIMEOUT_MS = 8_000
 CAPTURE_BROWSER_TIMEOUT_SECONDS = 25
 CAPTURE_JOB_TIMEOUT_SECONDS = int(os.environ.get("MONITOR_CAPTURE_JOB_TIMEOUT_SECONDS", "90"))
+CAPTURE_START_HEADROOM_MB = int(os.environ.get("MONITOR_CAPTURE_START_HEADROOM_MB", "192"))
+CAPTURE_RESERVE_MB = int(os.environ.get("MONITOR_CAPTURE_RESERVE_MB", "96"))
 CAPTURE_ISOLATED = os.environ.get("MONITOR_CAPTURE_ISOLATED", "0").strip().lower() in {"1", "true", "yes"}
 _CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
 _ARCHIVE_GUARD_MARKER = f'data-monitor-archive-guard="{ARCHIVE_REPLAY_VERSION}"'
@@ -89,30 +92,6 @@ class SnapshotCaptureError(RuntimeError):
 
 class SnapshotCaptureBusy(RuntimeError):
     """A Chromium capture is already running in this process."""
-
-
-def _available_memory_mb() -> int | None:
-    """Return the memory available to the container when Linux exposes it."""
-    limits: list[int] = []
-    try:
-        current_path = Path("/sys/fs/cgroup/memory.current")
-        limit_path = Path("/sys/fs/cgroup/memory.max")
-        if current_path.is_file() and limit_path.is_file():
-            current = int(current_path.read_text().strip())
-            limit_raw = limit_path.read_text().strip()
-            if limit_raw != "max":
-                limit = int(limit_raw)
-                limits.append(max(0, (limit - current) // (1024 * 1024)))
-    except (OSError, ValueError):
-        pass
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                limits.append(max(0, int(line.split()[1]) // 1024))
-                break
-    except (OSError, ValueError, IndexError):
-        pass
-    return min(limits) if limits else None
 
 
 def _capture_error_reason(status: int | None, page_url: str, body_text: str) -> str:
@@ -725,6 +704,7 @@ def _capture_chunked_screenshot(
                         Image.Resampling.LANCZOS,
                     )
                 canvas.paste(piece, (0, int(round((y + source_top) * scale))))
+            chunk_path.unlink()
             previous_end = max(previous_end, y + viewport_height)
         page.evaluate("window.scrollTo(0, 0)")
         canvas.save(png_path, format="PNG", optimize=False)
@@ -1242,24 +1222,7 @@ def _playwright_capture(
 
 def _kill_capture_process(process: subprocess.Popen) -> None:
     """Terminate an isolated browser worker and every Chromium child it owns."""
-    try:
-        if os.name == "nt":
-            # ``Popen.kill`` only terminates the Python worker on Windows;
-            # Chromium is a separate child process.  Kill the process tree so
-            # a timed-out capture cannot leave a headless browser behind.
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
-        try:
-            process.kill()
-        except OSError:
-            pass
+    kill_process_tree(process)
 
 
 def _isolated_playwright_capture(
@@ -1271,19 +1234,80 @@ def _isolated_playwright_capture(
     safe_mode: bool = False,
 ) -> dict | None:
     """Run Chromium outside the API process so a stuck browser is disposable."""
-    source_limit = 1_000_000 if safe_mode else 3_000_000
-    request = json.dumps(
-        {
+    parsed_url = urlparse(url)
+    target = parsed_url.hostname or parsed_url.scheme
+    available = _available_memory_mb()
+    if available is not None and available < CAPTURE_START_HEADROOM_MB:
+        logger.warning("Snapshot deferred host=%s available_mib=%s", target, available)
+        return {"error": f"截图暂缓：可用内存 {available} MiB，低于启动余量 {CAPTURE_START_HEADROOM_MB} MiB"}
+    deadline = time.monotonic() + CAPTURE_JOB_TIMEOUT_SECONDS
+    result = _capture_in_staging(url, png_path, html_path, source_html, safe_mode, available, target, deadline)
+    if result.get("resource_pressure") and sys.platform.startswith("linux") and time.monotonic() < deadline:
+        available = _available_memory_mb()
+        if available is None or available >= CAPTURE_START_HEADROOM_MB:
+            logger.warning("Snapshot retry host=%s reason=memory_reserve mode=scriptless", target)
+            result = _capture_in_staging(
+                url, png_path, html_path, source_html, True, available, target, deadline, scriptless=True,
+            )
+    return result
+
+
+def _capture_in_staging(
+    url: str,
+    png_path: Path,
+    html_path: Path,
+    source_html: str,
+    safe_mode: bool,
+    available: int | None,
+    target: str,
+    deadline: float,
+    *,
+    scriptless: bool = False,
+) -> dict:
+    # Keep every intermediate file in a directory owned by the supervising
+    # process. A killed renderer cannot clean up its tiles or Chromium profile.
+    with tempfile.TemporaryDirectory(prefix=".capture-", dir=png_path.parent, ignore_cleanup_errors=True) as directory:
+        staging = Path(directory).resolve()
+        staged_png = staging / png_path.name
+        staged_archive = staging / html_path.name
+        request = {
             "url": url,
-            "png_path": str(png_path),
-            "html_path": str(html_path),
-            "source_html": source_html[:source_limit],
+            "png_path": str(staged_png),
+            "html_path": str(staged_archive),
+            "source_html": source_html[:1_000_000 if safe_mode else 3_000_000],
             "safe_mode": safe_mode,
-        },
-        ensure_ascii=False,
-    )
+            "scriptless": scriptless,
+        }
+        result = _run_snapshot_worker(request, staging, available, target, deadline)
+        if not result.get("error"):
+            if not staged_png.is_file() or staged_png.stat().st_size == 0:
+                return {"error": "截图进程没有写入 PNG"}
+            if staged_archive.exists():
+                staged_archive.replace(html_path)
+            try:
+                staged_png.replace(png_path)
+            except OSError:
+                html_path.unlink(missing_ok=True)
+                raise
+        return result
+
+
+def _run_snapshot_worker(
+    request: dict,
+    staging: Path,
+    available: int | None,
+    target: str,
+    deadline: float,
+) -> dict:
     env = os.environ.copy()
-    env["MONITOR_CAPTURE_ISOLATED"] = "0"
+    env.update(MONITOR_CAPTURE_ISOLATED="0", TMPDIR=str(staging), TMP=str(staging), TEMP=str(staging))
+    started = time.monotonic()
+    low_water = available
+    outcome = "worker_error"
+    logger.warning(
+        "Snapshot start host=%s safe_mode=%s scriptless=%s available_mib=%s",
+        target, request["safe_mode"], request["scriptless"], available,
+    )
     process = subprocess.Popen(
         [sys.executable, "-m", "server.snapshot_worker"],
         cwd=str(ROOT),
@@ -1293,32 +1317,52 @@ def _isolated_playwright_capture(
         start_new_session=(os.name != "nt"),
         env=env,
     )
+    data = json.dumps(request, ensure_ascii=False).encode("utf-8")
     try:
-        stdout, stderr = process.communicate(
-            request.encode("utf-8"), timeout=CAPTURE_JOB_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                outcome = "deadline"
+                return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止"}
+            try:
+                stdout, stderr = process.communicate(data, timeout=min(0.5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                data = None
+                available = _available_memory_mb()
+                if available is not None:
+                    low_water = available if low_water is None else min(low_water, available)
+                    if available < CAPTURE_RESERVE_MB:
+                        outcome = "memory_reserve"
+                        return {
+                            "error": f"截图已结束以保护服务器：可用内存 {available} MiB，低于保留量 {CAPTURE_RESERVE_MB} MiB",
+                            "resource_pressure": True,
+                        }
+        if process.returncode:
+            detail = stderr or stdout or f"worker exit {process.returncode}".encode()
+            return {"error": detail.decode("utf-8", errors="replace").strip()[-500:]}
+        try:
+            result = json.loads(stdout.decode("utf-8", errors="replace").strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            return {"error": "截图进程未返回有效结果"}
+        if not isinstance(result, dict):
+            return {"error": "截图进程未返回有效结果"}
+        if result.get("error_type") == "snapshot_capture":
+            raise SnapshotCaptureError(result.get("error") or "隔离截图失败")
+        if not result.get("error"):
+            outcome = "success"
+        return result
+    finally:
+        if os.name != "nt" or process.returncode is None:
+            _kill_capture_process(process)
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            logger.error("Snapshot worker did not reap promptly pid=%s", process.pid)
+        logger.warning(
+            "Snapshot finish host=%s pid=%s outcome=%s elapsed_s=%.1f min_available_mib=%s exit=%s",
+            target, process.pid, outcome, time.monotonic() - started, low_water, process.returncode,
         )
-    except subprocess.TimeoutExpired:
-        _kill_capture_process(process)
-        process.communicate()
-        return {"error": f"隔离截图进程超过 {CAPTURE_JOB_TIMEOUT_SECONDS} 秒，已强制终止"}
-    if os.name != "nt":
-        # The worker normally closes Chromium itself. Kill any process-group
-        # stragglers before parsing the result so they cannot accumulate.
-        _kill_capture_process(process)
-    if process.returncode != 0:
-        detail = (
-            stderr or stdout or f"worker exit {process.returncode}".encode("utf-8")
-        ).decode("utf-8", errors="replace").strip()
-        return {"error": detail[-500:]}
-    try:
-        output = (stdout or b"").decode("utf-8", errors="replace")
-        result = json.loads(output.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        detail = (stdout or stderr or "截图进程未返回有效结果".encode("utf-8"))
-        return {"error": detail.decode("utf-8", errors="replace")[-500:]}
-    if result.get("error_type") == "snapshot_capture":
-        raise SnapshotCaptureError(result.get("error") or "隔离截图失败")
-    return result
 
 
 def _browser_candidates() -> list[str]:
@@ -1633,14 +1677,21 @@ def capture_artifacts(
     base_name: str,
     *,
     prefetch_error: str = "",
+    wait_for_browser: bool = False,
 ) -> tuple[str, str, dict]:
     """Capture one page while protecting the host from Chromium pile-ups.
 
-    The scheduler and the HTTP request handler share this non-blocking slot.
-    A second request fails immediately so it cannot accumulate waiting worker
-    threads or browser processes while the first capture is stuck.
+    Scheduled and interactive callers normally skip a busy slot. The single
+    manual queue worker may wait for a collector before continuing.
     """
-    if not CAPTURE_SLOT.acquire(blocking=False):
+    if wait_for_browser:
+        acquired = CAPTURE_SLOT.acquire(timeout=max(
+            CAPTURE_JOB_TIMEOUT_SECONDS,
+            int(os.environ.get("MONITOR_COLLECTOR_TIMEOUT_SECONDS", "90")),
+        ) + 10)
+    else:
+        acquired = CAPTURE_SLOT.acquire(blocking=False)
+    if not acquired:
         raise SnapshotCaptureBusy("截图引擎正在处理另一个任务，请稍后重试")
     try:
         available_memory_mb = _available_memory_mb()
@@ -1673,18 +1724,20 @@ def compare_visuals(current_filename: str, previous_filename: str | None) -> dic
             current_path = SNAPSHOT_DIR / current_path
         if not previous_path.is_absolute():
             previous_path = SNAPSHOT_DIR / previous_path
-        with Image.open(current_path) as current_raw, Image.open(previous_path) as previous_raw:
-            current = current_raw.convert("RGB")
-            previous = previous_raw.convert("RGB")
-            source_size = {"width": current.width, "height": current.height}
-            target_width = 560
+        target_width = 560
 
-            def normalized(image):
-                height = max(1, min(10000, round(image.height * target_width / max(image.width, 1))))
-                return image.resize((target_width, height))
+        def normalized(path):
+            with Image.open(path) as raw:
+                size = {"width": raw.width, "height": raw.height}
+                height = max(1, min(10000, round(raw.height * target_width / max(raw.width, 1))))
+                with raw.convert("RGB") as image:
+                    reduced = image.resize((target_width, height))
+            with reduced:
+                return reduced.filter(ImageFilter.GaussianBlur(radius=0.8)), size
 
-            current_small = normalized(current).filter(ImageFilter.GaussianBlur(radius=0.8))
-            previous_small = normalized(previous).filter(ImageFilter.GaussianBlur(radius=0.8))
+        current_small, source_size = normalized(current_path)
+        previous_small, previous_size = normalized(previous_path)
+        with current_small, previous_small:
             canvas_height = max(current_small.height, previous_small.height)
             current_canvas = Image.new("RGB", (target_width, canvas_height), "white")
             previous_canvas = Image.new("RGB", (target_width, canvas_height), "white")
@@ -1723,7 +1776,7 @@ def compare_visuals(current_filename: str, previous_filename: str | None) -> dic
                 "ratio": round(ratio, 4),
                 "regions": regions[:8],
                 "source_size": source_size,
-                "previous_size": {"width": previous.width, "height": previous.height},
+                "previous_size": previous_size,
             }
     except Exception as exc:
         return {"available": False, "score": 0.0, "ratio": 0.0, "regions": [], "error": str(exc)[:200]}

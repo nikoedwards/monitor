@@ -29,17 +29,17 @@ class BrowserJobTests(unittest.TestCase):
             with self.assertRaisesRegex(FetchError, "deferred"):
                 jobs.run_browser_job("meta_ads", {})
             launch.assert_not_called()
-        self.assertTrue(jobs._SLOT.acquire(False))
-        jobs._SLOT.release()
+        self.assertTrue(jobs.BROWSER_SLOT.acquire(False))
+        jobs.BROWSER_SLOT.release()
 
     def test_busy_job_does_not_release_another_jobs_slot(self):
-        jobs._SLOT.acquire()
+        jobs.BROWSER_SLOT.acquire()
         try:
             with self.assertRaisesRegex(FetchError, "busy"):
                 jobs.run_browser_job("instagram", {})
-            self.assertFalse(jobs._SLOT.acquire(False))
+            self.assertFalse(jobs.BROWSER_SLOT.acquire(False))
         finally:
-            jobs._SLOT.release()
+            jobs.BROWSER_SLOT.release()
 
     def fake_process(self, data=None):
         process = MagicMock()

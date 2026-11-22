@@ -15,6 +15,11 @@ from .worker_support import _attach_windows_job, _prefer_worker_oom_kill
 def main() -> int:
     _attach_windows_job()
     _prefer_worker_oom_kill()
+    if hasattr(os, "nice"):
+        try:
+            os.nice(10)
+        except OSError:
+            pass
     request = json.loads(sys.stdin.read())
     try:
         capture = _playwright_capture
@@ -24,14 +29,18 @@ def main() -> int:
             from .snapshot_cdp import capture as capture_cdp
 
             capture = capture_cdp
+        scriptless = bool(request.get("scriptless"))
+        options = {"safe_mode": bool(request.get("safe_mode"))}
+        if capture is not _playwright_capture and scriptless:
+            options["scriptless"] = True
         result = capture(
             request["url"],
             Path(request["png_path"]),
             Path(request["html_path"]),
             request.get("source_html") or "",
-            safe_mode=bool(request.get("safe_mode")),
+            **options,
         )
-        if capture is not _playwright_capture and result and result.get("error"):
+        if capture is not _playwright_capture and not scriptless and result and result.get("error"):
             # Heavy storefront scripts can exceed the small host's budget.
             # Retry with a fresh, real Chromium renderer before resorting to
             # a text image; static HTML/CSS/images remain browser-rendered.
