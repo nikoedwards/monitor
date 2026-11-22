@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS brands (
   social_links_json TEXT,
   ecommerce_links_json TEXT,
   monitoring_keywords_json TEXT,
+  headcount_reference_json TEXT,
   raw_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -773,6 +774,7 @@ MIGRATIONS = [
     ("brands", "is_primary", "INTEGER NOT NULL DEFAULT 0"),
     ("brands", "slug", "TEXT"),
     ("brands", "updated_at", "TEXT"),
+    ("brands", "headcount_reference_json", "TEXT"),
     ("sales_metrics", "asin", "TEXT"),
     ("sales_metrics", "bsr", "INTEGER"),
     ("sales_metrics", "category_rank", "INTEGER"),

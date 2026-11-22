@@ -42,6 +42,8 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
   const [strategyOpen, setStrategyOpen] = useState(false);
   const data = radarQuery.data;
   const estimate = estimation.data?.estimate;
+  const reference = data?.headcount_reference;
+  const referenceLabel = reference && "约 " + reference.count.toLocaleString("zh-CN") + " 人";
   const status = estimation.data?.generation;
   const generating = estimation.generate.isPending || status?.status === "running";
   const hasEvidence = !!data && (data.data_quality.postings_total > 0 || data.overview.known_people > 0);
@@ -81,14 +83,25 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
         <div className="px-4 sm:px-6 pb-5">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[1.5fr_1fr_1fr_1fr]">
             <div className="rounded-xl border p-4" style={{ background: "color-mix(in srgb, var(--accent) 6%, var(--panel))", borderColor: "color-mix(in srgb, var(--accent) 20%, var(--hairline))" }}>
-              <p className="flex items-center gap-2 text-[13px] font-medium" style={{ color: "var(--accent)" }}><Building2 size={16} /> 估计总人数</p>
+              <p className="flex items-center gap-2 text-[13px] font-medium" style={{ color: "var(--accent)" }}><Building2 size={16} /> {reference ? "全球员工数参考" : "估计总人数"}</p>
               <p className="mt-2 text-[26px] font-semibold tracking-tight tabular-nums" style={{ color: "var(--ink)" }}>
-                {estimate ? headcount(estimate.overall) : hasEvidence ? "待推演" : "证据不足"}
+                {referenceLabel || (estimate ? headcount(estimate.overall) : hasEvidence ? "待推演" : "证据不足")}
               </p>
               <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: "var(--mute)" }}>
-                {estimate?.overall && confidenceBadge(estimate.overall.confidence)}
-                {estimate?.generated_at ? fmtDateTime(estimate.generated_at) + " 更新" : "模型区间估算"}
+                {reference ? (
+                  <span>{reference.source} · {reference.as_of}</span>
+                ) : (
+                  <>
+                    {estimate?.overall && confidenceBadge(estimate.overall.confidence)}
+                    {estimate?.generated_at ? fmtDateTime(estimate.generated_at) + " 更新" : "模型区间估算"}
+                  </>
+                )}
               </div>
+              {reference && estimate?.overall && (
+                <p className="mt-1.5 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: "var(--body)" }}>
+                  模型估算 {headcount(estimate.overall)} {confidenceBadge(estimate.overall.confidence)}
+                </p>
+              )}
             </div>
             <ObservedStat icon={MapPin} label="有记录的招聘地区" value={data.overview.city_count} />
             <ObservedStat icon={BriefcaseBusiness} label="当前在招职位记录" value={data.overview.open_roles} />
@@ -96,7 +109,7 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
           </div>
 
           <div className="mt-3 space-y-1 text-[12px]" style={{ color: "var(--mute)" }}>
-            <p>招聘记录覆盖 {data.window.start} 至 {data.window.end}。招聘地点可用于推测团队落点，实体办公室仍待核实。</p>
+            <p>招聘记录覆盖 {data.window.start} 至 {data.window.end}。地点来自职位地点字段或平台标题，实体办公室仍待核实。</p>
             {hasEvidence && settings.data && !settings.data.configured && <p>配置大模型后可生成人数区间。</p>}
             {generating && <p role="status">正在根据已采集的证据推演，完成后自动更新。</p>}
             {estimateError && !generating && <p role="alert" style={{ color: "var(--danger)" }}>{estimateError}</p>}
@@ -193,6 +206,7 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
       </details>
       <Modal title="人数估算依据" open={methodOpen} onClose={() => setMethodOpen(false)}>
         <div className="space-y-3 text-[13px] leading-5" style={{ color: "var(--body)" }}>
+          {reference && <p>全球员工数参考为{referenceLabel}（{reference.source}，{reference.as_of}）。各地区和部门的人数需结合各自的规模证据估算。</p>}
           {estimate?.summary && <p>{estimate.summary}</p>}
           <p>部门沿用来源标签，缺失时根据职位名称或 JD 归类。岗位族归并职级不同的相似职位。公开员工样本没有可靠地区字段，目前用于公司、部门与岗位族的参考下界。</p>
           <p>在招职位反映当前招聘需求。人数区间按各维度独立估算，证据不足的分组留空，局部区间不可直接相加。</p>
@@ -246,7 +260,7 @@ function PostingEvidence({ group, estimate }: { group: HiringOrgRadarGroup; esti
               ? <a href={item.url} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: "var(--accent)" }}>{item.title}</a>
               : <span>{item.title}</span>}
             <span style={{ color: "var(--mute)" }}>
-              {[item.city, item.status === "closed" ? "已下线" : "在招", item.first_seen?.slice(0, 10), used.has(item.id) && "估算引用"].filter(Boolean).join(" · ")}
+              {[item.city, item.city_source === "linkedin_title" && "标题地点", item.status === "closed" ? "已下线" : "在招", item.first_seen?.slice(0, 10), used.has(item.id) && "估算引用"].filter(Boolean).join(" · ")}
             </span>
           </li>
         ))}

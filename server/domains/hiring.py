@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from .. import ai
 from ..analysis_jobs import analysis_job
 from ..config import ROOT
+from ..connectors.hiring.linkedin import parse_linkedin_job_title
 from ..connectors.hiring.runner import (
     discover_linkedin_people_candidates,
     ingest_browser_hiring_capture,
@@ -30,6 +31,7 @@ from ..connectors.hiring.runner import (
 )
 from ..schemas import (
     BrowserHiringCaptureIn,
+    HiringHeadcountReferenceIn,
     LinkedInMonitorSelectionIn,
     LinkedInProfileIn,
     LinkedInProfileUpdate,
@@ -712,10 +714,57 @@ def _radar_evidence(postings: list[dict], limit: int = 5) -> list[dict]:
             "first_seen": posting.get("first_seen"),
             "closed_at": posting.get("closed_at"),
             "city": posting.get("city"),
+            "city_source": posting.get("city_source"),
             "status": posting.get("status"),
         }
         for posting in postings[:limit]
     ]
+
+
+def _organization_postings(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict]:
+    postings = []
+    for row in rows:
+        posting = dict(row)
+        if posting["platform"] == "linkedin":
+            title, city = parse_linkedin_job_title(posting["title"])
+            if not title:
+                for snapshot in conn.execute(
+                    "SELECT title, city, is_open FROM job_snapshots WHERE posting_id = ? "
+                    "ORDER BY snapshot_date DESC, created_at DESC",
+                    (posting["id"],),
+                ):
+                    title, city = parse_linkedin_job_title(snapshot["title"])
+                    if title:
+                        posting["city"] = posting["city"] or snapshot["city"]
+                        if snapshot["is_open"] is not None:
+                            posting["status"] = "open" if snapshot["is_open"] else "closed"
+                        break
+                if not title:
+                    continue
+            posting["title"] = title
+            if city and not clean_text(posting["city"]):
+                posting["city"] = city
+                posting["city_source"] = "linkedin_title"
+        postings.append(posting)
+    return postings
+
+
+@router.put("/headcount-reference")
+def save_hiring_headcount_reference(
+    brand_id: str,
+    payload: HiringHeadcountReferenceIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    fetch_brand(conn, brand_id)
+    source = clean_text(payload.source)
+    if not source:
+        raise HTTPException(status_code=422, detail="请输入人数情报的来源。")
+    reference = {**payload.model_dump(mode="json"), "source": source}
+    conn.execute(
+        "UPDATE brands SET headcount_reference_json = ? WHERE id = ?",
+        (json.dumps(reference, ensure_ascii=False), brand_id),
+    )
+    return reference
 
 
 @router.get("/org-radar")
@@ -739,7 +788,11 @@ def hiring_org_radar(
         clauses.append("platform = ?")
         params.append(platform)
     where = " AND ".join(clauses)
-    postings = [dict(row) for row in conn.execute(f"SELECT * FROM job_postings WHERE {where}", params).fetchall()]
+    postings = _organization_postings(
+        conn, conn.execute(f"SELECT * FROM job_postings WHERE {where}", params).fetchall(),
+    )
+    brand = conn.execute("SELECT headcount_reference_json FROM brands WHERE id = ?", (brand_id,)).fetchone()
+    reference = json.loads(brand["headcount_reference_json"]) if brand and brand["headcount_reference_json"] else None
     if scope == "all_history" and not start_date and not end_date:
         start = min(((item["first_seen"] or end)[:10] for item in postings), default=end)
         start, end = resolve_window(1, start, end)
@@ -823,7 +876,10 @@ def hiring_org_radar(
             item["evidence"] = _radar_evidence(evidence)
             item["confidence"] = _radar_confidence(len(evidence), len(evidence_days), item.get("known_people", 0))
             out.append(item)
-        return sorted(out, key=lambda item: (-item["open_roles"], -item["known_people"], -item["released"], item[label_key]))[:20]
+        return sorted(out, key=lambda item: (
+            label_key == "city" and item[label_key] == "未标注地区",
+            -item["open_roles"], -item["known_people"], -item["released"], item[label_key],
+        ))[:20]
 
     department_rows = serialize(departments, "department")
     location_rows = serialize(locations, "city")
@@ -856,6 +912,7 @@ def hiring_org_radar(
     overview_confidence = _radar_confidence(evidence_total, len({day for item in postings for day in ((item.get("first_seen") or "")[:10], (item.get("closed_at") or "")[:10]) if start <= day <= end}), len(profiles))
     return {
         "window": {"start": start, "end": end},
+        "headcount_reference": reference,
         "overview": {
             "open_roles": sum(item["open_roles"] for item in departments.values()),
             "known_people": len(profiles),
