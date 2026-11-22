@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { Bars } from "../components/charts";
 import { Badge, Card, EmptyState, SectionTitle, Spinner } from "../components/ui";
 import { TimeRangePicker } from "../components/TimeRangePicker";
+import { CompareSummary } from "../components/CompareSummary";
 import { useCompare } from "../lib/hooks";
 import { useTimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
@@ -24,6 +25,8 @@ export default function Compare() {
   return (
     <div className="space-y-6">
       <SectionTitle title="竞品对比" subtitle="跨品牌的声量、口碑、营销、销售与网页动态横向对比" action={<TimeRangePicker />} />
+
+      <CompareSummary key={`${range.start_date}:${range.end_date}:${brands.map((brand) => brand.brand_id).sort().join(",")}`} range={range} brandIds={brands.map((brand) => brand.brand_id)} />
 
       <Card>
         <div className="overflow-x-auto">

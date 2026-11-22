@@ -192,6 +192,11 @@ class _Page:
         return result
 
     def screenshot(self, path, **_options):
+        available = _available_memory_mb()
+        if available is not None and available < 160:
+            # Discard decoded images/JS garbage from previous tiles before
+            # hitting the supervisor's API reserve. DOM content is retained.
+            self.call('Memory.simulatePressureNotification', {'level':'critical'})
         if not getattr(self, 'scriptless', False):
             self.wait_for_timeout(500)
         result = self.call("Page.captureScreenshot", {
@@ -223,7 +228,7 @@ class _Page:
 
 def capture(
     url: str, png_path: Path, html_path: Path, source_html="", *,
-    safe_mode=True, scriptless=False,
+    safe_mode=True, scriptless=False, trace_stages=False, prefer_prefetched=False,
 ):
     import websocket
 
@@ -245,7 +250,15 @@ def capture(
     )
     browser = None
     socket = None
-    stage = "launch"
+    stage = ""
+
+    def mark_stage(name):
+        nonlocal stage
+        stage = name
+        if trace_stages:
+            print(f"SNAPSHOT_STAGE={name}", file=sys.stderr, flush=True)
+
+    mark_stage("launch")
     started = time.monotonic()
     timings = {}
     # The outer isolated worker owns a process group. Keep Chromium in it so
@@ -320,21 +333,27 @@ def capture(
                     page.call("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
                     if scriptless:
                         page.call("Emulation.setScriptExecutionDisabled", {"value": True})
-                    stage = "navigation"
-                    timings["launch"] = round(time.monotonic() - started, 2)
-                    source_fallback = False
-                    try:
-                        data = page.navigate(url)
-                    except SnapshotCaptureError:
-                        if not source_html:
-                            raise
+                    timings['launch'] = round(time.monotonic()-started, 2)
+                    mark_stage("navigation")
+                    source_fallback = bool(prefer_prefetched and source_html)
+
+                    def enable_source_html():
                         page.source_html = source_html
-                        page.call("Fetch.enable", {"patterns": [
-                            {"resourceType": "Document", "requestStage": "Request"},
-                            {"resourceType": "Media", "requestStage": "Request"},
-                        ]})
+                        page.call("Fetch.enable", {"patterns": [{"resourceType": "Document", "requestStage": "Request"}, {"resourceType": "Media", "requestStage": "Request"}]})
+
+                    if source_fallback:
+                        enable_source_html()
                         data = page.navigate(url)
-                        source_fallback = True
+                    else:
+                        try:
+                            data = page.navigate(url)
+                        except SnapshotCaptureError:
+                            if not source_html:
+                                raise
+                            enable_source_html()
+                            data = page.navigate(url)
+                            source_fallback = True
+                    mark_stage("prepare")
                     page.evaluate("""() => {
                       for (const v of document.querySelectorAll('video')) { v.pause(); v.preload = 'none'; }
                       const s=document.createElement('style');
@@ -373,13 +392,14 @@ def capture(
                       final_url:location.href, title:document.title,
                       text:(document.body?.innerText||'').slice(0,200000)
                     })""")
-                    stage = "screenshot"
+                    mark_stage("screenshot")
                     timings["navigation"] = round(time.monotonic() - started - timings["launch"], 2)
                     tiles = _capture_chunked_screenshot(
                         page, png_path, height,
                         max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
                         on_tiles_captured=lambda: _stop_browser(browser, owns_browser_group),
                     )
+                    mark_stage("archive")
                     _write_fallback_archive(
                         html_path.name, data.get("final_url") or url, data.get("title", ""),
                         source_html[:1_000_000], data.get("text", ""),
