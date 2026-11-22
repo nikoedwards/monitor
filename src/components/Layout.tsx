@@ -272,7 +272,7 @@ export function Sidebar({ brandId }: { brandId: string }) {
         {NAV.map(({ to, label, icon: Icon }) => (
           <div key={to}>
             <NavLink
-              end
+              end={to === "market-share"}
               to={{ pathname: `/brand/${brandId}/${to}`, search: to === "market-share" && country ? new URLSearchParams({ country }).toString() : "" }}
               className="flex items-center gap-2.5 px-3 h-9 rounded-md text-[14px] font-medium transition-colors"
               style={({ isActive }) => {
