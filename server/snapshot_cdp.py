@@ -43,6 +43,8 @@ _BACKGROUND_URLS = [
 
 
 def _stop_browser(browser, owns_browser_group):
+    if getattr(browser, '_monitor_stopped', False):
+        return
     if owns_browser_group:
         _kill_capture_process(browser)
     else:
@@ -59,6 +61,7 @@ def _stop_browser(browser, owns_browser_group):
         browser.wait(timeout=3)
     except subprocess.TimeoutExpired:
         pass
+    browser._monitor_stopped = True
 
 
 def _browser_binary() -> str:
@@ -149,10 +152,47 @@ class _Page:
     def wait_for_timeout(self, milliseconds):
         time.sleep(milliseconds / 1000)
 
+    def wait_for_render(self):
+        result = self.evaluate("""() => new Promise(resolve => {
+          const deadline = Date.now() + 8000;
+          const inspect = () => {
+            const overlays = [...document.querySelectorAll(
+              '#c-preloaderapp,[id*=preloader i],[class*=preloader i],.loading-overlay'
+            )].filter(el => {
+              const r=el.getBoundingClientRect(), s=getComputedStyle(el);
+              return s.display!=='none' && s.visibility!=='hidden' && +s.opacity>0.05
+                && r.width>innerWidth*0.8 && r.height>innerHeight*0.8
+                && r.top<innerHeight*0.1 && r.left<innerWidth*0.1;
+            });
+            const images=[...document.images].filter(el => {
+              const r=el.getBoundingClientRect();
+              return r.width>100 && r.height>80 && r.bottom>0 && r.top<innerHeight;
+            });
+            const pending=images.filter(el=>!el.complete).length;
+            const ready=document.readyState==='complete' && !overlays.length && !pending;
+            if (ready || Date.now()>=deadline) {
+              resolve({ready, loading_overlay:overlays.length>0,
+                visible_images:images.length, pending_images:pending});
+            } else setTimeout(inspect,150);
+          };
+          inspect();
+        })""")
+        if result.get('loading_overlay'):
+            raise SnapshotCaptureError('Page still displays a full-screen loading overlay')
+        return result
+
     def screenshot(self, path, **_options):
-        result = self.call("Page.captureScreenshot", {
-            "format": "png", "captureBeyondViewport": False, "fromSurface": True,
-        }, timeout=15)
+        # Freeze page timers only after its application has rendered. Continuous
+        # storefront animation/analytics otherwise compete with rasterization.
+        was_disabled = getattr(self, 'scriptless', False)
+        self.call('Emulation.setScriptExecutionDisabled', {'value': True})
+        try:
+            result = self.call("Page.captureScreenshot", {
+                "format": "png", "captureBeyondViewport": False, "fromSurface": True,
+            }, timeout=15)
+        finally:
+            if not was_disabled:
+                self.call('Emulation.setScriptExecutionDisabled', {'value': False})
         Path(path).write_bytes(base64.b64decode(result["data"], validate=True))
 
     def navigate(self, url):
@@ -236,7 +276,16 @@ def capture(
                 try:
                     port_file = Path(profile) / "DevToolsActivePort"
                     deadline = time.monotonic() + CDP_STARTUP_TIMEOUT_SECONDS
-                    while not port_file.is_file():
+                    while True:
+                        try:
+                            port_lines = port_file.read_text().splitlines()
+                            if len(port_lines) >= 2:
+                                port, endpoint = port_lines[:2]
+                                break
+                        except OSError:
+                            # Chromium may have created the port file before
+                            # finishing its write (or releasing its Windows lock).
+                            pass
                         if browser.poll() is not None:
                             browser_log.seek(0)
                             raise RuntimeError(browser_log.read().decode(errors="replace")[-500:])
@@ -245,12 +294,12 @@ def capture(
                                 f"Chromium DevTools did not start within {CDP_STARTUP_TIMEOUT_SECONDS} seconds"
                             )
                         time.sleep(0.05)
-                    port, endpoint = port_file.read_text().splitlines()[:2]
                     socket = websocket.create_connection(
                         f"ws://127.0.0.1:{port}{endpoint}", timeout=6,
                         suppress_origin=True, enable_multithread=False, http_no_proxy=["127.0.0.1"],
                     )
                     page = _Page(socket)
+                    page.scriptless = scriptless
                     targets = page.call("Target.getTargets")["targetInfos"]
                     target = next(t["targetId"] for t in targets if t.get("type") == "page")
                     page.session = page.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
@@ -288,6 +337,7 @@ def capture(
                       s.textContent='*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
                       document.head.appendChild(s);
                     }""")
+                    readiness = page.wait_for_render()
                     stage = "screenshot"
                     timings["navigation"] = round(time.monotonic() - started - timings["launch"], 2)
                     tiles = _capture_chunked_screenshot(
@@ -305,6 +355,7 @@ def capture(
                         # which low-memory engine produced the image.
                         "method": "playwright", "engine": "chromium_cdp",
                         "timings": dict(timings, total=round(time.monotonic()-started, 2)),
+                        "readiness": readiness,
                         "script_execution_disabled": scriptless,
                         "source_html_fallback": source_fallback,
                         "page": data, "media": {
