@@ -669,20 +669,32 @@ export function useHiringSummary(brandId?: string, platform?: string, range?: Ti
   });
 }
 
-export function useHiringOrgRadar(brandId?: string, platform?: string, range?: TimeRange) {
-  const rp = rangeParams(range);
+export function useHiringOrgRadar(brandId: string) {
   return useQuery({
-    queryKey: ["hiring-org-radar", brandId, platform, rp],
-    queryFn: () => api.get<import("./api").HiringOrgRadar>(`/api/hiring/org-radar${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rp })}`),
+    queryKey: ["hiring-org-radar", brandId],
+    queryFn: () => api.get<import("./api").HiringOrgRadar>(`/api/hiring/org-radar${qs({ brand_id: brandId, scope: "all_history" })}`),
     enabled: !!brandId,
   });
 }
 
-export function useHiringOrgEstimate() {
-  return useMutation({
-    mutationFn: ({ brandId, platform, range, refresh }: { brandId: string; platform?: string; range?: TimeRange; refresh?: boolean }) =>
-      api.post<import("./api").HiringOrgEstimate>(`/api/hiring/org-estimate${qs({ brand_id: brandId, platform: platform === "all" ? undefined : platform, ...rangeParams(range), refresh: refresh ? true : undefined })}`),
+export function useHiringOrgEstimate(brandId: string) {
+  const qc = useQueryClient();
+  const queryKey = ["hiring-org-estimate", brandId];
+  const params = { brand_id: brandId, scope: "all_history" };
+  const query = useQuery({
+    queryKey,
+    queryFn: () => api.get<import("./api").HiringOrgEstimateState>(`/api/hiring/org-estimate${qs(params)}`),
+    enabled: !!brandId,
+    refetchInterval: (query) => query.state.data?.generation?.status === "running" ? 2000 : false,
   });
+  const generate = useMutation({
+    mutationFn: (refresh: boolean) => api.post<import("./api").HiringOrgEstimateState>(`/api/hiring/org-estimate${qs({ ...params, refresh, background: true })}`),
+    onSuccess: async (data) => {
+      await qc.cancelQueries({ queryKey });
+      qc.setQueryData(queryKey, data);
+    },
+  });
+  return { ...query, generate };
 }
 
 type HiringAnalysisRun = Pick<HiringStrategicSignals, "generation" | "analysis_status" | "previous_result"> & {
@@ -775,12 +787,17 @@ export function usePostingHistory(postingId?: string) {
 function invalidateHiring(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["hiring-summary"] });
   qc.invalidateQueries({ queryKey: ["job-postings"] });
+  qc.invalidateQueries({ queryKey: ["hiring-org-radar"] });
+  qc.invalidateQueries({ queryKey: ["hiring-org-estimate"] });
+  qc.invalidateQueries({ queryKey: ["hiring-strategic-signals"] });
 }
 
 function invalidatePeople(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["li-employees"] });
   qc.invalidateQueries({ queryKey: ["li-employee-history"] });
   qc.invalidateQueries({ queryKey: ["li-activities"] });
+  qc.invalidateQueries({ queryKey: ["hiring-org-radar"] });
+  qc.invalidateQueries({ queryKey: ["hiring-org-estimate"] });
 }
 
 export function useHiringSync() {

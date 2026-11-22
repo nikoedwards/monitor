@@ -190,7 +190,7 @@ def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: st
         "source_coverage": {},
         "timeline": [],
         "details": {
-            "organization_estimate": {"status": "available", "href": f"/api/hiring/org-estimate?brand_id={brand_id}&start_date={start}&end_date={end}", "note": "人数、部门和地区区间估算在二级详情加载。"},
+            "organization_estimate": {"status": "available", "href": f"/api/hiring/org-estimate?brand_id={brand_id}&scope=all_history", "note": "人数区间和组织分布可在组织推演台查看。"},
             "evidence_chain": [],
             "method": {"scope": scope, "fast_path": True, "ready_domains": ready},
         },
@@ -331,8 +331,8 @@ def build_strategic_signals(
                 "details": {
                     "organization_estimate": {
                         "status": "available",
-                        "href": f"/api/hiring/org-estimate?brand_id={brand_id}&start_date={start}&end_date={end}",
-                        "note": "人数、部门和地区区间估算在二级详情加载。",
+                        "href": f"/api/hiring/org-estimate?brand_id={brand_id}&scope=all_history",
+                        "note": "人数区间和组织分布可在组织推演台查看。",
                     },
                     "evidence_chain": [],
                     "method": {"scope": scope, "max_history_days": _MAX_HISTORY_DAYS, "independent_source_groups": 2},

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from server.db import SCHEMA
-from server.domains.hiring import hiring_org_estimate, hiring_org_radar
+from server.domains.hiring import cached_hiring_org_estimate, hiring_org_estimate, hiring_org_radar
 
 
 class HiringOrgRadarTests(unittest.TestCase):
@@ -52,6 +52,12 @@ class HiringOrgRadarTests(unittest.TestCase):
         departments = {item["department"]: item for item in result["departments"]}
         self.assertEqual(departments["技术研发"]["known_people"], 1)
         self.assertEqual(result["locations"][0]["city"], "San Francisco")
+        local_departments = result["locations"][0]["department_details"]
+        self.assertEqual({row["department"] for row in local_departments}, {"技术研发", "产品"})
+        self.assertEqual({ref["id"] for row in local_departments for ref in row["evidence"]}, {"p1", "p2"})
+        self.assertTrue(all(row["known_people"] == 0 for row in local_departments))
+        role_families = {item["role_family"]: item for item in result["role_families"]}
+        self.assertEqual(role_families["Backend Engineer"]["known_people"], 1)
         self.assertEqual(result["trend"][-1]["active"], 1)
         self.assertEqual(len(result["data_quality"]["limitations"]), 2)
 
@@ -83,6 +89,36 @@ class HiringOrgRadarTests(unittest.TestCase):
         self.assertEqual(first["departments"][0]["evidence_ids"], ["p1"])
         self.assertTrue(second["cached"])
         self.assertEqual(_call_llm.call_count, 1)
+
+    @patch("server.ai.call_llm")
+    def test_all_history_cache_tracks_evidence_and_rejects_wrong_local_citations(self, call_llm):
+        call_llm.return_value = (
+            '{"overall":null,"locations":['
+            '{"city":"London","low":2,"high":12,"evidence_ids":["p1"],'
+            '"departments":[{"department":"产品","low":1,"high":6,"evidence_ids":["p2"]}]},'
+            '{"city":"Paris","low":2,"high":6,"evidence_ids":["p2"]}]}'
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO job_postings (
+                id, brand_id, platform, title, department, city, status, first_seen,
+                last_seen, closed_at, business_tags_json, created_at, updated_at
+            ) VALUES (?, 'brand-1', 'linkedin', 'Product Manager', '产品', ?, 'closed',
+                      '2024-01-01', '2024-01-07', '2024-01-07', '[]', '2024-01-01', '2024-01-07')
+            """,
+            [("p1", "London"), ("p2", "New York")],
+        )
+        query = {"brand_id": "brand-1", "scope": "all_history", "conn": self.conn}
+        result = hiring_org_estimate(**query)
+        self.assertIsNone(result["overall"])
+        self.assertEqual([row["city"] for row in result["locations"]], ["London"])
+        self.assertEqual(result["locations"][0]["departments"], [])
+        self.assertEqual(cached_hiring_org_estimate(**query)["estimate"], result)
+        self.assertEqual(hiring_org_radar(**query)["window"]["start"], "2024-01-01")
+
+        self.conn.execute("DELETE FROM job_postings WHERE id = 'p2'")
+        self.assertIsNone(cached_hiring_org_estimate(**query)["estimate"])
+        self.assertEqual(call_llm.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ def analysis_job(conn: sqlite3.Connection, key: str, generate: Callable[[sqlite3
     """Follow a stable request key, using revisions only to invalidate finished results."""
     path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
     if not path:
+        if not start:
+            return {}
         raise HTTPException(status_code=400, detail="后台分析需要文件数据库。")
     job_key = (path, key)
     with _LOCK:
