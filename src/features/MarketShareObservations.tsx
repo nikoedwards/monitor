@@ -6,6 +6,7 @@ import { TimeRangePicker } from "../components/TimeRangePicker";
 import { Card, EmptyState, SectionTitle, Select, Spinner } from "../components/ui";
 import type { AppMetric, AppObservation, BrandMetric, BrandObservations, MarketShareResponse } from "../lib/api";
 import { useBrands, useMarketObservations } from "../lib/hooks";
+import { observedShare } from "../lib/marketShare";
 import { useTimeRange, type TimeRange } from "../lib/timeRange";
 
 const BRAND_METRICS: ReadonlyArray<{ key: BrandMetric; label: string }> = [
@@ -161,7 +162,7 @@ export function MarketShareBreakdown({ brandIds, country, range, result }: {
       <SectionTitle
         title="份额拆解"
         subtitle="点击品牌查看每日统计和 App 明细。"
-        hint="原始数据取所选期间内各 App 在对应商店和地区的最新快照。综合份额按当前模型权重计算，横线表示该项暂无数据。"
+        hint="原始数据取所选期间内各 App 在对应商店和地区的最新快照。综合份额按当前模型权重计算。品牌缺少参与计算的数据时，综合份额显示为缺数据。"
       />
       {query.isLoading && !brands.length && <Spinner />}
       {query.isError && <p role="status" className="mb-3 text-[13px]" style={{ color: "var(--danger)" }}>原始数据加载失败，{query.error.message}</p>}
@@ -171,15 +172,16 @@ export function MarketShareBreakdown({ brandIds, country, range, result }: {
           rows={brands.map((brand) => {
             const entry = estimates.get(brand.brand_id);
             const raw = observations.get(brand.brand_id);
+            const share = entry && weights ? observedShare(entry, weights) : null;
             return {
               key: brand.brand_id,
               values: [
                 <Link to={{ pathname: `${base}/brands/${encodeURIComponent(brand.brand_id)}`, search: params.toString() }} className="inline-flex items-center gap-1 whitespace-nowrap font-semibold hover:underline" style={{ color: "var(--accent)" }}>
                   {brand.name} <ChevronRight size={14} />
                 </Link>,
-                entry ? <span className="font-semibold" style={{ color: "var(--accent)" }}>{entry.share.toFixed(2)}%</span> : "—",
+                share != null ? <span className="font-semibold" style={{ color: "var(--accent)" }}>{share.toFixed(2)}%</span> : entry ? "缺数据" : "—",
                 ...metrics.map(({ key }) => numberText(raw?.[key])),
-                ...components.map(({ key }) => entry ? `${entry.signal_shares[key].toFixed(1)}%` : "—"),
+                ...components.map(({ key }) => entry && entry.signals[key] > 0 ? `${entry.signal_shares[key].toFixed(1)}%` : "—"),
               ],
             };
           })}

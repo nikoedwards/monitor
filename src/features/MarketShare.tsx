@@ -7,6 +7,7 @@ import { MultiLineChart } from "../components/charts";
 import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
 import { fmtNum } from "../lib/format";
 import { useBrands, useMarketShare, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
+import { observedShare } from "../lib/marketShare";
 import { useTimeRange } from "../lib/timeRange";
 import { MarketShareBreakdown } from "./MarketShareObservations";
 
@@ -109,6 +110,12 @@ export default function MarketShare() {
   const leader = result?.brands.find((row) => row.share > 0);
   const appRatingCount = result?.brands.reduce((sum, row) => sum + row.raw.app_reviews, 0) || 0;
   const activeSignals = result ? SIGNALS.filter((signal) => result.model.active_weights[signal.key] > 0) : [];
+  const shareRows = result?.brands.map((brand, index) => ({
+    ...brand,
+    share: observedShare(brand, result.model.active_weights),
+    color: COLORS[index % COLORS.length],
+  })) ?? [];
+  const pieRows = shareRows.filter((row) => row.share != null && row.share > 0);
   const trendData = useMemo(
     () => (trendQuery.data?.points || []).map((point) => ({ date: point.date, ...point.shares })),
     [trendQuery.data?.points],
@@ -286,8 +293,8 @@ export default function MarketShare() {
               <div className="h-[260px] relative">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
-                    <Pie data={result.brands} dataKey="share" nameKey="name" innerRadius={66} outerRadius={100} paddingAngle={2} stroke="none">
-                      {result.brands.map((row, index) => <Cell key={row.brand_id} fill={COLORS[index % COLORS.length]} />)}
+                    <Pie data={pieRows} dataKey="share" nameKey="name" innerRadius={66} outerRadius={100} paddingAngle={2} stroke="none">
+                      {pieRows.map((row) => <Cell key={row.brand_id} fill={row.color} />)}
                     </Pie>
                     <Tooltip formatter={(value) => [`${Number(value).toFixed(2)}%`, "估算份额"]} />
                   </PieChart>
@@ -300,17 +307,17 @@ export default function MarketShare() {
                 </div>
               </div>
               <div className="space-y-3">
-                {result.brands.map((row, index) => (
+                {shareRows.map((row) => (
                   <div key={row.brand_id}>
                     <div className="flex items-center justify-between gap-3 text-[13px] mb-1.5">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: COLORS[index % COLORS.length] }} />
-                        <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.rank}. {row.name}</span>
+                        <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: row.color }} />
+                        <span className="font-medium truncate" style={{ color: "var(--ink)" }}>{row.share != null ? `${row.rank}. ` : ""}{row.name}</span>
                       </div>
-                      <span className="font-semibold tabular-nums" style={{ color: "var(--ink)" }}>{activeSignals.some(({ key }) => row.signals[key] > 0) ? `${row.share.toFixed(2)}%` : "缺数据"}</span>
+                      <span className="font-semibold tabular-nums" style={{ color: row.share == null ? "var(--mute)" : "var(--ink)" }}>{row.share == null ? "缺数据" : `${row.share.toFixed(2)}%`}</span>
                     </div>
                     <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft-2)" }}>
-                      <div className="h-full rounded-full" style={{ width: `${Math.max(row.share, 0.5)}%`, background: COLORS[index % COLORS.length] }} />
+                      <div className="h-full rounded-full" style={{ width: `${row.share ?? 0}%`, background: row.color }} />
                     </div>
                   </div>
                 ))}
