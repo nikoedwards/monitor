@@ -712,7 +712,7 @@ class SourceDeployer:
 
     def deploy(self):
         access_code = os.environ.get("MONITOR_DEPLOY_ACCESS_CODE")
-        if access_code and not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", access_code):
+        if access_code and not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", access_code):
             raise ValueError("Invalid Monitor access code format")
         self.validate_inputs()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
