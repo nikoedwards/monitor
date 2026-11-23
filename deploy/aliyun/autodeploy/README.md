@@ -39,7 +39,7 @@ GitHub repository secrets:
 - `ALIYUN_MONITOR_HOST`: the SSH hostname or IPv4 address.
 - `ALIYUN_MONITOR_SSH_KEY`: the production deployment private key.
 - `ALIYUN_MONITOR_KNOWN_HOSTS`: the verified OpenSSH known-hosts entry.
-- `MONITOR_ACCESS_CODE` (optional): a shared access code with 8–128 ASCII
+- `MONITOR_ACCESS_CODE` (optional): a shared access code with 3–128 ASCII
   letters, digits, hyphens or underscores. Run **Deploy Monitor to Aliyun**
   after setting or rotating the secret. Removing the secret and running the
   workflow turns off the gate. The code is sent over SSH and stored in the

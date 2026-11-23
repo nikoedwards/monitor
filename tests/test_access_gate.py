@@ -8,7 +8,7 @@ from starlette.routing import Route
 from server.access_gate import AccessGate, COOKIE_NAME
 
 
-CODE = "test-friend-code"
+CODE = "246"
 
 
 def client_for(code=CODE):

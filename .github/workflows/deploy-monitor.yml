@@ -68,7 +68,7 @@ jobs:
             echo "ALIYUN_MONITOR_HOST must be a hostname or IPv4 address" >&2
             exit 2
           fi
-          if [[ -n "$ACCESS_CODE" && ! "$ACCESS_CODE" =~ ^[A-Za-z0-9_-]{8,128}$ ]]; then
+          if [[ -n "$ACCESS_CODE" && ! "$ACCESS_CODE" =~ ^[A-Za-z0-9_-]{3,128}$ ]]; then
             echo "Invalid Monitor access code format" >&2
             exit 2
           fi

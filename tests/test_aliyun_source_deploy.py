@@ -111,9 +111,9 @@ class SourceDeploymentTests(unittest.TestCase):
     def test_access_code_is_persisted_for_restarts(self):
         dotenv = self.project / ".env"
         dotenv.write_bytes(b"OTHER_SETTING=kept\nMONITOR_ACCESS_CODE=old-code\n")
-        with patch.dict(os.environ, {"MONITOR_DEPLOY_ACCESS_CODE": "new-code"}):
+        with patch.dict(os.environ, {"MONITOR_DEPLOY_ACCESS_CODE": "246"}):
             self.deployer.deploy()
-        self.assertEqual(dotenv.read_bytes(), b"OTHER_SETTING=kept\nMONITOR_ACCESS_CODE=new-code\n")
+        self.assertEqual(dotenv.read_bytes(), b"OTHER_SETTING=kept\nMONITOR_ACCESS_CODE=246\n")
 
     def test_disabling_access_gate_removes_the_code(self):
         dotenv = self.project / ".env"
