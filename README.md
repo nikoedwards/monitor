@@ -143,6 +143,8 @@ npm run dev         # 终端 B → http://localhost:5173
 
 ### 公网访问口令
 
+在「MCP / CLI 接入」中可按客户端生成配置。外部工具通过 `MONITOR_BASE_URL` 选择实例。受口令保护的实例还需要在客户端单独设置 `MONITOR_ACCESS_CODE`。在公网传输口令时请使用 HTTPS 或受信任的隧道。
+
 在 GitHub Actions 的仓库 Secrets 中设置 `MONITOR_ACCESS_CODE`，再运行 **Deploy Monitor to Aliyun**。把原来的网址和同一个口令发给朋友即可。浏览器会保存 30 天的访问凭证。更换口令并重新发布后，旧凭证随即失效。删除 Secret 后重新发布即可关闭门槛。
 
 首页、API、静态资源和快照都由服务器拦截。健康检查 `/api/health` 继续只返回 `{"ok":true}`。脚本访问可发送 `Authorization: Bearer <口令>`。公网使用 HTTP 时，网络传输是明文的。

@@ -162,6 +162,8 @@ jobs:
           deploy_pid=$!
           wait "$deploy_pid"
           deploy_pid=""
+          MONITOR_BASE_URL=http://127.0.0.1:8790 MONITOR_ACCESS_CODE="$MONITOR_DEPLOY_ACCESS_CODE" \
+            python3 "$source_dir/deploy/aliyun/autodeploy/check_mcp.py"
           REMOTE
           } | ssh "${ssh_args[@]}" "root@$SSH_HOST" \
             "IFS= read -r MONITOR_DEPLOY_ACCESS_CODE; export MONITOR_DEPLOY_ACCESS_CODE; exec bash -s -- '$GITHUB_SHA' '$SSH_HOST'"

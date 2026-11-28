@@ -25,16 +25,25 @@ def _base_url(value: str | None = None) -> str:
 
 def fetch(path: str, params: dict[str, object] | None = None, *, base_url: str | None = None) -> dict:
     query = {key: value for key, value in (params or {}).items() if value not in (None, "")}
-    url = f"{_base_url(base_url)}{path}"
+    endpoint = _base_url(base_url)
+    url = f"{endpoint}{path}"
     if query:
         url += "?" + urlencode(query)
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "monitorhub-cli/1"})
+    access_code = os.environ.get("MONITOR_ACCESS_CODE", "").strip()
+    if access_code and (not os.environ.get("MONITOR_BASE_URL") or endpoint == _base_url()):
+        if any(ord(char) < 32 or ord(char) == 127 for char in access_code):
+            raise RuntimeError("MONITOR_ACCESS_CODE contains an invalid control character")
+        # urllib must never forward the credential to a redirect destination.
+        request.add_unredirected_header("Authorization", b"Bearer " + access_code.encode("utf-8"))
     for attempt in range(3):
         try:
             with urlopen(request, timeout=45) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             break
         except HTTPError as exc:
+            if exc.code == 401:
+                raise RuntimeError("MonitorHub 拒绝访问。请在客户端设置或更新 MONITOR_ACCESS_CODE。") from exc
             if exc.code in {502, 503, 504} and attempt < 2:
                 time.sleep(0.75 * (attempt + 1))
                 continue

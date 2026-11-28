@@ -75,7 +75,10 @@ class AccessGate(BaseHTTPMiddleware):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         cookie = request.cookies.get(COOKIE_NAME, "").encode()
         if hmac.compare_digest(cookie, self.session) or (
-            scheme.lower() == "bearer" and hmac.compare_digest(token.encode(), self.code)
+            scheme.lower() == "bearer" and (
+                hmac.compare_digest(token.encode("latin-1"), self.code)
+                or hmac.compare_digest(token.encode(), self.code)
+            )
         ):
             response = await call_next(request)
             if "no-store" not in response.headers.get("cache-control", ""):

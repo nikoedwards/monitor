@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from starlette.applications import Starlette
@@ -6,6 +7,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from server.access_gate import AccessGate, COOKIE_NAME
+from tools.monitor_cli import fetch
 
 
 CODE = "246"
@@ -66,3 +68,19 @@ class AccessGateTests(unittest.TestCase):
         with client_for() as client:
             headers = {"Authorization": f"Bearer {CODE}"}
             self.assertEqual(client.get("/api/brands", headers=headers).text, "private data")
+
+    def test_external_client_sends_utf8_code_only_to_configured_instance(self):
+        endpoint = "https://monitor.test"
+        code = "测试口令"
+        with client_for(code) as client, patch.dict("os.environ", {
+            "MONITOR_BASE_URL": endpoint, "MONITOR_ACCESS_CODE": code,
+        }), patch("tools.monitor_cli.urlopen") as open_request:
+            open_request.return_value.__enter__.return_value.read.return_value = b'{"ok": true}'
+            self.assertTrue(fetch("/api/brands")["ok"])
+            request = open_request.call_args.args[0]
+            header = request.get_header("Authorization")
+            response = client.get("/api/brands", headers=[(b"authorization", header)])
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("Authorization", request.headers)  # headers copied on redirect
+            fetch("/api/brands", base_url="https://another.test")
+            self.assertIsNone(open_request.call_args.args[0].get_header("Authorization"))

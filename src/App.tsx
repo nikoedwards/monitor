@@ -28,6 +28,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<RootRedirect />} />
       <Route path="/brands" element={<Shell><Brands /></Shell>} />
+      <Route path="/mcp-cli" element={<Shell><McpCli /></Shell>} />
       <Route path="/compare" element={<Shell centered><Compare /></Shell>} />
       <Route path="/brand/:brandId/overview" element={<Shell><Overview /></Shell>} />
       <Route path="/brand/:brandId/sales" element={<Shell><Sales /></Shell>} />

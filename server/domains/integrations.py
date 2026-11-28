@@ -154,7 +154,7 @@ def query_dataset(
     clauses: list[str] = []
     params: list[Any] = []
     if brand_id and dataset in BRAND_FILTERABLE:
-        clauses.append("brand_id = ?")
+        clauses.append("id = ?" if dataset == "brands" else "brand_id = ?")
         params.append(brand_id)
     if q:
         like = f"%{q}%"

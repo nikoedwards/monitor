@@ -235,6 +235,13 @@ export function Topbar({ brandId }: { brandId?: string }) {
         <BrandSwitcher brandId={brandId} />
       </div>
       <div className="flex items-center gap-2">
+        {!brandId && (
+          <NavLink to="/mcp-cli" aria-label="MCP / CLI 接入" title="MCP / CLI 接入"
+            className="inline-flex items-center gap-1.5 h-9 px-2 rounded-md text-[14px]"
+            style={({ isActive }) => ({ background: isActive ? "var(--bg-soft-2)" : "transparent" })}>
+            <Network size={15} /><span className="hidden sm:inline">MCP / CLI 接入</span>
+          </NavLink>
+        )}
         <NavLink
           to="/compare"
           aria-label="竞品对比"
