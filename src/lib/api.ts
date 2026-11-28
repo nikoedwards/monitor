@@ -771,6 +771,13 @@ export interface RatingGrowthBrand {
   net: number | null;
   daily_average: number | null;
   share: number | null;
+  comparable_share: number | null;
+  observed_window: {
+    end: string;
+    end_count: number;
+    app_count: number;
+    pair: { start: string; app_count: number; net: number } | null;
+  } | null;
   missing_dates: string[];
   apps: Array<Pick<AppObservation, "key" | "name" | "platform" | "scope"> & {
     baseline_count: number | null;
@@ -783,6 +790,7 @@ export interface MarketShareGrowthResponse {
   range: { start: string; end: string; baseline: string; days: number };
   countries: string[];
   total_net: number | null;
+  comparable_total_net: number | null;
   brands: RatingGrowthBrand[];
   points: Array<{ date: string; net: Record<string, number | null> }>;
 }

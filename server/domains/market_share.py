@@ -575,6 +575,25 @@ def market_observations(
     return {"countries": sorted(countries), "brands": results}
 
 
+def _observed_growth_window(ratings: dict) -> dict | None:
+    """Describe the latest observed sample when the requested interval is incomplete."""
+    days = sorted({day for values in ratings.values() for day in values})
+    if not days:
+        return None
+    last = days[-1]
+    latest = {key: values[last] for key, values in ratings.items() if last in values}
+    window = {"end": last, "end_count": sum(latest.values()), "app_count": len(latest), "pair": None}
+    for day in days[:-1]:
+        paired = [key for key in latest if day in ratings[key]]
+        if paired:
+            window["pair"] = {
+                "start": day, "app_count": len(paired),
+                "net": sum(latest[key] - ratings[key][day] for key in paired),
+            }
+            break
+    return window
+
+
 def _brand_rating_growth(
     conn: sqlite3.Connection, brand: sqlite3.Row, dates: list[str], country: str, countries: set[str],
 ) -> tuple[dict, dict]:
@@ -628,6 +647,7 @@ def _brand_rating_growth(
         "brand_id": brand["id"], "name": brand["name"], "net": net,
         "daily_average": net / (len(dates) - 1) if net is not None else None,
         "share": None, "missing_dates": missing, "apps": details,
+        "observed_window": _observed_growth_window(ratings) if net is None else None,
     }, changes
 
 
@@ -654,13 +674,19 @@ def market_share_growth(
         for point in points:
             point["net"][brand["id"]] = changes[point["date"]]
 
-    total = sum(row["net"] for row in rows) if all(row["net"] is not None for row in rows) else None
-    if total is not None and total > 0:
-        for row in rows:
-            row["share"] = 100 * row["net"] / total
+    comparable = [row for row in rows if row["net"] is not None]
+    comparable_total = sum(row["net"] for row in comparable) if comparable else None
+    total = comparable_total if len(comparable) == len(rows) else None
+    for row in rows:
+        share = None
+        if row["net"] is not None and len(comparable) >= 2 and comparable_total > 0:
+            share = 100 * row["net"] / comparable_total
+        row["comparable_share"] = share
+        row["share"] = share if total is not None else None
     return {
         "range": {"start": start_date.isoformat(), "end": end_date.isoformat(), "baseline": dates[0], "days": days},
-        "countries": sorted(countries), "total_net": total, "brands": rows, "points": points,
+        "countries": sorted(countries), "total_net": total, "comparable_total_net": comparable_total,
+        "brands": rows, "points": points,
     }
 
 

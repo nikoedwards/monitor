@@ -26,17 +26,19 @@ function ShareBar({ share, scale }: { share: number; scale: number }) {
 
 export function MarketShareGrowth({ data, colors }: { data: MarketShareGrowthResponse; colors: string[] }) {
   const [openBrand, setOpenBrand] = useState<string | null>(null);
-  const { brands, range, total_net: total } = data;
-  const comparable = brands.filter((brand) => brand.net !== null).length;
-  const ranked = total !== null && total > 0;
-  const ordered = ranked ? [...brands].sort((a, b) => b.net! - a.net!) : brands;
-  const leaders = ranked ? ordered.filter((brand) => brand.net === ordered[0].net) : [];
-  const scale = Math.max(1, ...brands.map((brand) => Math.abs(brand.share ?? 0)));
+  const { brands, range, comparable_total_net: total } = data;
+  const comparable = brands.filter((brand) => brand.net !== null);
+  const ranked = comparable.filter((brand) => brand.comparable_share != null).sort((a, b) => b.net! - a.net!);
+  const ordered = ranked.length ? [...ranked, ...brands.filter((brand) => brand.net == null)] : brands;
+  const leaders = ranked.filter((brand) => brand.net === ranked[0].net);
+  const scale = Math.max(1, ...ranked.map((brand) => Math.abs(brand.comparable_share!)));
   const selected = brands.find((brand) => brand.brand_id === openBrand);
   const localDay = presetRange("24h").end_date;
   const period = `${range.start} 至 ${range.end} · ${range.days} 天${range.end === localDay ? " · 截至今日最近采集" : ""}`;
-  const status = total === null ? "全部所选品牌的两端数据齐全后显示份额和排名。"
-    : total <= 0 ? "样本合计净增为零或负数，仅展示净变化和日均值。" : undefined;
+  const coverage = `${brands.length} 个所选品牌中，${comparable.length} 个有完整区间数据。`;
+  const status = comparable.length < 2 ? "至少需要两个有完整区间数据的品牌才能比较份额。"
+    : total != null && total <= 0 ? "可比品牌合计净增为零或负数，仅展示净变化和日均值。"
+    : "份额和排名按可比品牌的区间净增计算。";
   const keys = brands.map((brand, index) => ({ key: brand.brand_id, name: brand.name, color: colors[index % colors.length] }));
   const trendKeys = keys.filter(({ key }) => data.points.slice(1).some((point) => point.net[key] != null));
   const points = data.points.map((point) => ({ date: point.date, ...point.net }));
@@ -44,16 +46,17 @@ export function MarketShareGrowth({ data, colors }: { data: MarketShareGrowthRes
   return (
     <>
       <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard label="样本净增评分" value={total == null ? "—" : changes.format(total)} hint={period} />
-        <StatCard label="增量领先品牌" value={leaders.map((brand) => brand.name).join("、") || "—"}
-          hint={leaders.length ? `${leaders.length > 1 ? "并列 · " : ""}评分增量份额 ${percent.format(leaders[0].share!)}%` : undefined} tone="accent" />
-        <StatCard label="可比品牌" value={`${comparable} / ${brands.length}`} hint={`基线 ${range.baseline} · 期末 ${range.end}`} />
+        <StatCard label="可比品牌净增评分" value={total == null ? "—" : changes.format(total)} hint={period} />
+        <StatCard label="可比品牌增量领先" value={leaders.map((brand) => brand.name).join("、") || "—"}
+          hint={leaders.length ? `${leaders.length > 1 ? "并列 · " : ""}可比品牌内份额 ${percent.format(leaders[0].comparable_share!)}%` : undefined} tone="accent" />
+        <StatCard label="可比品牌" value={`${comparable.length} / ${brands.length}`} hint={`基线 ${range.baseline} · 期末 ${range.end}`} />
       </div>
       <Card>
-        <SectionTitle title="评分增量份额" subtitle={status ?? "按区间净增评分排序，点击品牌可查看原始评分数。"}
-          hint="每个品牌的净增评分除以全部所选品牌的净增评分。个别品牌评分减少时，其贡献为负，其他品牌的贡献可能超过 100%。" />
-        <ObservationTable headers={["品牌", "区间净增评分", "评分增量份额", "日均净增"]} rows={ordered.map((brand) => {
-          const rank = ranked ? ordered.findIndex((other) => other.net === brand.net) + 1 : null;
+        <SectionTitle title="评分增量份额" subtitle={coverage + status}
+          hint="分母是可比品牌的净增评分之和。个别品牌评分减少时，其贡献为负，其他品牌的贡献可能超过 100%。点击品牌可查看明细。" />
+        <ObservationTable headers={["品牌", "区间净增评分", "可比品牌内份额", "日均净增"]} rows={ordered.map((brand) => {
+          const rank = brand.comparable_share != null ? ranked.findIndex((other) => other.net === brand.net) + 1 : null;
+          const observed = brand.observed_window;
           return { key: brand.brand_id, values: [
             <div>
               <button type="button" className="font-medium cursor-pointer hover:underline" style={{ color: "var(--accent)" }}
@@ -61,9 +64,15 @@ export function MarketShareGrowth({ data, colors }: { data: MarketShareGrowthRes
               {brand.missing_dates.map((day) => <div key={day} className="text-xs mt-1" style={{ color: "var(--mute)" }}>
                 缺 {day} {day === range.baseline ? "期初基线" : "期末评分"}
               </div>)}
+              {observed && <div className="text-xs mt-1">
+                {observed.end} 实采累计 {counts.format(observed.end_count)} 个评分（{observed.app_count} 项）
+              </div>}
+              {observed?.pair && <div className="text-xs mt-1">
+                {observed.pair.start} 至 {observed.end}，{observed.pair.app_count} 项可配对样本净增 {changes.format(observed.pair.net)}
+              </div>}
             </div>,
             brand.net == null ? "—" : changes.format(brand.net),
-            brand.share == null ? "—" : <ShareBar share={brand.share} scale={scale} />,
+            brand.comparable_share == null ? "—" : <ShareBar share={brand.comparable_share} scale={scale} />,
             brand.daily_average == null ? "—" : changes.format(brand.daily_average),
           ] };
         })} />

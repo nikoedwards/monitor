@@ -218,6 +218,32 @@ class MarketShareTests(unittest.TestCase):
         self.assertEqual([["2026-10-31"], ["2026-11-30"]], [row["missing_dates"] for row in result["brands"]])
         self.assertEqual([None, None], [row["net"] for row in result["brands"]])
 
+    def test_growth_weekly_shares_and_incomplete_observations(self):
+        ids = ["comu", "bee", "friend", "omi", "plaud", "pocket"]
+        self.conn.executemany("INSERT INTO brands (id, name) VALUES (?, ?)", [(key, key) for key in ids])
+        for brand, delta in [("friend", 0), ("omi", 83), ("plaud", 382)]:
+            self.add_growth_rating(brand, "2026-11-21", 100)
+            self.add_growth_rating(brand, "2026-11-28", 100 + delta)
+        self.add_growth_rating("comu", "2026-11-24", 7)
+        self.add_growth_rating("comu", "2026-11-28", 10)
+        self.add_growth_rating("comu", "2026-11-28", 99, app="456")
+        self.add_growth_rating("bee", "2026-11-28", 0)
+        result = market_share_growth(",".join(ids), date(2026, 11, 22), date(2026, 11, 28), "all", self.conn)
+        comu, bee, friend, omi, plaud, pocket = result["brands"]
+        self.assertIsNone(result["total_net"])
+        self.assertEqual(result["comparable_total_net"], 465)
+        self.assertEqual([round(row["comparable_share"], 1) for row in [friend, omi, plaud]], [0, 17.8, 82.2])
+        self.assertTrue(all(row["net"] is None and row["comparable_share"] is None for row in [comu, bee, pocket]))
+        self.assertEqual(comu["observed_window"], {
+            "end": "2026-11-28", "end_count": 109, "app_count": 2,
+            "pair": {"start": "2026-11-24", "app_count": 1, "net": 3},
+        })
+        self.assertEqual(bee["observed_window"], {"end": "2026-11-28", "end_count": 0, "app_count": 1, "pair": None})
+        self.assertIsNone(pocket["observed_window"])
+        single = market_share_growth("plaud,bee", date(2026, 11, 22), date(2026, 11, 28), "all", self.conn)
+        self.assertEqual(single["comparable_total_net"], 382)
+        self.assertTrue(all(row["comparable_share"] is None for row in single["brands"]))
+
     def test_growth_signed_contributions_and_country_scoping(self):
         self.add_growth_rating("a", "2026-10-31", 0)
         self.add_growth_rating("a", "2026-11-30", 100)
