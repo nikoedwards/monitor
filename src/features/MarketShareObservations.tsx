@@ -42,7 +42,7 @@ function appScope(app: AppObservation) {
   return `App Store · ${app.scope ? countryLabel(app.scope) : "地区未记录"}`;
 }
 
-function ObservationTable({ headers, rows }: {
+export function ObservationTable({ headers, rows }: {
   headers: string[];
   rows: Array<{ key: string; values: ReactNode[]; selected?: boolean }>;
 }) {

@@ -765,6 +765,28 @@ export interface MarketShareTrendPoint {
   data_as_of?: string | null;
 }
 
+export interface RatingGrowthBrand {
+  brand_id: string;
+  name: string;
+  net: number | null;
+  daily_average: number | null;
+  share: number | null;
+  missing_dates: string[];
+  apps: Array<Pick<AppObservation, "key" | "name" | "platform" | "scope"> & {
+    baseline_count: number | null;
+    end_count: number | null;
+    in_baseline_sample: boolean;
+  }>;
+}
+
+export interface MarketShareGrowthResponse {
+  range: { start: string; end: string; baseline: string; days: number };
+  countries: string[];
+  total_net: number | null;
+  brands: RatingGrowthBrand[];
+  points: Array<{ date: string; net: Record<string, number | null> }>;
+}
+
 export interface MarketShareTrendSummary {
   brand_id: string;
   name: string;

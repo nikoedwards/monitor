@@ -391,6 +391,18 @@ def insert_record_if_new(conn: sqlite3.Connection, payload: dict) -> dict | None
                 (source_id, external_id),
             ).fetchone()
         if existing:
+            if (payload.get("data_type") == "app_metric" and source_id in ("app_store_reviews", "google_play_reviews")
+                    and payload.get("occurred_at") and (payload.get("metrics") or {}).get("rating_count_observed") is True):
+                # Store collectors use one external ID per app, storefront and day.
+                # A later refresh can legitimately report fewer ratings.
+                conn.execute(
+                    "UPDATE records SET occurred_at = ?, metrics_json = json_patch(COALESCE(metrics_json, '{}'), ?), "
+                    "raw_json = json_patch(COALESCE(raw_json, '{}'), ?), body = COALESCE(NULLIF(?, ''), body) "
+                    "WHERE id = ? AND data_type = 'app_metric' AND COALESCE(occurred_at, '') <= ?",
+                    (payload["occurred_at"], json.dumps(payload["metrics"]), json.dumps(payload.get("raw") or {}),
+                     payload.get("body"), existing["id"], payload["occurred_at"]),
+                )
+                return None
             if source_id == "community_site" and "body" in existing.keys():
                 incoming_body = _resolve_body(payload)
                 stored_body = clean_text(existing["body"])

@@ -485,6 +485,16 @@ def _app_store_count(value) -> int:
         return 0
 
 
+def _observed_rating_count(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return int(number) if number.is_integer() and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _select_official_apps(brand: dict, results: list[dict]) -> list[dict]:
     """Require a matching official website before considering seller portfolios."""
     official_host = host_key(brand.get("official_website") or "")
@@ -588,18 +598,20 @@ def _app_store_metric_payload(
     discovery: str,
 ) -> dict | None:
     app_id = clean_text(str(app.get("trackId") or ""))
-    rating_count = _app_store_count(app.get("userRatingCount"))
-    if not app_id or rating_count <= 0:
+    rating_count = _observed_rating_count(app.get("userRatingCount"))
+    if not app_id or rating_count is None:
         return None
     track_name = clean_text(app.get("trackName")) or brand.get("name") or "App"
     rating = app.get("averageUserRating") or app.get("averageUserRatingForCurrentVersion")
     app_link_id = link_id or f"auto-app-store:{country}:{app_id}"
+    observed_at = utc_now()
     return {
         "source_id": "app_store_reviews",
         "brand_id": brand.get("id"),
         "product_id": product_id,
         "link_id": app_link_id,
-        "external_id": f"{brand.get('id')}:app-store:{country}:{app_id}:metrics:{today()}",
+        "external_id": f"{brand.get('id')}:app-store:{country}:{app_id}:metrics:{observed_at[:10]}",
+        "occurred_at": observed_at,
         "data_type": "app_metric",
         "dimension": "platform",
         "channel": "app",
@@ -890,22 +902,21 @@ def _google_play_detail(brand: dict, app_id: str, country: str, *, link_id: str 
         rating = float(rating_data.get("ratingValue")) if rating_data.get("ratingValue") is not None else None
     except (TypeError, ValueError):
         rating = None
-    try:
-        rating_count = max(0, int(float(rating_data.get("ratingCount") or 0)))
-    except (TypeError, ValueError):
-        rating_count = 0
-    if not app_id or rating_count <= 0:
+    rating_count = _observed_rating_count(rating_data.get("ratingCount"))
+    if not app_id or rating_count is None:
         return None
     name = clean_text(detail.get("name")) or brand.get("name") or app_id
     author = detail.get("author") if isinstance(detail.get("author"), dict) else {}
     developer = clean_text(author.get("name")) if isinstance(author, dict) else ""
     url = _google_play_storefront_url(app_id, country)
+    observed_at = utc_now()
     return {
         "source_id": "google_play_reviews",
         "brand_id": brand.get("id"),
         "product_id": product_id,
         "link_id": link_id or f"auto-google-play:{country}:{app_id}",
-        "external_id": f"{brand.get('id')}:google-play:{country}:{app_id}:metrics:{today()}",
+        "external_id": f"{brand.get('id')}:google-play:{country}:{app_id}:metrics:{observed_at[:10]}",
+        "occurred_at": observed_at,
         "data_type": "app_metric",
         "dimension": "platform",
         "channel": "app",

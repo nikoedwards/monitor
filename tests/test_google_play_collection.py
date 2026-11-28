@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from server.connectors.collectors import (
     _GOOGLE_PLAY_REVIEW_COUNTRIES,
+    _google_play_detail,
     _google_play_review_payloads,
     _google_play_discover_app_ids,
     collect_google_play,
@@ -35,6 +36,13 @@ class GooglePlayCollectorTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    @patch("server.connectors.collectors.fetch_text")
+    def test_google_play_distinguishes_observed_zero_from_missing(self, fetch):
+        for ratings, expected in [('{"ratingCount":0}', 0), ('{}', None)]:
+            fetch.return_value = '<script type="application/ld+json">{"name":"Alpha","aggregateRating":' + ratings + '}</script>'
+            result = _google_play_detail({"id": "a"}, "com.alpha", "US")
+            self.assertEqual(result["metrics"]["rating_count"] if result else None, expected)
 
     @patch("server.connectors.collectors._google_play_reviews")
     def test_review_payload_preserves_public_rating_fields(self, reviews):

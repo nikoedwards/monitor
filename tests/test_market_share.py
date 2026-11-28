@@ -1,11 +1,12 @@
 import json
 import sqlite3
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from server.domains.market_share import market_observations, market_share, market_share_trend, sync_market_share_snapshots
+from server.domains.market_share import market_observations, market_share, market_share_growth, market_share_trend, sync_market_share_snapshots
 from server.domains.common import query_records
 
 
@@ -164,6 +165,76 @@ class MarketShareTests(unittest.TestCase):
         regional = market_observations("a", "US", include_history=True, **options)["brands"][0]
         self.assertEqual([app["app_id"] for app in regional["apps"]], ["123"])
         self.assertNotIn("google_play_ratings", regional["metrics"])
+
+    def add_growth_rating(self, brand, day, count, *, app="123", platform="app_store", region="US", hour=8, **metrics):
+        record_id = f"{brand}-{app}-{day}-{platform}-{region}-{hour}"
+        self.add_record(record_id, brand, dimension="platform", channel="app", platform=platform,
+                        source_id=f"{platform}_reviews", data_type="app_metric", region=region,
+                        occurred_at=f"{day}T{hour:02d}:00:00+00:00", metrics={"rating_count": count, **metrics})
+        url = f"https://apps.apple.com/app/id{app}" if platform == "app_store" else f"https://play.google.com/store/apps/details?id={app}"
+        self.conn.execute("UPDATE records SET url = ? WHERE id = ?", (url, record_id))
+
+    def growth(self, ids="a,b", country="all"):
+        return market_share_growth(ids, date(2026, 11, 1), date(2026, 11, 30), country, self.conn)
+
+    def test_growth_full_window_and_fixed_sample(self):
+        for brand, initial, final in [("a", 90000, 90200), ("b", 10000, 10800)]:
+            self.add_growth_rating(brand, "2026-10-31", initial)
+            self.add_growth_rating(brand, "2026-11-30", final)
+        self.add_growth_rating("a", "2026-11-01", 90020)
+        self.add_growth_rating("a", "2026-11-30", 99999, app="456")
+        self.add_growth_rating("b", "2026-11-30", 0, hour=10, rating_count_observed=False)
+        self.add_growth_rating("b", "2026-12-01", 12000)
+        result = self.growth()
+        a, b = result["brands"]
+        self.assertEqual((30, 1000, 200, 800, 20, 80), (result["range"]["days"], result["total_net"], a["net"], b["net"], a["share"], b["share"]))
+        self.assertAlmostEqual(b["daily_average"], 800 / 30)
+        self.assertEqual([0, 20, None], [p["net"]["a"] for p in result["points"][:3]])
+        self.assertEqual({"a": 200, "b": 800}, result["points"][-1]["net"])
+        self.assertEqual([99999], [app["end_count"] for app in a["apps"] if not app["in_baseline_sample"]])
+
+    def test_growth_incomplete_cohort_withholds_all_shares(self):
+        for brand in "cde":
+            self.conn.execute("INSERT INTO brands (id, name) VALUES (?, ?)", (brand, brand.upper()))
+        for brand in "abcde":
+            first_day = "2026-11-19" if brand == "e" else "2026-10-31"
+            self.add_growth_rating(brand, first_day, 100)
+            self.add_growth_rating(brand, "2026-11-30", 105)
+        result = self.growth("e,a,b,c,d")
+        self.assertIsNone(result["total_net"])
+        self.assertTrue(all(row["share"] is None for row in result["brands"]))
+        self.assertEqual([None, 5, 5, 5, 5], [row["net"] for row in result["brands"]])
+        self.assertEqual(["2026-10-31"], result["brands"][0]["missing_dates"])
+
+    def test_growth_returning_app_and_missing_end(self):
+        self.add_growth_rating("a", "2026-10-31", 100)
+        self.add_growth_rating("a", "2026-11-30", 110)
+        self.add_growth_rating("a", "2026-10-30", 900, app="456")
+        self.add_growth_rating("a", "2026-11-30", 933, app="456")
+        self.add_growth_rating("b", "2026-10-31", 20)
+        self.add_growth_rating("b", "2026-11-29", 24)
+        self.add_growth_rating("b", "2026-11-30", None)
+        result = self.growth()
+        self.assertEqual([["2026-10-31"], ["2026-11-30"]], [row["missing_dates"] for row in result["brands"]])
+        self.assertEqual([None, None], [row["net"] for row in result["brands"]])
+
+    def test_growth_signed_contributions_and_country_scoping(self):
+        self.add_growth_rating("a", "2026-10-31", 0)
+        self.add_growth_rating("a", "2026-11-30", 100)
+        self.add_growth_rating("b", "2026-10-31", 40)
+        self.add_growth_rating("b", "2026-11-30", 20)
+        for region in ["US", "JP"]:
+            self.add_growth_rating("b", "2026-10-31", 100, platform="google_play", region=region)
+            self.add_growth_rating("b", "2026-11-30", 140, platform="google_play", region=region)
+        self.assertEqual(120, self.growth()["total_net"])
+        result = self.growth(country="US")
+        self.assertEqual([125, -25], [row["share"] for row in result["brands"]])
+        for hour, end_count, total in [(10, 20, 0), (11, 10, -10)]:
+            self.add_growth_rating("a", "2026-11-30", end_count, hour=hour)
+            result = self.growth(country="US")
+            self.assertEqual(total, result["total_net"])
+            self.assertEqual([None, None], [row["share"] for row in result["brands"]])
+            self.assertEqual(end_count, result["brands"][0]["net"])
 
     def test_balanced_model_uses_app_inputs_without_calculating_sales_or_estimates(self):
         self.add_record("a-app-1", "a", dimension="voc", channel="app", platform="app_store", source_id="app_store_reviews", metrics={"rating": 5})
