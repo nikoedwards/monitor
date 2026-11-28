@@ -248,9 +248,39 @@ def _voice_summary_loop() -> None:
                         prepare_voice_summaries(conn, brand["id"])
                 except Exception:
                     logger.exception("Voice summary preparation failed for %s", brand["id"])
+            with db() as conn:
+                _prepare_dashboard_summaries(conn)
         except Exception:
-            logger.exception("Voice summary scheduler cycle failed")
+            logger.exception("Summary scheduler cycle failed")
         time.sleep(max(60, min(SCHEDULER_SECONDS, 600)))
+
+
+def _prepare_dashboard_summaries(conn) -> None:
+    from . import ai
+    from .domains.common import resolve_window
+    from .domains.content import marketing_overview_summary
+    from .domains.insights import overview_summary
+
+    if not ai.is_configured(conn):
+        return
+    brands = conn.execute("SELECT id, is_competitor FROM brands ORDER BY is_primary DESC, name").fetchall()
+    competitors = [row["id"] for row in brands if row["is_competitor"]]
+    start, end = resolve_window(30, None, None)
+    for brand in brands:
+        brand_id = brand["id"]
+        market_ids = list(dict.fromkeys([brand_id, *competitors]))[:12]
+        scope = dict(brand_id=brand_id, start_date=start, end_date=end, background=True, conn=conn)
+        for read, extra in ((overview_summary, {"market_brand_ids": ",".join(market_ids)}),
+                            (marketing_overview_summary, {})):
+            state = read(**scope, **extra, cached_only=True)
+            if state.get("mode") or state.get("generation"):
+                continue
+            state = read(**scope, **extra)
+            # Share the page's job; keep at most one scheduler-initiated dashboard
+            # analysis in flight so interactive requests can use the other worker.
+            while state.get("generation", {}).get("status") == "running":
+                time.sleep(5)
+                state = read(**scope, **extra, cached_only=True)
 
 
 def start_scheduler() -> None:

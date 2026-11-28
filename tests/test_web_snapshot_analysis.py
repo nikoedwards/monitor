@@ -51,6 +51,28 @@ from server.snapshot import (
 from server.domains import web as web_domain
 
 
+class SnapshotAnalysisCacheTests(unittest.TestCase):
+    def test_cache_probe_checks_snapshot_ids_without_rebuilding_text_diffs(self):
+        from server.db import SCHEMA
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        params = dict(brand_id="brand", start_date="2026-10-01", end_date="2026-10-30", cached_only=True, conn=conn)
+        with patch.object(web_domain, "_refresh_snapshot_text_analysis", side_effect=AssertionError("heavy read")):
+            self.assertTrue(web_domain.analyze_snapshots(**params)["cache_miss"])
+            def insert(rid):
+                conn.execute("INSERT INTO web_snapshots(id, monitor_id, brand_id, snapshot_date, url, created_at) "
+                             "VALUES (?, 'monitor', 'brand', '2026-10-02', 'https://example.com', '2026-10-02')", (rid,))
+            insert("one")
+            conn.execute("INSERT INTO web_snapshot_analyses(id, brand_id, start_date, end_date, snapshot_ids_json, result_json, created_at) "
+                         "VALUES ('report', 'brand', '2026-10-01', '2026-10-30', ?, ?, ?)",
+                         (json.dumps(["one"]), json.dumps({"summary": "已分析"}), datetime.now(timezone.utc).isoformat()))
+            self.assertEqual("已分析", web_domain.analyze_snapshots(**params)["summary"])
+            insert("two")
+            self.assertTrue(web_domain.analyze_snapshots(**params)["cache_miss"])
+
+
 class TextDiffTests(unittest.TestCase):
     def test_existing_copy_split_into_a_new_line_is_not_reported_as_added(self):
         phrase = "Trusted by over 2 million professionals globally"

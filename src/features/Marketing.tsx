@@ -88,7 +88,8 @@ export default function Marketing() {
   useEffect(() => {
     setTrendMetric("volume");
   }, [activeChannel, brandId]);
-  const { data: summary, isLoading } = useMarketingSummary(brandId, activeChannel, range);
+  const showFeed = !!activeChannel && activeChannel !== "ads";
+  const { data: summary, isLoading } = useMarketingSummary(showFeed ? brandId : undefined, activeChannel, range);
   const selectedPublicationTotal = selectedPublication
     ? (summary?.by_publication || []).find((item: PublicationStat) =>
         selectedPublication.domain
@@ -96,7 +97,7 @@ export default function Marketing() {
           : !item.domain && item.name === selectedPublication.name
       )?.total || 0
     : 0;
-  const { data: records = [], isLoading: recordsLoading } = useRecords({
+  const { data: records = [], isLoading: recordsLoading, isError: recordsError, refetch: reloadRecords } = useRecords({
     brand_id: brandId,
     dimension: "marketing",
     channel: selectedPublication ? "media" : activeChannel,
@@ -105,7 +106,7 @@ export default function Marketing() {
     publication_name: selectedPublication?.name || undefined,
     ...rangeParams(range),
     limit: selectedPublication || activeChannel === "community" ? 1000 : 60,
-  });
+  }, showFeed && !!brandId);
 
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -342,14 +343,17 @@ export default function Marketing() {
 
       <Card>
         <SectionTitle title={view === "channel" ? `${channelName}内容流` : "营销内容流"} subtitle={isCommunity ? "勾选上方来源可在此显示/隐藏对应内容" : "按渠道筛选的真实采集内容"} />
-        <RecordList
+        {recordsLoading ? <Spinner /> : recordsError && !records.length ? (
+          <EmptyState title="内容流加载失败" action={<Button onClick={() => void reloadRecords()}>重试</Button>} />
+        ) : <RecordList
+          key={JSON.stringify([brandId, activeChannel, range.start_date, range.end_date, [...hidden].sort()])}
           records={shownRecords}
           summarizeCommunity={isCommunity}
           variant={channel === "social" || channel === "creators" ? "social-cards" : "list"}
           emptyHint={channel === "creators"
             ? "红人关键词采集每天搜索公开内容；品牌官方账号内容请看「社交媒体」，手动导入的红人只进入候选池。"
             : "在数据源页发起媒体 / 广告 / 红人 / 社群采集后查看。"}
-        />
+        />}
       </Card>
 
       <PublicationDetailModal

@@ -277,13 +277,13 @@ function BusinessAnalysisCard({ brandId, range, platform, status }: { brandId: s
         action={
           <div className="flex flex-col items-end">
             <Button onClick={run} disabled={generating || analyze.isLoading || !settings?.configured} title={!settings?.configured ? "请先在设置中配置大模型 Token" : ""}>
-              {generating ? "分析中…" : "生成分析"}
+              {generating ? "分析中…" : analyze.isLoading ? "读取分析中…" : "生成分析"}
             </Button>
             <AsyncProgress active={generating} label="正在后台分析岗位数据，完成后自动更新" />
           </div>
         }
       />
-      {!settings?.configured && <p className="text-[13px]" style={{ color: "var(--mute)" }}>未配置大模型 Token，请在右上角设置中填写后再生成。</p>}
+      {settings && !settings.configured && <p className="text-[13px]" style={{ color: "var(--mute)" }}>未配置大模型 Token，请在右上角设置中填写后再生成。</p>}
       {error && <p className="text-[13px]" style={{ color: "var(--danger)" }}>{error}</p>}
       {result?.summary && (
         <div className="space-y-3 text-[13px]" style={{ color: "var(--body)" }}>

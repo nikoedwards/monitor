@@ -627,6 +627,7 @@ def _query_snapshots(
     monitor_id: str | None = None,
     descending: bool = True,
     limit: int = 1000,
+    *, ids_only: bool = False,
 ) -> list[dict]:
     source_clauses = [f"({_VALID_CAPTURE_SQL})"]
     source_params: list = []
@@ -638,6 +639,12 @@ def _query_snapshots(
         source_params.append(monitor_id)
     source_where = f"WHERE {' AND '.join(source_clauses)}" if source_clauses else ""
     order = "DESC" if descending else "ASC"
+    if ids_only:
+        return [dict(row) for row in conn.execute(
+            f"SELECT ws.id FROM web_snapshots AS ws {source_where} AND snapshot_date BETWEEN ? AND ? "
+            f"ORDER BY snapshot_date {order}, created_at {order}, id {order} LIMIT ?",
+            [*source_params, start, end, limit],
+        )]
     rows = conn.execute(
         f"""
         WITH ordered AS (
@@ -657,7 +664,7 @@ def _query_snapshots(
         )
         SELECT * FROM ordered
         WHERE snapshot_date >= ? AND snapshot_date <= ?
-        ORDER BY snapshot_date {order}, created_at {order}
+        ORDER BY snapshot_date {order}, created_at {order}, id {order}
         LIMIT ?
         """,
         [*source_params, start, end, limit],
@@ -969,10 +976,6 @@ def analyze_snapshots(
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     start, end = _resolve_window(days, start_date, end_date)
-    snapshots = _query_snapshots(conn, start, end, brand_id, monitor_id, descending=False)
-    if not snapshots:
-        raise HTTPException(status_code=400, detail="所选时间范围内没有网页快照")
-    snapshot_ids = [snapshot["id"] for snapshot in snapshots]
     if not refresh:
         cached = conn.execute(
             """
@@ -982,14 +985,20 @@ def analyze_snapshots(
             """,
             (brand_id, monitor_id, start, end),
         ).fetchone()
-        if cached and json.loads(cached["snapshot_ids_json"] or "[]") == snapshot_ids and _is_recent(cached["created_at"]):
-            result = json.loads(cached["result_json"] or "{}")
-            result.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
-            return result
+        if cached and _is_recent(cached["created_at"]):
+            ids = _query_snapshots(conn, start, end, brand_id, monitor_id, descending=False, ids_only=True)
+            if json.loads(cached["snapshot_ids_json"] or "[]") == [row["id"] for row in ids]:
+                result = json.loads(cached["result_json"] or "{}")
+                result.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
+                return result
 
     if cached_only:
         return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
 
+    snapshots = _query_snapshots(conn, start, end, brand_id, monitor_id, descending=False)
+    if not snapshots:
+        raise HTTPException(status_code=400, detail="所选时间范围内没有网页快照")
+    snapshot_ids = [snapshot["id"] for snapshot in snapshots]
     summary = _summary_payload(conn, brand_id, monitor_id, start, end)
     candidates = sorted(
         [snapshot for snapshot in snapshots if _has_meaningful_change(snapshot)],

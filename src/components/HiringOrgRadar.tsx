@@ -85,7 +85,7 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
             <div className="rounded-xl border p-4" style={{ background: "color-mix(in srgb, var(--accent) 6%, var(--panel))", borderColor: "color-mix(in srgb, var(--accent) 20%, var(--hairline))" }}>
               <p className="flex items-center gap-2 text-[13px] font-medium" style={{ color: "var(--accent)" }}><Building2 size={16} /> {reference ? "全球员工数参考" : "估计总人数"}</p>
               <p className="mt-2 text-[26px] font-semibold tracking-tight tabular-nums" style={{ color: "var(--ink)" }}>
-                {referenceLabel || (estimate ? headcount(estimate.overall) : hasEvidence ? "待推演" : "证据不足")}
+                {referenceLabel || (estimate ? headcount(estimate.overall) : estimation.isLoading ? "读取估算中…" : generating ? "正在推演…" : estimateError ? "估算暂不可用" : hasEvidence ? "待推演" : "证据不足")}
               </p>
               <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: "var(--mute)" }}>
                 {reference ? (

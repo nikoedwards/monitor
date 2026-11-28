@@ -9,7 +9,7 @@ from unittest.mock import patch
 from server import ai
 from server.db import SCHEMA
 from server.domains.insights import insights_summary
-from server.domains.content import marketing_overview_summary
+from server.domains.content import marketing_overview, marketing_overview_summary
 
 
 class MarketingInsightsJobTests(unittest.TestCase):
@@ -86,6 +86,14 @@ class MarketingInsightsJobTests(unittest.TestCase):
         self.assertEqual("failed", failed["generation"]["status"])
         self.assertEqual("Previous model summary", failed["summary"])
         self.assertTrue(failed["cached"])
+
+    def test_marketing_dashboard_first_response_uses_only_same_scope_summary(self):
+        ai.put_cached_summary(self.conn, "marketing-overview:plaud|2026-10-24|2026-11-22", {"mode": "ai", "summary": "已保存"})
+        with patch("server.domains.content._marketing_overview_payload", side_effect=lambda *args: {}):
+            def preview(brand):
+                return marketing_overview(brand, start_date="2026-10-24", end_date="2026-11-22", conn=self.conn)["summary_preview"]
+            self.assertEqual("已保存", preview("plaud")["summary"])
+            self.assertEqual("fallback", preview("other")["mode"])
 
     def test_marketing_overview_refresh_survives_reload_and_reuses_one_job(self):
         options = dict(brand_id="plaud", start_date="2026-10-24", end_date="2026-11-22", conn=self.conn, background=True)

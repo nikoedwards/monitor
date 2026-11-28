@@ -75,7 +75,12 @@ def list_records(
     if product_id and channel == "creators":
         filters["product_id"] = None
         filters["matched_product_id"] = product_id
-    return {"records": query_records(conn, filters, limit=limit)}
+    records = query_records(conn, filters, limit=limit)
+    if channel == "community":
+        summaries = cached_summaries(conn, records, voice=False)
+        for record in records:
+            record["community_summary"] = summaries.get(record["id"])
+    return {"records": records}
 
 
 @router.post("/records/community-summaries")
@@ -638,6 +643,10 @@ def prepare_voice_summaries(conn: sqlite3.Connection, brand_id: str) -> None:
                for example in source["examples"] if not example["summary"])
     ids.extend(record["id"] for record in records[:40]
                if not record["voice_issue"]["summary"] and record["voice_issue"]["evidence"]["text"])
+    # The marketing community feed can include posts outside the top VoC issues.
+    community = [r for r in records if r.get("channel") == "community"][:12]
+    prepared = cached_summaries(conn, community, voice=False)
+    ids.extend(r["id"] for r in community if r["id"] not in prepared)
     ids = list(dict.fromkeys(rid for rid in ids if rid))
     for start_index in range(0, len(ids), 6):
         results = summarize_community_records(conn, ids[start_index:start_index + 6], voice=True)["summaries"]
@@ -1240,7 +1249,8 @@ def _marketing_fallback_summary(payload: dict) -> dict:
 def marketing_overview(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
     payload = _marketing_overview_payload(conn, brand_id, start, end)
-    payload["summary_preview"] = {**_marketing_fallback_summary(payload), "caveats": []}
+    saved = ai.get_cached_summary(conn, "marketing-overview:" + "|".join((brand_id, start, end)))
+    payload["summary_preview"] = saved or {**_marketing_fallback_summary(payload), "caveats": []}
     return payload
 
 
