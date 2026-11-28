@@ -99,6 +99,24 @@ def _generate_with_recovery(cfg: dict, records: list[dict]) -> dict[str, dict]:
     return recovered
 
 
+def cached_summaries(conn: sqlite3.Connection, records: list[dict], *, voice: bool) -> dict:
+    """Read matching results without taking the generation lock or contacting the model."""
+    ready = {}
+    for start in range(0, len(records), 500):
+        batch = {r["id"]: r for r in records[start:start + 500]}
+        placeholders = ",".join("?" for _ in batch)
+        for saved in conn.execute(
+            f"SELECT * FROM community_post_summaries WHERE record_id IN ({placeholders})", list(batch)
+        ):
+            rid = saved["record_id"]
+            if saved["source_hash"] != source_hash(batch[rid]) or (not voice and not _is_recent(saved["created_at"])):
+                continue
+            ready[rid] = {"status": "ready", "summary": saved["summary"]}
+            if voice and saved["headline"]:
+                ready[rid]["headline"] = saved["headline"]
+    return ready
+
+
 def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str], *, voice: bool = False) -> dict:
     ids = list(dict.fromkeys(record_ids))
     if not ids:
@@ -117,20 +135,13 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str],
     # Serialize generation and re-read the persistent cache so simultaneous
     # viewers reuse the first response instead of paying for duplicate calls.
     with _GENERATION_LOCK:
-        cached = {r["record_id"]: r for r in conn.execute(
-            f"SELECT * FROM community_post_summaries WHERE record_id IN ({placeholders})", ids
-        ).fetchall()}
+        result.update(cached_summaries(conn, list(records.values()), voice=voice))
         pending = []
         for rid in ids:
             record = records.get(rid)
             if not record or not ((record.get("title") or "").strip() or (record.get("body") or "").strip()):
                 continue
-            saved = cached.get(rid)
-            if saved and saved["source_hash"] == source_hash(record) and _is_recent(saved["created_at"]):
-                result[rid] = {"status": "ready", "summary": saved["summary"]}
-                if voice and saved["headline"]:
-                    result[rid]["headline"] = saved["headline"]
-            else:
+            if result[rid]["status"] != "ready":
                 pending.append(record)
         if pending:
             cfg = ai.get_config(conn)

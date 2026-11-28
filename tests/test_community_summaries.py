@@ -10,7 +10,7 @@ from server import ai
 from server.community_summaries import summarize_community_records
 from server.db import SCHEMA
 from server.domains.common import get_conn
-from server.domains.content import router
+from server.domains.content import prepare_voice_summaries, router
 from server.records import insert_record
 
 
@@ -80,6 +80,43 @@ class CommunitySummaryTests(unittest.TestCase):
         self.assertEqual("ready", result["summaries"]["siri"]["status"])
         self.assertEqual("ready", result["summaries"]["case"]["status"])
         self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM community_post_summaries").fetchone()[0])
+
+    def test_voice_first_response_includes_prepared_translation_until_source_changes(self):
+        self.conn.execute("INSERT INTO brands(id, name, created_at, updated_at) VALUES ('brand', 'Brand', '', '')")
+        original = "Returning from a note clears every filter."
+        headline, summary = "返回列表后筛选条件消失", "从笔记返回列表后所有筛选条件被清空。"
+        insert_record(self.conn, {"id": "filters", "brand_id": "brand", "dimension": "voc",
+                                  "body": original, "sentiment": "negative"})
+        rule_text = "Cannot log in after resetting my password."
+        insert_record(self.conn, {"id": "login", "brand_id": "brand", "dimension": "voc",
+                                  "body": rule_text, "sentiment": "negative"})
+        response = json.dumps({"summaries": [{"id": "filters", "headline": headline, "summary": summary}]})
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_conn] = lambda: self.conn
+        with TestClient(app) as client, patch("server.community_summaries.ai.call_llm", return_value=response) as llm:
+            def board():
+                return client.get("/api/voc/summary", params={"brand_id": "brand"}).json()
+
+            cold = board()
+            self.assertTrue(any(not item["problem_summary"] for item in cold["topics"]))
+            llm.assert_not_called()
+            prepare_voice_summaries(self.conn, "brand")
+            self.assertEqual(["filters"], [post["id"] for post in json.loads(llm.call_args.args[2])["posts"]])
+            self.conn.execute("UPDATE community_post_summaries SET created_at = '2000-01-01T00:00:00Z'")
+            prepare_voice_summaries(self.conn, "brand")
+            warm = board()
+            topic = next(item for item in warm["topics"] if item["representative_record_id"] == "filters")
+            self.assertEqual((headline, summary), (topic["title"], topic["problem_summary"]))
+            self.assertEqual(original, topic["evidence"][0]["text"])
+            examples = [example for source in warm["source_catalog"] for example in source["examples"]]
+            self.assertIn(summary, [example["summary"] for example in examples])
+            records = client.get("/api/voc/records", params={"brand_id": "brand"}).json()["records"]
+            issue = next(r["voice_issue"] for r in records if r["id"] == "filters")
+            self.assertEqual((headline, summary), (issue["title"], issue["summary"]))
+            self.conn.execute("UPDATE records SET title = 'A different experience' WHERE id = 'filters'")
+            self.assertFalse(next(t for t in board()["topics"] if t["representative_record_id"] == "filters")["problem_summary"])
+            llm.assert_called_once()
 
     def test_missing_empty_and_other_channel_records_are_not_sent_to_model(self):
         self.conn.execute("UPDATE records SET title = '', body = '' WHERE id = 'siri'")

@@ -12,7 +12,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
-from ..community_summaries import summarize_community_records
+from ..community_summaries import cached_summaries, summarize_community_records
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
@@ -222,6 +222,19 @@ def _source_catalog(records: list[dict]) -> list[dict]:
             "hot_risk_count": sum(1 for record in source_records if record.get("hot_risk")),
         })
     return catalog
+
+
+def _apply_cached_voice_summaries(conn: sqlite3.Connection, records: list[dict]) -> None:
+    missing = [record for record in records if not record["voice_issue"]["summary"]]
+    cached = cached_summaries(conn, missing, voice=True)
+    for record in missing:
+        result = cached.get(record["id"])
+        if not result:
+            continue
+        issue = record["voice_issue"]
+        issue["summary"] = record["problem_summary"] = record["feedback_summary"] = result["summary"]
+        if issue["key"].startswith("quote_"):
+            issue["title"] = result.get("headline") or result["summary"]
 
 
 def _enrich_voice_record(record: dict) -> dict:
@@ -553,6 +566,7 @@ def voc_summary(
 ):
     start, end = resolve_window(days, start_date, end_date)
     all_records = _load_voice_records(conn, brand_id, start, end, q)
+    _apply_cached_voice_summaries(conn, all_records)
     selected_sources = _parse_voc_sources(sources)
     records = [record for record in all_records if record.get("voice_source") in selected_sources]
     total = len(records)
@@ -607,7 +621,27 @@ def voc_records(
         for record in _load_voice_records(conn, brand_id, start, end, q)
         if record.get("voice_source") in selected_sources and (not sentiment or record.get("sentiment") == sentiment)
     ]
-    return {"records": records[:max(1, min(limit, 200))]}
+    page = records[:max(1, min(limit, 200))]
+    _apply_cached_voice_summaries(conn, page)
+    return {"records": page}
+
+
+def prepare_voice_summaries(conn: sqlite3.Connection, brand_id: str) -> None:
+    """Prepare the issues, source examples and feedback on the default 30-day view."""
+    start, end = resolve_window(30, None, None)
+    records = _load_voice_records(conn, brand_id, start, end)
+    _apply_cached_voice_summaries(conn, records)
+    ids = [topic["representative_record_id"] for topic in _topic_breakdown(records)
+           if not topic["problem_summary"]]
+    ids.extend(example["evidence"]["record_id"] for source in _source_catalog(records)
+               for example in source["examples"] if not example["summary"])
+    ids.extend(record["id"] for record in records[:40]
+               if not record["voice_issue"]["summary"] and record["voice_issue"]["evidence"]["text"])
+    ids = list(dict.fromkeys(rid for rid in ids if rid))
+    for start_index in range(0, len(ids), 6):
+        results = summarize_community_records(conn, ids[start_index:start_index + 6], voice=True)["summaries"]
+        if all(item["status"] in {"unconfigured", "error"} for item in results.values()):
+            break
 
 
 @router.post("/voc/record-summaries")

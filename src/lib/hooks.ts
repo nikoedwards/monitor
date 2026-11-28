@@ -331,15 +331,16 @@ export function useCommunitySummaries(records: RecordItem[]) {
   );
 }
 
-export function useVoiceFeedbackSummaries(evidence: { record_id: string; title: string; text: string }[]) {
+export function useVoiceFeedbackSummaries(evidence: { record_id: string; title: string; text: string }[], batchSize = 12) {
   const records = Array.from(new Map(evidence.map((item) => [item.record_id, item])).values());
   return useFeedbackSummaries(
     records.map((item) => ({ id: item.record_id, title: item.title, body: item.text })),
     "/api/voc/record-summaries",
+    batchSize,
   );
 }
 
-function useFeedbackSummaries(targets: { id: string; title?: string; body: string }[], endpoint: string) {
+function useFeedbackSummaries(targets: { id: string; title?: string; body: string }[], endpoint: string, batchSize = 12) {
   const qc = useQueryClient();
   const queryKey = ["feedback-summaries", endpoint, targets.map((record) => [record.id, record.title, record.body])];
   return useQuery({
@@ -352,15 +353,15 @@ function useFeedbackSummaries(targets: { id: string; title?: string; body: strin
       const summaries: Record<string, CommunityPostSummary> = {};
       // Publish each small batch as it finishes; the original content remains
       // usable while summaries are generated and persisted on the server.
-      for (let index = 0; index < targets.length && !signal.aborted; index += 12) {
-        const batch = targets.slice(index, index + 12);
+      for (let index = 0; index < targets.length && !signal.aborted; index += batchSize) {
+        const batch = targets.slice(index, index + batchSize);
         try {
           const response = await api.post<{ summaries: Record<string, CommunityPostSummary> }>(
             endpoint, { record_ids: batch.map((record) => record.id) },
           );
           Object.assign(summaries, response.summaries);
           if (Object.values(response.summaries).some((item) => item.status === "unconfigured")) {
-            targets.slice(index + 12).forEach((record) => { summaries[record.id] = { status: "unconfigured", summary: null }; });
+            targets.slice(index + batchSize).forEach((record) => { summaries[record.id] = { status: "unconfigured", summary: null }; });
             qc.setQueryData(queryKey, { ...summaries });
             break;
           }
