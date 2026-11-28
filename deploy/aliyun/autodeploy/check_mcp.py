@@ -1,8 +1,11 @@
 """Read-only, post-deployment smoke check. Keep business data out of CI logs."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+from zipfile import ZipFile
 
 
 def check():
@@ -18,11 +21,16 @@ def check():
     queries = [("monitor_overview", {}), ("monitor_brands", {"limit": 1}), ("monitor_records", {"limit": 1})]
     for request_id, (name, args) in enumerate(queries, start=3):
         messages.append({"id": request_id, "method": "tools/call", "params": {"name": name, "arguments": args}})
-    process = subprocess.run(
-        [sys.executable, "-B", str(root / "tools" / "monitor_mcp.py")],
-        input="".join(json.dumps({"jsonrpc": "2.0", **m}) + "\n" for m in messages),
-        capture_output=True, text=True, encoding="utf-8", timeout=120, check=True,
-    )
+    with tempfile.TemporaryDirectory() as folder:
+        with ZipFile(root / "downloads/monitor-connect-v1.zip") as package:
+            launcher = Path(package.extract("monitor.pyz", folder))
+        settings = {"url": os.environ["MONITOR_BASE_URL"], "code": os.environ.get("MONITOR_ACCESS_CODE", "")}
+        (launcher.parent / "connection.json").write_text(json.dumps(settings), encoding="utf-8")
+        process = subprocess.run(
+            [sys.executable, "-B", str(launcher), "serve"],
+            input="".join(json.dumps({"jsonrpc": "2.0", **m}) + "\n" for m in messages),
+            capture_output=True, text=True, encoding="utf-8", timeout=120, check=True,
+        )
     replies = {r["id"]: r for r in map(json.loads, process.stdout.splitlines())}
     for message in messages:
         if "id" in message and "result" not in replies.get(message["id"], {}):

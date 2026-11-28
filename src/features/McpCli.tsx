@@ -1,160 +1,127 @@
 /// <reference types="vite/client" />
 import { useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Copy, RefreshCw } from "lucide-react";
-import { Button, Card, Input, SectionTitle, SegmentGroup, Select } from "../components/ui";
+import type { ReactNode } from "react";
+import { Check, Copy, Download } from "lucide-react";
+import { Button, Card, SectionTitle, Select } from "../components/ui";
 
-const localHosts = ["localhost", "127.0.0.1", "[::1]"];
-const local = localHosts.includes(window.location.hostname);
-const endpoint = import.meta.env.DEV && local ? "http://127.0.0.1:8790" : window.location.origin;
-const muted = "text-[13px] text-[var(--mute)]";
+const download = "https://raw.githubusercontent.com/nikoedwards/monitor/568576806e4d53e566a3d622a4627342723599b7/downloads/monitor-connect-v1.zip";
+const clients = { codex: "Codex", desktop: "Claude Desktop", claude: "Claude Code", cli: "命令行 CLI" };
+type Client = keyof typeof clients;
+type System = "Windows" | "macOS" | "Linux";
+const hint = "text-[13px] leading-6 text-[var(--mute)]";
 
-async function checkAccess({ signal }: { signal: AbortSignal }) {
-  const response = await fetch("/api/integrations/manifest", {
-    credentials: "omit",
-    cache: "no-store",
-    signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
-  });
-  if (response.status === 401) return "protected";
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const manifest = await response.json();
-  if (manifest.name !== "MonitorHub" || manifest.read_only !== true) throw new Error("无效的接口响应");
-  return "open";
+function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
+  return (
+    <li>
+      <Card className="flex items-start gap-3 sm:gap-4">
+        <span aria-hidden="true" className="grid size-7 shrink-0 place-items-center rounded-full bg-[var(--bg-soft-2)] text-sm font-semibold">{number}</span>
+        <div className="min-w-0 flex-1 space-y-3">
+          <h3 className="font-semibold leading-7"><span className="sr-only">第 {number} 步，</span>{title}</h3>
+          {children}
+        </div>
+      </Card>
+    </li>
+  );
 }
 
-function CodeBlock({ title, code, ready = true }: { title: string; code: string; ready?: boolean }) {
-  const content = useRef<HTMLElement>(null);
-  const [feedback, setFeedback] = useState("");
+function Snippet({ value, label }: { value: string; label: string }) {
+  const field = useRef<HTMLTextAreaElement>(null);
+  const [result, setResult] = useState<"copied" | "manual" | null>(null);
   async function copy() {
     try {
-      await navigator.clipboard.writeText(code);
-      setFeedback("已复制");
+      if (!navigator.clipboard?.writeText) throw new Error();
+      await navigator.clipboard.writeText(value);
+      setResult("copied");
     } catch {
-      const selection = window.getSelection();
-      if (!selection || !content.current) {
-        setFeedback("请手动选中并复制");
-        return;
-      }
-      const range = document.createRange();
-      range.selectNodeContents(content.current);
-      selection.removeAllRanges();
-      selection.addRange(range);
+      const input = field.current;
+      if (!input) return;
+      input.focus();
+      input.select();
+      input.setSelectionRange(0, value.length);
       try {
         if (document.execCommand("copy")) {
-          selection.removeAllRanges();
-          setFeedback("已复制");
+          setResult("copied");
           return;
         }
-      } catch { /* Keep the selection for manual copying. */ }
-      setFeedback("已选中，请手动复制");
+      } catch { /* Leave the full text selected for the keyboard or touch menu. */ }
+      setResult("manual");
     }
   }
   return (
-    <div className="min-w-0 overflow-hidden rounded-md border border-[var(--hairline)] bg-[var(--bg-soft)]">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-[var(--hairline)]">
-        <span className="text-[13px] font-medium">{title}</span>
-        <div className="flex items-center gap-2">
-          <span role="status" className={muted}>{feedback}</span>
-          <Button size="sm" disabled={!ready} onClick={copy} aria-label={`复制${title}`}><Copy size={13} />复制</Button>
-        </div>
+    <div className="rounded-lg border border-[var(--hairline)] bg-[var(--bg-soft)] p-3">
+      <textarea ref={field} aria-label={label} readOnly value={value} rows={2} spellCheck={false}
+        className="block w-full resize-y bg-transparent font-mono text-[13px] leading-5" />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button onClick={copy} size="sm">{result === "copied" ? <Check size={14} /> : <Copy size={14} />}{`复制${label}`}</Button>
+        <span role="status" className={hint}>{result === "copied" ? "已复制" : result === "manual" ? "文字已选中。按 Ctrl+C（Mac 按 ⌘C），手机长按后选「复制」。" : ""}</span>
       </div>
-      <pre className="overflow-x-auto p-3 font-mono text-[12px] leading-5"><code ref={content}>{code}</code></pre>
     </div>
   );
 }
 
-type Client = "Codex" | "Claude Desktop" | "Claude Code";
-function McpGuide({ needsCode }: { needsCode: boolean }) {
-  const [client, setClient] = useState<Client>("Codex");
-  const [directory, setDirectory] = useState("");
-  const path = directory.trim().replace(/\\/g, "/");
-  const ready = /^(?:[A-Za-z]:\/|\/)/.test(path);
-  const script = (ready ? path.replace(/\/+$/, "") : "<项目绝对路径>") + "/tools/monitor_mcp.py";
-  const args = JSON.stringify([script]);
-  let config: string;
-  if (client === "Codex") {
-    config = `[mcp_servers.monitorhub]\ncommand = "python"\nargs = ${args}\n` +
-      (needsCode ? 'env_vars = ["MONITOR_ACCESS_CODE"]\n' : "") +
-      `\n[mcp_servers.monitorhub.env]\nMONITOR_BASE_URL = ${JSON.stringify(endpoint)}` + (needsCode ? "" : '\nMONITOR_ACCESS_CODE = ""');
-  } else {
-    const env: Record<string, string> = { MONITOR_BASE_URL: endpoint };
-    env.MONITOR_ACCESS_CODE = needsCode ? (client === "Claude Code" ? "${MONITOR_ACCESS_CODE}" : "<在本机填写访问口令>") : "";
-    config = JSON.stringify({ mcpServers: { monitorhub: { command: "python", args: [script], env } } }, null, 2);
-  }
-  const destination = { Codex: "~/.codex/config.toml", "Claude Desktop": "claude_desktop_config.json", "Claude Code": "项目根目录的 .mcp.json" }[client];
-  return (
-    <div className="space-y-4">
-      <Card className="space-y-4">
-        <h3 className="font-semibold">配置 MCP 客户端</h3>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="grid gap-1.5 text-sm">客户端
-            <Select aria-label="客户端" value={client} onChange={e => setClient(e.target.value as Client)}>
-              {(["Codex", "Claude Desktop", "Claude Code"] as const).map(name => <option key={name}>{name}</option>)}
-            </Select>
-          </label>
-          <label className="grid min-w-0 flex-auto gap-1.5 text-sm">本机 Monitor 项目目录
-            <Input value={directory} onChange={e => setDirectory(e.target.value)} placeholder="包含 tools/monitor_mcp.py 的绝对路径" />
-          </label>
-        </div>
-        {directory && !ready && <p className={muted}>请输入绝对路径，例如 C:/work/monitor 或 /home/me/monitor。</p>}
-        <p className={muted}>将以下配置合并到 {destination}。如果客户端找不到 python，请把 command 改为 Python 解释器的绝对路径。</p>
-        {needsCode && <p className={muted}>{client === "Claude Desktop" ? "在本机的客户端配置文件中替换口令占位符。" : "启动客户端前，在它的运行环境中设置 MONITOR_ACCESS_CODE，值为该实例的访问口令。"}</p>}
-        <CodeBlock key={config} title={client + " 配置"} code={config} ready={ready} />
-      </Card>
-      <Card className="space-y-3">
-        <h3 className="font-semibold">验证 MCP 查询</h3>
-        <p className={muted}>重新加载客户端的 MCP 配置后，在新对话中发送下面的问题。返回品牌数和记录数就说明查询已接通。</p>
-        <CodeBlock title="验证问题" code="请调用 monitor_overview，告诉我当前 Monitor 中有多少个品牌和多少条记录。" />
-      </Card>
-    </div>
-  );
-}
-
-function CliGuide({ needsCode }: { needsCode: boolean }) {
-  const [shell, setShell] = useState(navigator.userAgent.includes("Windows") ? "PowerShell" : "Bash");
-  const setup = shell === "PowerShell"
-    ? [`$env:MONITOR_BASE_URL = '${endpoint}'`, ...(needsCode ? ["$code = Read-Host 'Monitor 访问口令' -AsSecureString", "$env:MONITOR_ACCESS_CODE = [System.Net.NetworkCredential]::new('', $code).Password"] : ["Remove-Item Env:MONITOR_ACCESS_CODE -ErrorAction SilentlyContinue"])]
-    : [`export MONITOR_BASE_URL='${endpoint}'`, ...(needsCode ? ["IFS= read -rs -p 'Monitor 访问口令: ' MONITOR_ACCESS_CODE", "echo", "export MONITOR_ACCESS_CODE"] : ["unset MONITOR_ACCESS_CODE"])];
-  return (
-    <Card className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="font-semibold">从终端查询</h3>
-        <Select aria-label="终端类型" value={shell} onChange={e => setShell(e.target.value)}>
-          <option>PowerShell</option><option>Bash</option>
-        </Select>
-      </div>
-      <p className={muted}>在包含 tools/monitor_cli.py 的项目目录打开终端，依次执行以下命令。</p>
-      <CodeBlock key={setup.join("\n")} title="配置当前终端" code={setup.join("\n")} />
-      <CodeBlock title="读取概览" code="python -m tools.monitor_cli --json overview" />
-      <CodeBlock title="搜索最近 7 天的记录" code="python -m tools.monitor_cli --json records --q pricing --days 7 --limit 20" />
-    </Card>
-  );
-}
+const terminalInstructions: Record<System, string> = {
+  Windows: "右键 ZIP 文件，选「全部解压缩」。打开能看到 monitor.cmd 的文件夹，在文件夹地址栏输入 powershell 并按回车。",
+  macOS: "双击 ZIP 文件解压。在访达中右键包含 monitor.pyz 的文件夹，选「服务 → 新建位于文件夹位置的终端窗口」。",
+  Linux: "解压 ZIP 文件，在包含 monitor.pyz 的文件夹内右键，选择「在终端中打开」。",
+};
 
 export default function McpCli() {
-  const [mode, setMode] = useState<"mcp" | "cli">("mcp");
-  const access = useQuery({ queryKey: ["monitor-integration-access"], queryFn: checkAccess, retry: false, networkMode: "always" });
-  const [manualAuth, setManualAuth] = useState(true);
-  const unknown = access.isError || !access.data;
-  const needsCode = unknown ? manualAuth : access.data === "protected";
-  const status = access.isFetching ? "正在检查只读 API…" : access.isError ? "无法确认访问方式，请检查后端后重试。" :
-    needsCode ? "只读 API 需要访问口令。外部工具需要单独配置口令。" : "只读 API 可匿名访问。";
+  const [client, setClient] = useState<Client>("codex");
+  const [system, setSystem] = useState<System>(() => {
+    if (navigator.userAgent.includes("Windows")) return "Windows";
+    return navigator.userAgent.includes("Linux") ? "Linux" : "macOS";
+  });
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  const endpoint = import.meta.env.DEV && local ? "http://127.0.0.1:8790" : location.origin;
+  const launcher = system === "Windows" ? ".\\monitor.cmd" : "python3 ./monitor.pyz";
+  const cli = client === "cli";
+  const setup = `${launcher} connect ${client} "${endpoint}"`;
+  const firstQuery = cli
+    ? `${launcher} query "${endpoint}" --json overview`
+    : "请调用刚接入的 Monitor 服务的 monitor_overview，告诉我有多少个品牌和多少条记录。";
   return (
-    <div className="mx-auto max-w-[900px] space-y-5">
-      <SectionTitle title="MCP / CLI 接入" subtitle="使用本机的 Python 客户端查询当前 Monitor 实例中的品牌与记录。" />
-      <Card className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="font-semibold">Monitor 服务地址</h3>
-          <Button size="sm" disabled={access.isFetching} onClick={() => void access.refetch()}><RefreshCw size={13} />检查 API</Button>
-        </div>
-        <div className="font-mono break-all text-sm">{endpoint}</div>
-        <p role="status" className={muted}>{status}</p>
-        {access.isError && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={manualAuth} onChange={e => setManualAuth(e.target.checked)} />配置中使用访问口令</label>}
-        {local && <p className={muted}>请在运行此实例的电脑上使用配置。本地服务未启动时，在项目目录运行 python -m server.app。</p>}
-        {!local && needsCode && window.location.protocol === "http:" && <p className={muted}>当前地址使用 HTTP。在公网传输口令前，请通过 HTTPS 或受信任的隧道访问实例。</p>}
-      </Card>
-      <SegmentGroup value={mode} onChange={setMode} options={[{ value: "mcp", label: "MCP 客户端" }, { value: "cli", label: "命令行 CLI" }]} />
-      {!access.isPending && (mode === "mcp" ? <McpGuide needsCode={needsCode} /> : <CliGuide needsCode={needsCode} />)}
+    <div className="mx-auto max-w-[800px] space-y-4">
+      <SectionTitle title="MCP / CLI 接入" subtitle="把 Monitor 连到你常用的工具，完成下面三步就能查到第一组数据。" />
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="grid gap-1 text-sm">我要在哪里查数据
+          <Select aria-label="查询工具" value={client} onChange={e => setClient(e.target.value as Client)}>
+            {Object.entries(clients).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
+          </Select>
+        </label>
+        <label className="grid gap-1 text-sm">我的电脑
+          <Select aria-label="操作系统" value={system} onChange={e => setSystem(e.target.value as System)}>
+            {(["Windows", "macOS", "Linux"] as const).map(os => <option key={os}>{os}</option>)}
+          </Select>
+        </label>
+      </div>
+      <ol className="space-y-3">
+        <Step number={1} title="下载接入包，在解压后的文件夹打开终端">
+          <a href={download} download="monitor-connect-v1.zip"
+            className="inline-flex items-center gap-2 rounded-md bg-[var(--ink)] px-4 py-2 text-sm font-medium text-[var(--bg)]">
+            <Download size={15} />下载接入包 (.zip)
+          </a>
+          <p className={hint}>{terminalInstructions[system]}</p>
+        </Step>
+        <Step number={2} title={`在终端连接${cli ? " Monitor" : " " + clients[client]}`}>
+          <p className={hint}>把下面一行粘贴到刚打开的终端，按回车。如果提示输入口令，使用登录 Monitor 网站的口令，输完按回车。输入时屏幕会隐藏字符。</p>
+          <Snippet key={setup} value={setup} label="连接命令" />
+          <p className={hint}>看到「连接成功」和品牌、记录数量后，继续第 3 步。助手会将连接信息和访问口令保存在当前用户的 .monitorhub 文件夹。</p>
+        </Step>
+        <Step number={3} title={cli ? "在同一终端查询数据" : `回到 ${clients[client]}，发起第一次查询`}>
+          <p className={hint}>{cli ? "粘贴下面的命令并按回车。" : `完全退出并重新打开 ${clients[client]}，新建对话，把下面的问题粘贴到聊天框并发送。`}</p>
+          <Snippet key={firstQuery} value={firstQuery} label={cli ? "查询命令" : "验证问题"} />
+          <p className={hint}>{cli ? "输出中 counts.brands 是品牌数，counts.records 是记录数。" : "成功时，回复会显示 Monitor 返回的品牌数和记录数，可与第 2 步的结果核对。"}</p>
+        </Step>
+      </ol>
+      <details className="rounded-lg border border-[var(--hairline)] p-4 text-sm">
+        <summary className="cursor-pointer font-medium">命令没有运行？</summary>
+        <ul className={`mt-2 list-disc space-y-1 pl-5 ${hint}`}>
+          <li>提示找不到 monitor.cmd 或 monitor.pyz 时，回到第 1 步，在解压后的文件夹打开终端。</li>
+          <li>提示找不到 Python 时，安装 Python 3.9 或更高版本，重新打开终端再运行。</li>
+          {(client === "codex" || client === "claude") && <li>提示找不到 {client} 命令时，先安装 {clients[client]} CLI，确认终端能运行 {client} --version。</li>}
+          <li>口令错误时，重新执行第 2 步。当前连接地址为 <code className="break-all">{endpoint}</code>。</li>
+        </ul>
+      </details>
     </div>
   );
 }
