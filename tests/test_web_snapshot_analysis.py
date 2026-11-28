@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +50,71 @@ from server.snapshot import (
     upgrade_snapshot_fallback_images,
 )
 from server.domains import web as web_domain
+
+
+from server.db import SCHEMA
+
+
+class WebAnalysisJobTests(unittest.TestCase):
+    def test_slow_analysis_survives_reconnect_and_coalesces_duplicate_clicks(self):
+        day = "2026-11-28"
+        entered, release = threading.Event(), threading.Event()
+
+        def model(*_args):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Worker never released")
+            return {"summary": "Report"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "web.db"
+
+            def request(**options):
+                conn = sqlite3.connect(path, isolation_level=None)
+                conn.row_factory = sqlite3.Row
+                try:
+                    return web_domain.analyze_snapshots(
+                        start_date=day, end_date=day, background=True, conn=conn, **options,
+                    )
+                finally:
+                    conn.close()
+
+            def insert(conn, number):
+                conn.execute("""
+                    INSERT INTO web_snapshots
+                        (id, monitor_id, snapshot_date, url, page_key, screenshot_path, visual_change_score, created_at)
+                    VALUES (?, 'monitor', ?, 'https://example.com/', 'https://example.com', 'screen.png', 0.5, ?)
+                """, (str(number), day, f"{day}T0{number}:00:00Z"))
+
+            conn = sqlite3.connect(path, isolation_level=None)
+            try:
+                conn.executescript(SCHEMA)
+                insert(conn, 1)
+                insert(conn, 2)
+                with (
+                    patch.object(web_domain.ai, "is_configured", return_value=True),
+                    patch.object(web_domain, "visual_comparison_image", return_value={}),
+                    patch.object(web_domain.ai, "analyze_web_snapshots", side_effect=model) as generate,
+                ):
+                    self.assertTrue(request(cached_only=True)["cache_miss"])
+                    self.assertEqual(request()["generation"]["status"], "running")
+                    try:
+                        self.assertTrue(entered.wait(3))
+                        self.assertEqual(request(cached_only=True)["generation"]["status"], "running")
+                        self.assertEqual(request(refresh=True)["generation"]["status"], "running")
+                    finally:
+                        release.set()
+                    deadline = time.monotonic() + 5
+                    while (status := request(cached_only=True))["generation"]["status"] == "running":
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(.01)
+                    self.assertEqual(status["summary"], "Report")
+                    self.assertEqual(request()["analysis_id"], status["analysis_id"])
+                    generate.assert_called_once()
+                    insert(conn, 3)
+                    self.assertTrue(request(cached_only=True)["cache_miss"])
+            finally:
+                conn.close()
 
 
 class SnapshotAnalysisCacheTests(unittest.TestCase):

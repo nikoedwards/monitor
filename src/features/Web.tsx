@@ -215,11 +215,11 @@ export default function Web() {
 
       <SnapshotAnalysisPanel
         summary={summary}
-        analysis={webAnalysis.data ?? null}
+        analysis={webAnalysis.analysis}
         reading={webAnalysis.isLoading}
-        pending={webAnalysis.generate.isPending}
-        error={webAnalysis.generate.error?.message || webAnalysis.error?.message || ""}
-        onAnalyze={(refresh) => webAnalysis.generate.mutate({ refresh })}
+        pending={webAnalysis.pending}
+        error={webAnalysis.error}
+        onAnalyze={webAnalysis.generate}
       />
 
       <MonitorModal open={open} onClose={() => setOpen(false)} brandId={brandId!} />
