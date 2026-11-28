@@ -23,6 +23,7 @@ from .snapshot import (
     _capture_chunked_screenshot,
     _capture_error_reason,
     _kill_capture_process,
+    _wait_for_loading_overlay,
     _write_fallback_archive,
 )
 
@@ -135,13 +136,16 @@ class _Page:
         result = self.call("Page.navigate", {"url": url}, timeout=20)
         if result.get("errorText"):
             raise SnapshotCaptureError(result["errorText"])
+        return self.rendered_document()
+
+    def rendered_document(self):
         deadline = time.monotonic() + 15
         data = {}
         while time.monotonic() < deadline:
             data = self.evaluate("""() => ({
               final_url: location.href, title: document.title,
               text: (document.body?.innerText || '').slice(0, 200000),
-              ready: document.readyState
+              ready: document.readyState, time_origin: performance.timeOrigin
             })""") or {}
             if data.get("text", "").strip() and data.get("ready") != "loading":
                 break
@@ -150,6 +154,32 @@ class _Page:
         if reason or not data.get("text", "").strip():
             raise SnapshotCaptureError(reason or "Chromium rendered an empty page")
         return data
+
+
+def _capture_rendered_document(page, data, png_path, height, max_height, mark_stage):
+    for attempt in range(2):
+        mark_stage("prepare")
+        if attempt:
+            data = page.rendered_document()
+        _wait_for_loading_overlay(page)
+        page.evaluate("""() => {
+          for (const v of document.querySelectorAll('video')) { v.pause(); v.preload = 'none'; }
+          // Preserve the final opacity of completed entrance/exit animations.
+          for (const animation of document.getAnimations()) {
+            if (animation.effect?.getTiming().iterations === Infinity) animation.pause();
+          }
+          const s=document.createElement('style');
+          s.textContent='*,*::before,*::after{caret-color:transparent!important}';
+          document.head.appendChild(s);
+        }""")
+        mark_stage("screenshot")
+        tiles = _capture_chunked_screenshot(page, png_path, height, max_height=max_height)
+        # Storefronts can redirect to a campaign after the original DOM is ready.
+        # Never publish a stitch (or page text) assembled across documents.
+        if page.evaluate("[performance.timeOrigin, location.href]") == [data.pop("time_origin"), data["final_url"]]:
+            return data, tiles
+        png_path.unlink(missing_ok=True)
+    raise SnapshotCaptureError("截图期间页面持续跳转，截图暂缓")
 
 
 def capture(
@@ -200,7 +230,7 @@ def capture(
         ) as profile:
             with tempfile.TemporaryFile() as browser_log:
                 browser_args = [
-                    _browser_binary(), "--headless", "--no-sandbox", "--disable-gpu",
+                    _browser_binary(), "--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
                     "--disable-background-networking",
                     "--disable-extensions", "--disable-sync", "--no-first-run", "--mute-audio",
                     "--renderer-process-limit=1", "--disk-cache-size=16777216",
@@ -280,17 +310,10 @@ def capture(
                             enable_source_html()
                             data = page.navigate(url)
                             source_fallback = True
-                    mark_stage("prepare")
-                    page.evaluate("""() => {
-                      for (const v of document.querySelectorAll('video')) { v.pause(); v.preload = 'none'; }
-                      const s=document.createElement('style');
-                      s.textContent='*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
-                      document.head.appendChild(s);
-                    }""")
-                    mark_stage("screenshot")
-                    tiles = _capture_chunked_screenshot(
-                        page, png_path, height,
-                        max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
+                    data, tiles = _capture_rendered_document(
+                        page, data, png_path, height,
+                        CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
+                        mark_stage,
                     )
                 finally:
                     # Do not let a hung graceful Browser.close discard a PNG

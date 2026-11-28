@@ -144,6 +144,29 @@ def _inspect_playwright_page(page, response) -> str:
     return _capture_error_reason(status, page.url or "", body_text)
 
 
+def _wait_for_loading_overlay(page) -> None:
+    """Let a viewport-covering loader finish before capturing the page beneath it."""
+    # Pocket's Preloadify layer is aria-hidden and ignores pointer events.
+    # Hit testing and body.innerText both see through it while it is still white.
+    blocked = """() => {
+      if (document.readyState === 'loading' || !document.body) return true;
+      const loaders = document.querySelectorAll(
+        '.c-preloaderapp, #preloader, .preloader, #loading-screen, .loading-screen, .loading-overlay'
+      );
+      return Array.from(loaders).some(loader => {
+        const rect = loader.getBoundingClientRect();
+        return rect.left <= 1 && rect.top <= 1 &&
+          rect.right >= document.documentElement.clientWidth - 1 && rect.bottom >= innerHeight - 1 &&
+          loader.checkVisibility({checkOpacity: true, checkVisibilityCSS: true});
+      });
+    }"""
+    deadline = time.monotonic() + CAPTURE_RENDER_WAIT_TIMEOUT_MS / 1000
+    while page.evaluate(blocked):
+        if time.monotonic() >= deadline:
+            raise SnapshotCaptureError("全屏加载层未消失，截图暂缓")
+        page.wait_for_timeout(200)
+
+
 _ARCHIVE_REPLAY_GUARD = r"""
 (() => {
   if (window.__monitorArchiveReplayGuardV5) return;
@@ -709,11 +732,25 @@ def _capture_chunked_screenshot(
     from PIL import Image
 
     dimensions = page.evaluate(
-        """() => ({
-          width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0, window.innerWidth),
-          height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, window.innerHeight),
-          viewport: window.innerHeight
-        })"""
+        """() => {
+          // Overlap tiles by the height of top bars so their repeated pixels
+          // are cropped without altering the page's sticky layout.
+          let headerBottom = 0;
+          for (let y = 1; y < innerHeight / 2; y += 24) {
+            for (const el of document.elementsFromPoint(innerWidth / 2, y)) {
+              if (!['fixed', 'sticky'].includes(getComputedStyle(el).position)) continue;
+              const rect = el.getBoundingClientRect();
+              if (rect.width >= innerWidth / 2 && rect.bottom <= innerHeight / 2) {
+                headerBottom = Math.max(headerBottom, Math.ceil(rect.bottom));
+              }
+            }
+          }
+          return {
+            width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0, innerWidth),
+            height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, innerHeight),
+            viewport: innerHeight, headerBottom
+          };
+        }"""
     )
     width = max(1, min(int(dimensions.get("width") or 1440), 1440))
     document_height = max(1, int(dimensions.get("height") or chunk_height))
@@ -722,7 +759,8 @@ def _capture_chunked_screenshot(
     output_width = max(1, int(round(width * scale)))
     output_height = max(1, int(round(document_height * scale)))
     viewport_height = max(1, min(chunk_height, int(dimensions.get("viewport") or chunk_height)))
-    positions = range(0, max(1, document_height - viewport_height + 1), viewport_height)
+    stride = max(1, viewport_height - int(dimensions.get("headerBottom") or 0))
+    positions = range(0, max(1, document_height - viewport_height + 1), stride)
     bottom = max(0, document_height - viewport_height)
     tail = (bottom,) if positions[-1] != bottom else ()
     chunks = 0
@@ -737,7 +775,7 @@ def _capture_chunked_screenshot(
             previous_end = end
             if rows == 0:
                 continue
-            page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
+            page.evaluate("(scrollY) => window.scrollTo({top: scrollY, left: 0, behavior: 'instant'})", y)
             page.wait_for_timeout(80)
             png_data = page.screenshot(full_page=False, animations="disabled", caret="hide")
             chunks += 1
@@ -1164,6 +1202,7 @@ def _playwright_capture(
                 raise SnapshotCaptureError(
                     f"截图连续 {attempt_count} 次返回无效错误页：{capture_error}"
                 )
+            _wait_for_loading_overlay(page)
             if safe_mode:
                 # On the small production host, avoid the expensive full-page
                 # lazy-media pass and the in-memory resource archive. The
