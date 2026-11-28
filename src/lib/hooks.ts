@@ -452,9 +452,11 @@ export function useAds(brandId?: string, range?: TimeRange, filters?: Record<str
   return useQuery({
     queryKey: ["marketing-ads", params],
     queryFn: () =>
-      api.get<{ ads: MarketingAd[] } | MarketingAd[]>(`/api/marketing/ads${qs(params)}`).then((data) =>
-        Array.isArray(data) ? data : data.ads || [],
-      ),
+      api.get<{ ads: MarketingAd[] } | MarketingAd[]>(`/api/marketing/ads${qs(params)}`).then((data) => {
+        const ads = Array.isArray(data) ? data : data?.ads;
+        if (!Array.isArray(ads)) throw new Error("广告素材清单格式异常");
+        return ads;
+      }),
     enabled: !!brandId,
     staleTime: 60_000,
   });

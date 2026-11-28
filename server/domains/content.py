@@ -797,7 +797,7 @@ def _ad_entity_dict(row: sqlite3.Row) -> dict:
 
 
 @router.get("/marketing/ads")
-def marketing_ads(brand_id: str | None = None, days: int = 30, start_date: str | None = None, end_date: str | None = None, platform: str | None = None, source: str | None = None, status: str | None = None, q: str | None = None, limit: int = 100, conn: sqlite3.Connection = Depends(get_conn)):
+def marketing_ads(brand_id: str | None = None, days: int = 30, start_date: str | None = None, end_date: str | None = None, platform: str | None = None, source: str | None = None, status: str | None = None, q: str | None = None, limit: int = 100, conn: sqlite3.Connection = Depends(get_conn), compact: bool = False):
     start, end = resolve_window(days, start_date, end_date)
     where = ["brand_id = ?", "date(first_seen_at) <= date(?)", "date(COALESCE(stopped_at, last_seen_at)) >= date(?)"]
     params: list[object] = [brand_id, end, start]
@@ -815,6 +815,15 @@ def marketing_ads(brand_id: str | None = None, days: int = 30, start_date: str |
     )
     for item in ads:
         item["duplicate_count"] = duplicate_counts.get(str(item.get("creative_hash")), 1) if item.get("creative_hash") else 1
+    if compact:
+        card_fields = (
+            "id", "source", "source_ad_id", "advertiser_name", "status", "body",
+            "platform", "platforms", "country", "countries", "variants",
+            "snapshot_url", "thumbnail_url", "media_url", "landing_url", "creative_url",
+            "delivery_start", "delivery_stop", "first_seen", "last_seen",
+            "duration_days", "persistence_score", "duplicate_count",
+        )
+        ads = [{key: ad[key] for key in card_fields if key in ad} for ad in ads]
     return {"ads": ads, "start_date": start, "end_date": end}
 
 
