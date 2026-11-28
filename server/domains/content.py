@@ -15,6 +15,7 @@ from .. import ai
 from ..analysis_jobs import analysis_job
 from ..community_summaries import cached_summaries, summarize_community_records
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
+from ..marketing_insights import EMPTY as MARKETING_EMPTY, content_examples, grounded_findings, marketing_evidence, rule_findings
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
 from ..records import insert_record, record_to_dict, upsert_ad_observation
 from ..schemas import CommunitySummariesIn, ImportIn, RecordIn, VocActionIn, VocActionUpdate
@@ -1094,7 +1095,7 @@ def _marketing_status(conn: sqlite3.Connection, brand_id: str, has_data: bool) -
     return "configured_no_data" if configured else "empty"
 
 
-def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel: str, start: str, end: str) -> dict:
+def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel: str, start: str, end: str, *, with_examples: bool = False) -> dict:
     records = query_records(
         conn,
         {"brand_id": brand_id, "dimension": "marketing", "channel": channel, "start_date": start, "end_date": end},
@@ -1137,6 +1138,7 @@ def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel
         base.update({"mentions": len(records), "total_reach": reach, "total_ave": ave, "publication_count": len(publications), "by_tier": [{"tier": key, "total": value} for key, value in tiers.most_common()]})
     elif channel == "creators":
         handles = set()
+        account_posts = Counter()
         collab_posts = 0
         sponsored_posts = 0
         for record in records:
@@ -1144,10 +1146,18 @@ def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel
             handle = metrics.get("author_handle") or record.get("author")
             if handle:
                 handles.add(str(handle).lower())
+                account_posts[(record.get("platform"), str(handle).strip().casefold())] += 1
             collab_posts += 1 if metrics.get("is_collab") else 0
             sponsored_posts += 1 if metrics.get("is_sponsored") else 0
-        base.update({"creator_count": len(handles), "collab_posts": collab_posts, "sponsored_posts": sponsored_posts})
+        base.update({"creator_count": len(handles), "collab_posts": collab_posts, "sponsored_posts": sponsored_posts,
+                     "identified_accounts": len(account_posts), "identified_posts": sum(account_posts.values()),
+                     "single_post_accounts": sum(n == 1 for n in account_posts.values())})
     elif channel == "social":
+        measured = [r for r in records if (r.get("metrics") or {}).get("engagement") not in (None, "")]
+        peak = max(measured, key=lambda r: _marketing_number(r["metrics"]["engagement"]), default=None)
+        base.update({"measured_posts": len(measured),
+                     "peak_engagement": int(_marketing_number(peak["metrics"]["engagement"])) if peak else 0,
+                     "peak_example": content_examples([peak]) if peak else []})
         base.update({"content_count": len(records), "engagement_rate": round(totals["engagement"] / totals["views"], 6) if totals["views"] else None})
     elif channel == "community":
         subchannels = set()
@@ -1157,10 +1167,12 @@ def _marketing_channel_snapshot(conn: sqlite3.Connection, brand_id: str, channel
             if sub:
                 subchannels.add(str(sub))
         base.update({"subchannel_count": len(subchannels), "data_source_count": len({record.get("source_id") for record in records if record.get("source_id")})})
+    if with_examples:
+        base["examples"] = content_examples(records)
     return base
 
 
-def _marketing_ads_snapshot(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
+def _marketing_ads_snapshot(conn: sqlite3.Connection, brand_id: str, start: str, end: str, *, with_examples: bool = False) -> dict:
     try:
         rows = conn.execute(
             "SELECT * FROM ad_entities WHERE brand_id = ? AND date(first_seen_at) <= date(?) AND date(COALESCE(stopped_at, last_seen_at)) >= date(?) ORDER BY last_seen_at DESC",
@@ -1172,7 +1184,12 @@ def _marketing_ads_snapshot(conn: sqlite3.Connection, brand_id: str, start: str,
     active = [row for row in ads if row.get("active_status") == "active"]
     new_ads = sum(1 for row in ads if start <= (row.get("first_seen_at") or "")[:10] <= end)
     stopped_ads = sum(1 for row in ads if start <= (row.get("stopped_at") or "")[:10] <= end)
-    changed_ads = sum(1 for row in ads if (row.get("first_seen_at") or "")[:10] < start and start <= (row.get("updated_at") or "")[:10] <= end)
+    changed_ads = conn.execute(
+        """SELECT COUNT(DISTINCT entity_id) FROM ad_events
+           WHERE brand_id = ? AND event_type = 'creative_changed'
+           AND event_at >= ? AND event_at < date(?, '+1 day')""",
+        (brand_id, start, end),
+    ).fetchone()[0]
     try:
         daily_rows = conn.execute(
             "SELECT observed_date AS date, COUNT(*) AS total, SUM(CASE WHEN active_status = 'active' THEN 1 ELSE 0 END) AS active FROM ad_snapshots WHERE brand_id = ? AND date(observed_date) BETWEEN date(?) AND date(?) GROUP BY observed_date ORDER BY observed_date",
@@ -1186,12 +1203,25 @@ def _marketing_ads_snapshot(conn: sqlite3.Connection, brand_id: str, start: str,
     for point in trend:
         point["new"] = starts[point["date"]]
         point["stopped"] = stops[point["date"]]
-    return {
+    result = {
         "status": _marketing_status(conn, brand_id, bool(ads)),
         "total_ads": len(ads), "active_ads": len(active), "new_ads": new_ads,
         "stopped_ads": stopped_ads, "changed_ads": changed_ads, "trend": trend,
         "last_data_at": max((row.get("last_seen_at") or "" for row in ads), default=None),
     }
+    if with_examples and ads:
+        # Use dated observations. The entity's current copy can postdate a historical window.
+        samples = conn.execute(
+            """SELECT MAX(s.observed_date) AS occurred_at, s.creative_body AS body,
+                      e.platform, e.snapshot_url AS url
+               FROM ad_snapshots s JOIN ad_entities e ON e.id = s.entity_id
+               WHERE s.brand_id = ? AND s.observed_date BETWEEN ? AND ?
+                     AND length(trim(s.creative_body)) > 0
+               GROUP BY s.creative_body ORDER BY occurred_at DESC, s.creative_body LIMIT 3""",
+            (brand_id, start, end),
+        ).fetchall()
+        result["examples"] = content_examples([dict(row) for row in samples])
+    return result
 
 
 def _marketing_previous_window(start: str, end: str) -> tuple[str, str]:
@@ -1201,12 +1231,12 @@ def _marketing_previous_window(start: str, end: str) -> tuple[str, str]:
     return (previous_end - timedelta(days=span - 1)).isoformat(), previous_end.isoformat()
 
 
-def _marketing_overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
+def _marketing_overview_payload(conn: sqlite3.Connection, brand_id: str, start: str, end: str, *, with_examples: bool = False) -> dict:
     previous_start, previous_end = _marketing_previous_window(start, end)
-    channels = {key: _marketing_channel_snapshot(conn, brand_id, key, start, end) for key in ("media", "creators", "social", "community")}
-    channels["ads"] = _marketing_ads_snapshot(conn, brand_id, start, end)
-    previous_channels = {key: _marketing_channel_snapshot(conn, brand_id, key, previous_start, previous_end) for key in ("media", "creators", "social", "community")}
-    previous_channels["ads"] = _marketing_ads_snapshot(conn, brand_id, previous_start, previous_end)
+    channels = {key: _marketing_channel_snapshot(conn, brand_id, key, start, end, with_examples=with_examples) for key in ("media", "creators", "social", "community")}
+    channels["ads"] = _marketing_ads_snapshot(conn, brand_id, start, end, with_examples=with_examples)
+    previous_channels = {key: _marketing_channel_snapshot(conn, brand_id, key, previous_start, previous_end, with_examples=with_examples) for key in ("media", "creators", "social", "community")}
+    previous_channels["ads"] = _marketing_ads_snapshot(conn, brand_id, previous_start, previous_end, with_examples=with_examples)
     content_total = sum(channels[key].get("total", 0) for key in ("media", "creators", "social", "community"))
     previous_content_total = sum(previous_channels[key].get("total", 0) for key in ("media", "creators", "social", "community"))
     total_views = sum(channels[key].get("total_views", 0) for key in ("media", "creators", "social", "community"))
@@ -1238,28 +1268,27 @@ def _marketing_overview_payload(conn: sqlite3.Connection, brand_id: str, start: 
     yesterday = {"date": yesterday_day.isoformat(), "channels": {key: _marketing_channel_snapshot(conn, brand_id, key, yesterday_day.isoformat(), yesterday_day.isoformat()) if key != "ads" else _marketing_ads_snapshot(conn, brand_id, yesterday_day.isoformat(), yesterday_day.isoformat()) for key in channels}}
     yesterday["has_data"] = any((value.get("total", 0) or value.get("total_ads", 0)) for value in yesterday["channels"].values())
     coverage = {key: {"status": value.get("status", "empty"), "last_data_at": value.get("last_data_at")} for key, value in channels.items()}
-    return {"range": {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end}, "kpis": kpis, "modules": channels, "coverage": coverage, "yesterday": yesterday, "signals": signals[:12]}
+    window = {"start": start, "end": end, "previous_start": previous_start, "previous_end": previous_end}
+    research = marketing_evidence(channels, previous_channels, window)
+    for module in channels.values():
+        module.pop("examples", None)
+    return {"range": window, "kpis": kpis, "modules": channels, "coverage": coverage, "yesterday": yesterday,
+            "signals": signals[:12], "research": research, "candidates": rule_findings(channels, previous_channels)}
 
 
 def _marketing_fallback_summary(payload: dict) -> dict:
-    modules = payload.get("modules") or {}
-    total = sum((modules.get(key) or {}).get("total", 0) for key in ("media", "creators", "social", "community"))
-    ads = modules.get("ads") or {}
-    summary = f"本期营销共收录 {total:,} 条内容，广告库有 {ads.get('total_ads', 0):,} 条素材。"
-    active = [item for item in (payload.get("signals") or []) if item.get("severity") in {"high", "medium"}]
-    highlights = [{"domain": item.get("domain"), "severity": item.get("severity"), "title": item.get("title"), "detail": item.get("detail")} for item in active[:6]]
-    focus = [{"domain": item.get("domain"), "action": f"查看{item.get('title', '营销信号')}", "reason": item.get("detail", "")} for item in active[:4]]
-    yesterday = payload.get("yesterday") or {}
-    yesterday_total = sum((value or {}).get("total", 0) + (value or {}).get("total_ads", 0) for value in (yesterday.get("channels") or {}).values())
-    return {"mode": "fallback", "summary": summary, "yesterday_summary": f"{yesterday.get('date', '')}：营销相关新增或变化 {yesterday_total:,} 条。" if yesterday.get("has_data") else f"{yesterday.get('date', '')}：暂无营销数据。", "highlights": highlights, "focus": focus, "caveats": ["当前为确定性系统速览；配置大模型后可生成更完整的营销总结。"], "range": payload.get("range")}
+    findings = grounded_findings(payload["candidates"], payload["research"]["evidence"])
+    return {"mode": "fallback", "findings": findings, "summary": findings[0]["title"] if findings else MARKETING_EMPTY,
+            "range": payload["range"]}
 
 
 @router.get("/marketing/overview")
 def marketing_overview(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
     payload = _marketing_overview_payload(conn, brand_id, start, end)
-    saved = ai.get_cached_summary(conn, "marketing-overview:" + "|".join((brand_id, start, end)))
-    payload["summary_preview"] = saved or {**_marketing_fallback_summary(payload), "caveats": []}
+    saved = ai.get_cached_summary(conn, "marketing-overview:v2:" + "|".join((brand_id, start, end)))
+    payload["summary_preview"] = saved or _marketing_fallback_summary(payload)
+    del payload["research"], payload["candidates"]
     return payload
 
 
@@ -1270,7 +1299,7 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
     start, end = resolve_window(days, start_date, end_date)
     cache_key = (brand_id, start, end)
     now = time.monotonic()
-    persistent_key = "marketing-overview:" + "|".join(cache_key)
+    persistent_key = "marketing-overview:v2:" + "|".join(cache_key)
     if background:
         previous = ai.get_cached_summary(conn, persistent_key)
 
@@ -1299,19 +1328,19 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
 
 def _generate_marketing_summary(conn, brand_id, start, end, cache_key, persistent_key):
     with ai.measure_preparation("marketing-overview"):
-        payload = _marketing_overview_payload(conn, brand_id, start, end)
+        payload = _marketing_overview_payload(conn, brand_id, start, end, with_examples=True)
     transient_failure = False
-    if not ai.is_configured(conn):
+    if not any(ref.startswith("current.") for ref in payload["research"]["evidence"]) or not ai.is_configured(conn):
         result = _marketing_fallback_summary(payload)
     else:
         try:
-            evidence = {"range": payload["range"], "coverage": payload["coverage"], "yesterday": payload["yesterday"], "signals": payload["signals"], "modules": {key: {field: value for field, value in module.items() if field != "trend"} for key, module in payload["modules"].items()}}
-            result = {"mode": "ai", **ai.summarize_marketing_overview(conn, evidence)}
+            result = {"mode": "ai", **ai.summarize_marketing_overview(conn, payload["research"])}
+            if not result.get("findings"):
+                result = _marketing_fallback_summary(payload)
         except ai.LlmError:
             transient_failure = True
             result = _marketing_fallback_summary(payload)
-            result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
-            result["summary_notice"] = "大模型暂时不可用，可点击「刷新总结」重试。"
+            result["summary_notice"] = "AI 研判暂未完成，可点击「重新研判」重试。"
     result.update({"range": payload["range"], "cached": False})
     if not transient_failure:
         _MARKETING_OVERVIEW_CACHE[cache_key] = (time.monotonic(), result)

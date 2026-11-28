@@ -88,8 +88,8 @@ class MarketingInsightsJobTests(unittest.TestCase):
         self.assertTrue(failed["cached"])
 
     def test_marketing_dashboard_first_response_uses_only_same_scope_summary(self):
-        ai.put_cached_summary(self.conn, "marketing-overview:plaud|2026-10-24|2026-11-22", {"mode": "ai", "summary": "已保存"})
-        with patch("server.domains.content._marketing_overview_payload", side_effect=lambda *args: {}):
+        ai.put_cached_summary(self.conn, "marketing-overview:v2:plaud|2026-10-24|2026-11-22", {"mode": "ai", "summary": "已保存"})
+        with patch("server.domains.content._marketing_overview_payload", side_effect=lambda *args: {"research": {"evidence": {}}, "candidates": [], "range": {}}):
             def preview(brand):
                 return marketing_overview(brand, start_date="2026-10-24", end_date="2026-11-22", conn=self.conn)["summary_preview"]
             self.assertEqual("已保存", preview("plaud")["summary"])
@@ -97,14 +97,17 @@ class MarketingInsightsJobTests(unittest.TestCase):
 
     def test_marketing_overview_refresh_survives_reload_and_reuses_one_job(self):
         options = dict(brand_id="plaud", start_date="2026-10-24", end_date="2026-11-22", conn=self.conn, background=True)
-        data = {"range": {}, "coverage": {}, "yesterday": {}, "signals": [], "modules": {}}
+        data = {"range": {}, "research": {"evidence": {"current.media": {"text": "本期媒体"}}}, "candidates": []}
         release = threading.Event()
 
         def model(worker, evidence):
             self.assertTrue(release.wait(3))
-            return {"summary": "updated"}
+            return {"summary": "updated", "findings": [{"title": "updated", "evidence": [{"text": "本期媒体"}]}]}
 
-        ai.put_cached_summary(self.conn, "marketing-overview:plaud|2026-10-24|2026-11-22", {"mode": "ai", "summary": "previous"})
+        previous_key = "marketing-overview:plaud|2026-10-24|2026-11-22"
+        ai.put_cached_summary(self.conn, previous_key, {"mode": "ai", "summary": "legacy recap"})
+        self.assertFalse(marketing_overview_summary(**options, cached_only=True).get("summary"))
+        ai.put_cached_summary(self.conn, "marketing-overview:v2:plaud|2026-10-24|2026-11-22", {"mode": "ai", "summary": "previous"})
         with patch("server.domains.content._marketing_overview_payload", return_value=data) as prepare, \
              patch.object(ai, "summarize_marketing_overview", side_effect=model) as upstream:
             try:

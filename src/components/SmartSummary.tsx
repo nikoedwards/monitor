@@ -1,4 +1,4 @@
-import { AlertTriangle, RefreshCw, Sparkles } from "lucide-react";
+import { RefreshCw, Sparkles } from "lucide-react";
 import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary, type ExecutiveSummaryResult, type SummaryFilters } from "../lib/hooks";
 import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
@@ -58,72 +58,48 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview 
 export function ExecutiveMarketingSummary({ brandId, range, preview }: { brandId?: string; range: TimeRange; preview?: ExecutiveSummaryResult }) {
   const summary = useMarketingOverviewSummary(brandId, range);
   const data = summary.data || preview;
-  const pending = summary.pending || summary.takingLonger;
+  const pending = summary.pending;
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Badge tone={data?.mode === "ai" ? "accent" : "neutral"}>{data?.mode === "ai" ? "AI 营销判断" : "系统速览"}</Badge>
-          <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
+          {data && <Badge tone={data.mode === "ai" ? "accent" : "neutral"}>{data.mode === "ai" ? "AI 研判" : "数据观察"}</Badge>}
+          <span className="text-[12px]" style={{ color: "var(--mute)" }}>{rangeLabel(range)}</span>
         </div>
         <div className="flex flex-col items-end">
           <Button size="sm" onClick={summary.refresh} disabled={pending}>
             <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
-            {pending ? "更新中…" : "刷新总结"}
+            {pending ? "研判中…" : summary.takingLonger ? "查看进度" : "重新研判"}
           </Button>
-          <AsyncProgress active={pending} label="正在整理营销数据" />
+          <AsyncProgress active={pending} label="正在分析营销证据" />
         </div>
       </div>
 
       {summary.error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{summary.error}</p>}
       {summary.data?.summary_notice && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>{summary.data.summary_notice}</p>}
-      {data && (
-        <>
-          <div className="grid grid-cols-1 lg:grid-cols-[1.35fr_1fr] gap-4">
-            <div>
-              <div className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{data.summary}</div>
-              <div className="mt-3 p-3 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[12px] font-medium" style={{ color: "var(--ink)" }}>昨日速览</span>
-                  <span className="text-[11px]" style={{ color: "var(--mute)" }}>{data.yesterday?.date || data.range?.end}</span>
-                </div>
-                <div className="text-[13px] leading-relaxed" style={{ color: "var(--body)" }}>{data.yesterday_summary || "暂无昨日数据。"}</div>
-              </div>
-            </div>
-            <div>
-              <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>需要关注</div>
-              {Array.isArray(data.focus) && data.focus.length ? (
-                <div className="space-y-2">
-                  {data.focus.map((item, index) => (
-                    <div key={index} className="flex gap-2 text-[13px]" style={{ color: "var(--body)" }}>
-                      <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{ color: "var(--warning)" }} />
-                      <span><b style={{ color: "var(--ink)" }}>{item.action}</b>{item.reason ? `：${item.reason}` : ""}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : <span className="text-[13px]" style={{ color: "var(--mute)" }}>当前没有需要立即跟进的事项。</span>}
-            </div>
-          </div>
-          {Array.isArray(data.highlights) && data.highlights.length > 0 && (
-            <div>
-              <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>关键发现</div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {data.highlights.map((item, index) => (
-                  <div key={index} className="p-2.5 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
-                    <div className="flex items-center gap-2">
-                      <Badge tone={item.severity === "high" ? "negative" : item.severity === "medium" ? "warning" : "neutral"}>{item.domain || "营销"}</Badge>
-                      <span className="text-[13px] font-medium" style={{ color: "var(--ink)" }}>{item.title}</span>
-                    </div>
-                    <div className="text-[12px] mt-1 leading-relaxed" style={{ color: "var(--body)" }}>{item.detail}</div>
-                  </div>
+      {!!data?.findings?.length && (
+        <ol>
+          {data.findings.map((item) => (
+            <li key={item.title} className="border-t first:border-t-0 py-3 first:pt-0 last:pb-0 space-y-1.5 break-words" style={{ borderColor: "var(--hairline)" }}>
+              <h3 className="text-[15px] font-semibold" style={{ color: "var(--ink)" }}>{item.title}</h3>
+              <ul className="space-y-1 text-[12px] leading-relaxed" style={{ color: "var(--body)" }}>
+                {item.evidence.map((source, i) => (
+                  <li key={i}>
+                    {source.url
+                      ? <a className="underline underline-offset-2" href={source.url} target="_blank" rel="noreferrer">{source.text}</a>
+                      : source.text}
+                    {source.excerpt && <details style={{ color: "var(--mute)" }}><summary className="cursor-pointer">查看摘录</summary>{source.excerpt}</details>}
+                  </li>
                 ))}
-              </div>
-            </div>
-          )}
-          {Array.isArray(data.caveats) && data.caveats.length > 0 && <div className="text-[12px]" style={{ color: "var(--mute)" }}>{data.caveats.join(" · ")}</div>}
-        </>
+              </ul>
+              {item.hypothesis && <p className="text-[13px] leading-relaxed"><b className="mr-2">战略推测</b>{item.hypothesis}</p>}
+              {item.check && <p className="text-[13px] leading-relaxed" style={{ color: "var(--body)" }}><b className="mr-2">验证线索</b>{item.check}</p>}
+            </li>
+          ))}
+        </ol>
       )}
+      {data && !data.findings?.length && <p className="text-[13px]" style={{ color: "var(--mute)" }}>{data.summary}</p>}
     </div>
   );
 }

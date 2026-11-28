@@ -144,6 +144,12 @@ export type ExecutiveSummaryResult = {
   mode?: "ai" | "fallback";
   summary?: string;
   summary_notice?: string;
+  findings?: {
+    title: string;
+    evidence: { text: string; excerpt?: string; url?: string }[];
+    hypothesis: string;
+    check: string;
+  }[];
   yesterday?: { date?: string };
   range?: { end?: string };
   yesterday_summary?: string;
