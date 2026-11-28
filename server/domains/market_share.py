@@ -480,16 +480,9 @@ def _app_observation(row: sqlite3.Row, platform: str, region: str, raw: dict, me
     }
 
 
-def _brand_observations(
-    conn: sqlite3.Connection, brand: sqlite3.Row, start: str, end: str, country: str, include_history: bool,
-) -> tuple[dict, set[str]]:
-    brand_id = brand["id"]
-    countries: set[str] = set()
-    totals: dict = {}
-    daily: dict[str, dict] = defaultdict(dict)
-    apps: dict[str, dict] = {}
-    app_days: dict[str, list[dict]] = defaultdict(list)
-    app_days_seen: set[tuple[str, str]] = set()
+def _iter_app_observations(
+    conn: sqlite3.Connection, brand_id: str, start: str, end: str, country: str, countries: set[str],
+):
     allowed_apps = configured_app_ids(conn, brand_id)
     records = conn.execute(
         "SELECT id, source_id, link_id, platform, title, url, region, occurred_at, metrics_json, raw_json "
@@ -509,7 +502,21 @@ def _brand_observations(
             countries.add(region)
         if country != "all" and (platform == "google_play" or country != region):
             continue
-        observation = _app_observation(row, platform, region, raw, _json_object(row["metrics_json"]))
+        yield _app_observation(row, platform, region, raw, _json_object(row["metrics_json"]))
+
+
+def _brand_observations(
+    conn: sqlite3.Connection, brand: sqlite3.Row, start: str, end: str, country: str, include_history: bool,
+) -> tuple[dict, set[str]]:
+    brand_id = brand["id"]
+    countries: set[str] = set()
+    totals: dict = {}
+    daily: dict[str, dict] = defaultdict(dict)
+    apps: dict[str, dict] = {}
+    app_days: dict[str, list[dict]] = defaultdict(list)
+    app_days_seen: set[tuple[str, str]] = set()
+    for observation in _iter_app_observations(conn, brand_id, start, end, country, countries):
+        platform = observation["platform"]
         key = observation["key"]
         day = observation["date"]
         values = {f"{platform}_ratings": observation["rating_count"], "app_downloads": observation["downloads"]}
@@ -531,6 +538,19 @@ def _brand_observations(
     return result, countries
 
 
+def _observation_scope(conn: sqlite3.Connection, ids: list[str], country: str):
+    country_code = country.strip().upper() or "ALL"
+    if country_code != "ALL" and (len(country_code) != 2 or not country_code.isascii() or not country_code.isalpha()):
+        raise HTTPException(status_code=400, detail="请选择两位国家代码。")
+    placeholders = ",".join("?" for _ in ids)
+    brands = {row["id"]: row for row in conn.execute(
+        f"SELECT id, name FROM brands WHERE id IN ({placeholders})", ids,
+    )}
+    if missing := [brand_id for brand_id in ids if brand_id not in brands]:
+        raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(missing)}")
+    return [brands[brand_id] for brand_id in ids], "all" if country_code == "ALL" else country_code
+
+
 @router.get("/observations")
 def market_observations(
     brand_ids: str,
@@ -543,24 +563,105 @@ def market_observations(
     ids = list(dict.fromkeys(part.strip() for part in brand_ids.split(",") if part.strip()))
     if not ids or len(ids) > 12 or (include_history and len(ids) != 1):
         raise HTTPException(status_code=400, detail="品牌汇总支持 1–12 个品牌，按日明细一次查看 1 个品牌。")
-    country_code = country.strip().upper() or "ALL"
-    if country_code != "ALL" and (len(country_code) != 2 or not country_code.isascii() or not country_code.isalpha()):
-        raise HTTPException(status_code=400, detail="请选择两位国家代码。")
-    placeholders = ",".join("?" for _ in ids)
-    brands = {row["id"]: row for row in conn.execute(
-        f"SELECT id, name FROM brands WHERE id IN ({placeholders})", ids,
-    )}
-    if missing := [brand_id for brand_id in ids if brand_id not in brands]:
-        raise HTTPException(status_code=404, detail=f"品牌不存在：{', '.join(missing)}")
+    brands, country_code = _observation_scope(conn, ids, country)
 
     start, end = resolve_window(start_date=start_date, end_date=end_date)
     countries: set[str] = set()
     results = []
-    for brand_id in ids:
-        result, scopes = _brand_observations(conn, brands[brand_id], start, end, "all" if country_code == "ALL" else country_code, include_history)
+    for brand in brands:
+        result, scopes = _brand_observations(conn, brand, start, end, country_code, include_history)
         countries.update(scopes)
         results.append(result)
     return {"countries": sorted(countries), "brands": results}
+
+
+def _brand_rating_growth(
+    conn: sqlite3.Connection, brand: sqlite3.Row, dates: list[str], country: str, countries: set[str],
+) -> tuple[dict, dict]:
+    baseline, end = dates[0], dates[-1]
+    ratings = defaultdict(dict)
+    apps = {}
+    baseline_keys = set()
+    for obs in _iter_app_observations(conn, brand["id"], baseline, end, country, countries):
+        key, day = obs["key"], obs["date"]
+        apps.setdefault(key, {field: obs[field] for field in ("key", "name", "platform", "scope")})
+        if day == baseline:
+            baseline_keys.add(key)
+        if obs["rating_count"] is not None:
+            # Rows arrive newest first. Keep the last valid measurement for this day.
+            ratings[key].setdefault(day, obs["rating_count"])
+
+    # A returning app that missed the baseline is not a newly monitored app.
+    candidates = apps.keys() - baseline_keys
+    if candidates:
+        previous_day = (date.fromisoformat(baseline) - timedelta(days=1)).isoformat()
+        for obs in _iter_app_observations(conn, brand["id"], "", previous_day, country, set()):
+            if obs["key"] in candidates:
+                baseline_keys.add(obs["key"])
+                candidates.remove(obs["key"])
+                if not candidates:
+                    break
+
+    def complete_total(day):
+        if not baseline_keys or any(day not in ratings[key] for key in baseline_keys):
+            return None
+        return sum(ratings[key][day] for key in baseline_keys)
+
+    initial = complete_total(baseline)
+    changes = {}
+    for day in dates:
+        total = complete_total(day)
+        changes[day] = total - initial if initial is not None and total is not None else None
+    missing = []
+    if initial is None:
+        missing.append(baseline)
+    end_observed = complete_total(end) is not None if baseline_keys else any(end in values for values in ratings.values())
+    if not end_observed:
+        missing.append(end)
+    details = [
+        {**app, "baseline_count": ratings[key].get(baseline), "end_count": ratings[key].get(end),
+         "in_baseline_sample": key in baseline_keys}
+        for key, app in apps.items()
+    ]
+    net = changes[end]
+    return {
+        "brand_id": brand["id"], "name": brand["name"], "net": net,
+        "daily_average": net / (len(dates) - 1) if net is not None else None,
+        "share": None, "missing_dates": missing, "apps": details,
+    }, changes
+
+
+@router.get("/growth")
+def market_share_growth(
+    brand_ids: str, start_date: date, end_date: date, country: str = "all",
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    ids = list(dict.fromkeys(part.strip() for part in brand_ids.split(",") if part.strip()))
+    if not 2 <= len(ids) <= 12:
+        raise HTTPException(status_code=400, detail="请选择 2–12 个品牌比较评分增量。")
+    if start_date <= date.min + timedelta(days=1) or start_date > end_date:
+        raise HTTPException(status_code=400, detail="请选择有效的起止日期。")
+    brands, country_code = _observation_scope(conn, ids, country)
+    baseline = start_date - timedelta(days=1)
+    days = (end_date - baseline).days
+    dates = [(baseline + timedelta(days=offset)).isoformat() for offset in range(days + 1)]
+    countries: set[str] = set()
+    rows = []
+    points = [{"date": day, "net": {}} for day in dates]
+    for brand in brands:
+        row, changes = _brand_rating_growth(conn, brand, dates, country_code, countries)
+        rows.append(row)
+        for point in points:
+            point["net"][brand["id"]] = changes[point["date"]]
+
+    total = sum(row["net"] for row in rows) if all(row["net"] is not None for row in rows) else None
+    if total is not None and total > 0:
+        for row in rows:
+            row["share"] = 100 * row["net"] / total
+    return {
+        "range": {"start": start_date.isoformat(), "end": end_date.isoformat(), "baseline": dates[0], "days": days},
+        "countries": sorted(countries), "total_net": total, "brands": rows, "points": points,
+    }
 
 
 @router.post("/snapshots/refresh")

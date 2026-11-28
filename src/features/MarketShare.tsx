@@ -4,12 +4,13 @@ import { AlertTriangle, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-rea
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import { TimeRangePicker } from "../components/TimeRangePicker";
 import { MultiLineChart } from "../components/charts";
-import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, Select, Spinner, StatCard } from "../components/ui";
+import { Badge, Button, Card, EmptyState, InfoHint, Modal, SectionTitle, SegmentGroup, Select, Spinner, StatCard } from "../components/ui";
 import { fmtNum } from "../lib/format";
-import { useBrands, useMarketShare, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
+import { useBrands, useMarketShare, useMarketShareGrowth, useMarketShareTrend, useRefreshMarketShareData } from "../lib/hooks";
 import { observedShare } from "../lib/marketShare";
 import { useTimeRange } from "../lib/timeRange";
 import { MarketShareBreakdown } from "./MarketShareObservations";
+import { MarketShareGrowth } from "./MarketShareGrowth";
 
 const STORAGE_KEY = "monitor.marketShare.brandIds";
 const COLORS = ["#0070f3", "#7928ca", "#29bc9b", "#f5a623", "#ff0080", "#6b7280", "#ef4444", "#14b8a6"];
@@ -54,6 +55,7 @@ export default function MarketShare() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [params, setParams] = useSearchParams();
   const country = params.get("country") || "all";
+  const growthView = params.get("view") === "growth";
   const setCountry = (code: string) => {
     const next = new URLSearchParams(params);
     if (code === "all") next.delete("country");
@@ -85,9 +87,10 @@ export default function MarketShare() {
     () => selected.map((id) => brands.find((brand) => brand.id === id)).filter(Boolean),
     [brands, selected],
   );
-  const query = useMarketShare(selected, "balanced", country, range);
-  const trendQuery = useMarketShareTrend(selected, "balanced", country, range);
-  const result = query.data;
+  const query = useMarketShare(selected, "balanced", country, range, !growthView);
+  const trendQuery = useMarketShareTrend(selected, "balanced", country, range, !growthView);
+  const growthQuery = useMarketShareGrowth(selected, country, range, growthView);
+  const result = growthView ? undefined : query.data;
   const selectedKey = useMemo(() => [...selected].sort().join(","), [selected]);
   const appDataMissing = Boolean(result?.brands.some(
     (row) => !row.signals.app && !row.signals.conversation,
@@ -104,8 +107,8 @@ export default function MarketShare() {
   }, [selected, trendFocus]);
 
   const countryOptions = useMemo(
-    () => Array.from(new Set([...(result?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
-    [result?.countries, country],
+    () => Array.from(new Set([...(query.data?.countries || []), ...(growthQuery.data?.countries || []), ...(country === "all" ? [] : [country])])).sort(),
+    [query.data?.countries, growthQuery.data?.countries, country],
   );
   const leader = result?.brands.find((row) => row.share > 0);
   const appRatingCount = result?.brands.reduce((sum, row) => sum + row.raw.app_reviews, 0) || 0;
@@ -147,7 +150,7 @@ export default function MarketShare() {
     <div className="space-y-6">
       <SectionTitle
         title="市占分析"
-        subtitle="使用应用商店累计评分次数计算样本份额，有可比较的实采下载量时一并计入"
+        subtitle={growthView ? "比较所选品牌在这段时间内的应用商店评分净增量" : "使用应用商店累计评分次数计算样本份额，有可比较的实采下载量时一并计入"}
         hint="这是监测样本内的可解释估算，不是第三方机构发布的官方全行业市占。"
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -155,7 +158,7 @@ export default function MarketShare() {
               <option value="all">全部国家</option>
               {countryOptions.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
             </Select>
-            <TimeRangePicker />
+            <TimeRangePicker dayLabel={growthView ? "较昨日" : "24h"} />
           </div>
         }
       />
@@ -192,7 +195,15 @@ export default function MarketShare() {
         </Button>
       </div>
 
-      {query.isLoading && <Spinner />}
+      <SegmentGroup value={growthView ? "growth" : "cumulative"} options={[
+        { value: "cumulative", label: "累计份额" }, { value: "growth", label: "区间增量份额" },
+      ]} onChange={(view) => {
+        const next = new URLSearchParams(params);
+        if (view === "growth") next.set("view", view);
+        else next.delete("view");
+        setParams(next, { replace: true });
+      }} />
+      {(growthView ? growthQuery.isLoading : query.isLoading) && <Spinner />}
       {refreshAppData.isError && (
         <Card>
           <div className="text-[13px]" style={{ color: "var(--danger)" }}>
@@ -200,11 +211,13 @@ export default function MarketShare() {
           </div>
         </Card>
       )}
-      {query.isError && (
+      {(growthView ? growthQuery.isError : query.isError) && (
         <Card>
-          <div className="text-[14px]" style={{ color: "var(--danger)" }}>{query.error?.message || "市占估算失败"}</div>
+          <div className="text-[14px]" style={{ color: "var(--danger)" }}>{(growthView ? growthQuery.error : query.error)?.message || "市占分析加载失败"}</div>
         </Card>
       )}
+
+      {growthView && growthQuery.data && <MarketShareGrowth data={growthQuery.data} colors={COLORS} />}
 
       {result && (
         <>
@@ -285,7 +298,7 @@ export default function MarketShare() {
         </>
       )}
 
-      <div className={result ? "grid grid-cols-1 2xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-4" : undefined}>
+      {!growthView && <div className={result ? "grid grid-cols-1 2xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-4" : undefined}>
         {result && (
           <Card>
             <SectionTitle title="App 评分样本份额" subtitle={`${result.country === "all" ? "全部国家" : countryLabel(result.country)} · ${result.range.start} 至 ${result.range.end}`} />
@@ -326,7 +339,7 @@ export default function MarketShare() {
           </Card>
         )}
         {selected.length > 0 && <MarketShareBreakdown brandIds={selected} country={country} range={range} result={result} />}
-      </div>
+      </div>}
 
       <Modal open={pickerOpen} onClose={() => setPickerOpen(false)} title="选择市占分析品牌" width={520}>
         <div className="space-y-2 max-h-[52vh] overflow-y-auto pr-1">

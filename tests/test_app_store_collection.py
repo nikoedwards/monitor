@@ -1,8 +1,11 @@
+import json
 import sqlite3
 import unittest
 from unittest.mock import patch
 
-from server.connectors.collectors import _APP_STORE_REVIEW_COUNTRIES, _DEFAULT_APP_STORE_COUNTRIES, _select_official_apps, collect_app_store
+from server.connectors.collectors import _APP_STORE_REVIEW_COUNTRIES, _DEFAULT_APP_STORE_COUNTRIES, _app_store_metric_payload, _select_official_apps, collect_app_store
+from server.db import SCHEMA as RECORDS_SCHEMA
+from server.records import insert_record_if_new
 
 
 SCHEMA = """
@@ -30,6 +33,22 @@ class AppStoreCollectorTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    def test_daily_metric_keeps_last_observed_count_including_zero(self):
+        brand = {"id": "alpha", "name": "Alpha"}
+        app = {"trackId": "123", "trackName": "Alpha"}
+        self.assertIsNone(_app_store_metric_payload(brand, app, "US", discovery="test"))
+        self.conn.executescript(RECORDS_SCHEMA)
+        for hour, count in [(8, 2), (10, 0), (9, 5)]:
+            stamp = f"2026-11-30T{hour:02}:00:00+00:00"
+            with patch("server.connectors.collectors.utc_now", return_value=stamp):
+                payload = _app_store_metric_payload(brand, {**app, "userRatingCount": count}, "US", discovery="test")
+            insert_record_if_new(self.conn, payload)
+        rows = self.conn.execute("SELECT metrics_json, raw_json, occurred_at FROM records").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(json.loads(rows[0]["metrics_json"])["rating_count"], 0)
+        self.assertEqual(json.loads(rows[0]["raw_json"])["rating_count"], 0)
+        self.assertEqual(rows[0]["occurred_at"], "2026-11-30T10:00:00+00:00")
 
     @patch("server.connectors.collectors.fetch_json")
     def test_discovers_official_brand_portfolio_without_configured_links(self, fetch_json):

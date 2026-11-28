@@ -85,7 +85,7 @@ export function TrendChart({ data, keys, valueFormatter, showPoints = false, int
   );
 }
 
-export function MultiLineChart({ data, keys, valueFormatter }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string }) {
+export function MultiLineChart({ data, keys, valueFormatter, observedOnly = false }: { data: any[]; keys: { key: string; name: string; color: string }[]; valueFormatter?: (value: number) => string; observedOnly?: boolean }) {
   return (
     <ResponsiveContainer width="100%" height={260}>
       <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
@@ -94,7 +94,7 @@ export function MultiLineChart({ data, keys, valueFormatter }: { data: any[]; ke
         <YAxis tick={AXIS} tickFormatter={valueFormatter} axisLine={false} tickLine={false} width={valueFormatter ? 64 : 48} />
         <Tooltip content={<TooltipBox valueFormatter={valueFormatter} />} />
         {keys.map((k) => (
-          <Line key={k.key} type="monotone" dataKey={k.key} name={k.name} stroke={k.color} strokeWidth={2.25} dot={false} connectNulls />
+          <Line key={k.key} type={observedOnly ? "linear" : "monotone"} dataKey={k.key} name={k.name} stroke={k.color} strokeWidth={2.25} dot={observedOnly ? { r: 2 } : false} connectNulls={!observedOnly} />
         ))}
       </LineChart>
     </ResponsiveContainer>

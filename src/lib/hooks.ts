@@ -9,6 +9,7 @@ import {
   type HiringStrategicSignals,
   type Link,
   type MarketObservationsResponse,
+  type MarketShareGrowthResponse,
   type MarketShareModelKey,
   type MarketShareResponse,
   type MarketShareTrendResponse,
@@ -231,21 +232,31 @@ export function useCompare(range?: TimeRange) {
   });
 }
 
-export function useMarketShare(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
+export function useMarketShare(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange, enabled = true) {
   const rp = rangeParams(range);
   return useQuery({
     queryKey: ["market-share", brandIds, model, country, rp],
     queryFn: () => api.get<MarketShareResponse>(`/api/market-share${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
-    enabled: brandIds.length >= 2,
+    enabled: enabled && brandIds.length >= 2,
   });
 }
 
-export function useMarketShareTrend(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange) {
+export function useMarketShareTrend(brandIds: string[], model: MarketShareModelKey, country: string, range?: TimeRange, enabled = true) {
   const rp = rangeParams(range);
   return useQuery({
     queryKey: ["market-share-trend", brandIds, model, country, rp],
     queryFn: () => api.get<MarketShareTrendResponse>(`/api/market-share/trend${qs({ brand_ids: brandIds.join(","), model, country, ...rp })}`),
-    enabled: brandIds.length >= 2,
+    enabled: enabled && brandIds.length >= 2,
+  });
+}
+
+export function useMarketShareGrowth(brandIds: string[], country: string, range: TimeRange, enabled: boolean) {
+  const params = { brand_ids: brandIds.join(","), country, ...rangeParams(range) };
+  if (range.preset === "24h") params.start_date = range.end_date;
+  return useQuery({
+    queryKey: ["market-share-growth", params],
+    queryFn: () => api.get<MarketShareGrowthResponse>(`/api/market-share/growth${qs(params)}`),
+    enabled: enabled && brandIds.length >= 2,
   });
 }
 
@@ -275,7 +286,10 @@ export function useRefreshMarketShareData() {
       qc.invalidateQueries({ queryKey: ["records"] });
       qc.invalidateQueries({ queryKey: ["sources"] });
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: ["market-observations"] }),
+    onSettled: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ["market-observations"] }),
+      qc.invalidateQueries({ queryKey: ["market-share-growth"] }),
+    ]),
   });
 }
 

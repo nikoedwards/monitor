@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RANGE_PRESETS, presetRange, useTimeRange, type RangePreset } from "../lib/timeRange";
 import { Button } from "./ui";
 
-export function TimeRangePicker() {
+export function TimeRangePicker({ dayLabel = "24h" }: { dayLabel?: string }) {
   const [range, setRange] = useTimeRange();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState({ start: range.start_date, end: range.end_date });
@@ -41,7 +41,7 @@ export function TimeRangePicker() {
             className="px-2 h-7 text-[12px] rounded-[5px] font-medium transition-colors cursor-pointer"
             style={range.preset === p.value ? { background: "var(--panel)", color: "var(--ink)", boxShadow: "var(--shadow)" } : { color: "var(--mute)" }}
           >
-            {p.label}
+            {p.value === "24h" ? dayLabel : p.label}
           </button>
         ))}
         <button
