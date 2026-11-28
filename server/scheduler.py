@@ -20,8 +20,7 @@ from .util import today
 
 _started = False
 logger = logging.getLogger(__name__)
-# All scheduler-owned work shares one slot. This covers browser-backed
-# collectors as well as web snapshots on a 1 GiB host.
+# Browser-backed collectors and web snapshots share one slot on a 1 GiB host.
 SCHEDULER_WORK_SLOT = threading.BoundedSemaphore(1)
 
 
@@ -235,6 +234,25 @@ def _web_snapshot_loop() -> None:
         time.sleep(max(30, WEB_SCHEDULER_SECONDS))
 
 
+def _voice_summary_loop() -> None:
+    from . import ai
+    from .domains.content import prepare_voice_summaries
+
+    while True:
+        try:
+            with db() as conn:
+                brands = conn.execute("SELECT id FROM brands").fetchall() if ai.is_configured(conn) else []
+            for brand in brands:
+                try:
+                    with db() as conn:
+                        prepare_voice_summaries(conn, brand["id"])
+                except Exception:
+                    logger.exception("Voice summary preparation failed for %s", brand["id"])
+        except Exception:
+            logger.exception("Voice summary scheduler cycle failed")
+        time.sleep(max(60, min(SCHEDULER_SECONDS, 600)))
+
+
 def start_scheduler() -> None:
     global _started
     if _started or not SCHEDULER_ENABLED:
@@ -253,6 +271,7 @@ def start_scheduler() -> None:
     for target, name in (
         (_collection_loop, "monitor-collections"),
         (_web_snapshot_loop, "monitor-web-snapshots"),
+        (_voice_summary_loop, "monitor-voice-summaries"),
     ):
         threading.Thread(
             target=delayed_target, args=(target, name), name=name, daemon=True,

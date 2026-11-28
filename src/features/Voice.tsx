@@ -35,6 +35,20 @@ type SourceKey =
 type BadgeTone = "neutral" | "positive" | "negative" | "warning" | "accent";
 type FeedbackSummaries = Record<string, CommunityPostSummary>;
 
+function summaryStatus(result: CommunityPostSummary | undefined, evidence?: VoiceEvidence) {
+  if (!evidence?.text || result?.status === "unavailable") return "内容不足，无法生成中文摘要";
+  if (result?.status === "unconfigured") return "配置 AI 后可生成中文摘要";
+  if (result?.status === "error") return "中文摘要生成失败";
+  return "正在生成中文摘要…";
+}
+
+function feedbackText(key: string, title: string, summary: string, evidence: VoiceEvidence | undefined, result?: CommunityPostSummary) {
+  const description = summary || result?.summary || summaryStatus(result, evidence);
+  const heading = key.startsWith("quote_") && !summary ? result?.headline || description : title;
+  const redundant = description === heading || description.replace(/[。！？，.!?]+$/, "") === heading;
+  return { heading, description: redundant ? "" : description };
+}
+
 interface VoiceSourceSummary {
   key: string;
   label: string;
@@ -116,11 +130,18 @@ export default function Voice() {
   const { data: records = [], isLoading: recordsLoading, isError: recordsError, refetch: refetchRecords } = recordsQuery;
   const topics: IssueCard[] = summary?.topics || [];
   const sourceCatalog: VoiceSourceSummary[] = summary?.source_catalog || [];
-  const feedbackSummaries = useVoiceFeedbackSummaries([
+  const boardEvidence = [
     ...topics.flatMap((topic) => !topic.problem_summary ? (topic.evidence || []).slice(0, 1) : []),
     ...sourceCatalog.flatMap((source) => (source.examples || []).filter((example) => !example.summary).map((example) => example.evidence)),
-    ...records.flatMap((record) => record.voice_issue && !record.voice_issue.summary ? [record.voice_issue.evidence] : []),
-  ].filter((evidence) => evidence.record_id && evidence.text));
+  ].filter((evidence) => evidence.record_id && evidence.text);
+  const boardSummaries = useVoiceFeedbackSummaries(boardEvidence, 3);
+  const boardIds = new Set(boardEvidence.map((evidence) => evidence.record_id));
+  const detailEvidence = records.flatMap((record) => {
+    const issue = record.voice_issue;
+    return issue && !issue.summary && issue.evidence.text && !boardIds.has(record.id) ? [issue.evidence] : [];
+  });
+  const detailSummaries = useVoiceFeedbackSummaries(summary && !boardSummaries.isFetching ? detailEvidence : []);
+  const feedbackSummaries = { ...detailSummaries.data, ...boardSummaries.data };
 
   if (isLoading && !summary) return <Spinner />;
   if (isError && !summary) {
@@ -265,7 +286,7 @@ export default function Voice() {
             subtitle="按具体问题归并反馈，优先显示高风险和高频问题"
             hint="P0 仅用于命中安全、隐私、数据丢失、异常扣款或大范围故障等高危信号；其余问题结合负向声量、负向率和帖子在当前范围内的相对传播排名划分 P1-P3。"
           />
-          <IssueBoard topics={topics} summaries={feedbackSummaries.data} onOpenEvidence={setOpenEvidence} />
+          <IssueBoard topics={topics} summaries={feedbackSummaries} onOpenEvidence={setOpenEvidence} />
         </Card>
         <div className="space-y-4">
           <Card>
@@ -279,7 +300,7 @@ export default function Voice() {
         <SectionTitle title="原始反馈明细" subtitle="按来源和情绪筛选，查看具体问题、建议和原始反馈" />
         <SourceSummaryGrid
           sources={sourceCatalog}
-          summaries={feedbackSummaries.data}
+          summaries={feedbackSummaries}
           selectedSources={selectedSources}
           onSelect={(key) => setSelectedSources((current) => toggleSourceSelection(current, key as SourceKey))}
         />
@@ -297,7 +318,7 @@ export default function Voice() {
         </div>
         {recordsLoading ? <Spinner /> : recordsError ? (
           <EmptyState title="反馈明细加载失败" hint="汇总数据已加载，但明细接口暂时不可用。" action={<Button size="sm" onClick={() => void refetchRecords()}>重试明细</Button>} />
-        ) : <VoiceFeedbackList records={filteredRecords} summaries={feedbackSummaries.data} onOpenEvidence={setOpenEvidence} />}
+        ) : <VoiceFeedbackList records={filteredRecords} summaries={feedbackSummaries} onOpenEvidence={setOpenEvidence} />}
       </Card>
 
       <Modal open={!!openEvidence} onClose={() => setOpenEvidence(null)} title="完整原文" width={720}>
@@ -387,7 +408,8 @@ function SourceSummaryGrid({ sources, selectedSources, onSelect, summaries }: { 
               <ul className="mt-2 space-y-1 text-[12px] leading-relaxed" style={{ color: "var(--ink)" }}>
                 {source.examples.map((example) => (
                   <li key={example.key} className="flex gap-2">
-                    <span className="min-w-0 break-words">{example.summary || summaries?.[example.evidence.record_id]?.summary || example.title}</span>
+                    <span className="min-w-0 break-words">{example.summary || summaries?.[example.evidence.record_id]?.summary ||
+                      (example.key.startsWith("quote_") ? summaryStatus(summaries?.[example.evidence.record_id], example.evidence) : example.title)}</span>
                     {example.count > 1 && <span className="shrink-0 tabular-nums" style={{ color: "var(--mute)" }}>{example.count} 条</span>}
                   </li>
                 ))}
@@ -416,8 +438,7 @@ function IssueBoard({ topics, summaries, onOpenEvidence }: { topics: IssueCard[]
         const suggestedTeams = topic.suggested_teams?.length ? topic.suggested_teams : [topic.suggested_team];
         const evidence = topic.evidence || [];
         const generated = summaries?.[evidence[0]?.record_id];
-        const title = topic.id?.startsWith("quote_") ? generated?.headline || topic.title : topic.title;
-        const description = topic.problem_summary || generated?.summary;
+        const { heading: title, description } = feedbackText(topic.id, topic.title, topic.problem_summary, evidence[0], generated);
         return (
           <article key={topic.id} className="rounded-lg p-3.5" style={{ border: "1px solid var(--hairline)" }}>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -432,7 +453,7 @@ function IssueBoard({ topics, summaries, onOpenEvidence }: { topics: IssueCard[]
               <span>{topic.total} 条反馈 · 负向 {topic.negative} 条{topic.negative > 0 && ` · 负向率 ${(topic.negative_rate * 100).toFixed(0)}%`}</span>
               {topicLabels.map((label) => <Badge key={label} tone="neutral">#{label}</Badge>)}
             </div>
-            {description && description.replace(/[。！？，.!?]+$/, "") !== title && (
+            {description && (
               <p className="mt-2 text-[13px] leading-relaxed" style={{ color: "var(--ink)" }}>{description}</p>
             )}
             {topic.priority_reason && <div className="mt-1 text-[11px]" style={{ color: "var(--mute)" }}>{topic.priority_reason}</div>}
@@ -497,9 +518,7 @@ function VoiceFeedbackList({ records, summaries, onOpenEvidence }: { records: Re
         const issue = record.voice_issue;
         if (!issue) return null;
         const generated = summaries?.[record.id];
-        const summary = issue.summary || generated?.summary;
-        const originalTitle = !summary && issue.evidence.title !== issue.evidence.text ? issue.evidence.title : "";
-        const title = issue.key.startsWith("quote_") ? generated?.headline || originalTitle : issue.title;
+        const { heading: title, description: summary } = feedbackText(issue.key, issue.title, issue.summary, issue.evidence, generated);
         const source = record.voice_source && SOURCE_LABEL[record.voice_source];
         return (
           <article key={record.id} className="panel p-4 space-y-2">
@@ -509,7 +528,7 @@ function VoiceFeedbackList({ records, summaries, onOpenEvidence }: { records: Re
               {record.hot_risk && <Badge tone="negative">高热度负向</Badge>}
             </div>
             {title && <h3 className="text-[14px] font-semibold break-words" style={{ color: "var(--ink)" }}>{title}</h3>}
-            {summary && summary.replace(/[。！？，.!?]+$/, "") !== title && (
+            {summary && (
               <p className="text-[14px] leading-relaxed" style={{ color: "var(--ink)" }}>{summary}</p>
             )}
             <EvidenceQuote evidence={issue.evidence} onOpen={onOpenEvidence} showLink />
