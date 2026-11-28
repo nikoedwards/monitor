@@ -37,7 +37,8 @@ def request(**kw):
     with urlopen(req,timeout=25) as res:
         return json.load(res)
 t=time.monotonic()
-result=request()
+before = request(cached_only='true').get('analysis_id')
+result=request(refresh='true')
 while result.get('generation',{}).get('status')=='running' and time.monotonic()-t<430:
     time.sleep(3)
     result=request(cached_only='true')
@@ -45,5 +46,11 @@ status=result.get('generation',{}).get('status')
 print('analysis result',status,'seconds',round(time.monotonic()-t),'summary_chars',len(result.get('summary','')), 'has_model',bool(result.get('model') and result.get('model')!='deterministic'),flush=True)
 if not result.get('summary') or status in ('running','failed') or result.get('model') in (None,'deterministic'):
     raise SystemExit(1)
+assert result['analysis_id'] and result['analysis_id'] != before
 assert request(cached_only='true').get('analysis_id') == result['analysis_id']
+with db() as conn:
+    saved = conn.execute("SELECT result_json FROM web_snapshot_analyses WHERE id=?", (result['analysis_id'],)).fetchone()
+    assert saved and json.loads(saved[0])['summary'] == result['summary']
+print('new durable model report', 'scope', 'monitor' if monitor else 'all pages',
+      'highlights', len(result.get('highlights',[])), 'events', len(result.get('major_events',[])))
 print('cached report confirmed')
