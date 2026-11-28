@@ -10,6 +10,30 @@ from server import ai
 
 
 class AiRequestTests(unittest.TestCase):
+    def test_snapshot_report_recovers_malformed_json_using_original_evidence(self):
+        events = [{"date": "2026-11-28", "page": "/", "text_changes": ["New product"],
+                   "image": {"media_type": "image/jpeg", "data": "image-data"}}]
+        for malformed in ('{"summary":"Incomplete","major_events":[{', "No structured result", '{"summary": []}'):
+            with self.subTest(malformed=malformed), patch.object(ai, "get_config", return_value={}), \
+                 patch.object(ai, "call_llm_content", side_effect=[malformed, "首页增加了新品介绍。"]) as model:
+                report = ai.analyze_web_snapshots(None, events, {})
+                self.assertEqual(report["summary"], "首页增加了新品介绍。")
+                self.assertTrue(report["caveats"])
+                self.assertEqual(report["major_events"], [])
+                original, recovery = [call.args[2] for call in model.call_args_list]
+                self.assertEqual(original[1:], recovery[1:])
+                self.assertIn("New product", recovery[0]["text"])
+                self.assertNotIn("请严格返回以下 JSON", recovery[0]["text"])
+
+    def test_snapshot_report_keeps_structured_results_and_rejects_unreadable_recovery(self):
+        with patch.object(ai, "get_config", return_value={}):
+            with patch.object(ai, "call_llm_content", return_value='{"summary":"报告","highlights":["首页变化"]}') as model:
+                result = ai.analyze_web_snapshots(None, [], {})
+                self.assertEqual(result["highlights"], ["首页变化"])
+                model.assert_called_once()
+            with patch.object(ai, "call_llm_content", side_effect=["{", '{"incomplete":']), self.assertRaises(ai.LlmError):
+                ai.analyze_web_snapshots(None, [], {})
+
     def test_overlapping_calls_share_only_the_same_request_and_can_retry(self):
         cfg = {"llm_api_key": "test", "llm_base_url": "http://model.test"}
         for fail in (False, True):
