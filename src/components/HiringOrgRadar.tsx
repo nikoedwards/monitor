@@ -4,6 +4,7 @@ import { Badge, Button, Card, EmptyState, Modal, Spinner } from "./ui";
 import { HiringStrategicSignals } from "./HiringStrategicSignals";
 import { useHiringOrgEstimate, useHiringOrgRadar, useSettings } from "../lib/hooks";
 import { fmtDateTime, fmtNum } from "../lib/format";
+import { roughHeadcount } from "../lib/hiringHeadcount";
 import type { HiringOrgEstimateGroup, HiringOrgRadarGroup } from "../lib/api";
 
 const VIEWS = [
@@ -16,7 +17,7 @@ type View = typeof VIEWS[number]["key"];
 type DistributionRow = {
   name: string;
   observed: HiringOrgRadarGroup;
-  estimate?: HiringOrgEstimateGroup;
+  estimate: HiringOrgEstimateGroup & { rough?: boolean };
 };
 
 const CONFIDENCE: Record<string, string> = { high: "较高", medium: "中等", low: "较低" };
@@ -48,11 +49,23 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
   const generating = estimation.generate.isPending || status?.status === "running";
   const hasEvidence = !!data && (data.data_quality.postings_total > 0 || data.overview.known_people > 0);
   const estimateError = estimation.generate.error?.message || estimation.error?.message || status?.error;
-  const groups: DistributionRow[] = data ? {
-    locations: data.locations.map((row) => ({ name: row.city, observed: row, estimate: estimate?.locations.find((item) => item.city === row.city) })),
-    departments: data.departments.map((row) => ({ name: row.department || "未分类", observed: row, estimate: estimate?.departments.find((item) => item.department === row.department) })),
-    role_families: data.role_families.map((row) => ({ name: row.role_family, observed: row, estimate: estimate?.role_families.find((item) => item.role_family === row.role_family) })),
-  }[view] : [];
+  const companySignals = data && { ...data.overview, postings_total: data.data_quality.postings_total };
+  const overall = estimate?.overall ?? (hasEvidence && companySignals ? roughHeadcount(companySignals) : null);
+  const scale = reference ? { low: reference.count, high: reference.count } : estimate?.overall;
+  const parent = scale && companySignals ? {
+    range: scale,
+    signals: { ...companySignals, known_people: view === "locations" ? 0 : companySignals.known_people },
+    label: reference ? "全球员工数参考" : "模型估计总人数",
+  } : undefined;
+  function distribution(name: string, observed: HiringOrgRadarGroup, model?: HiringOrgEstimateGroup): DistributionRow {
+    return { name, observed, estimate: model ?? roughHeadcount(observed, parent) };
+  }
+  let groups: DistributionRow[] = [];
+  if (data) {
+    if (view === "locations") groups = data.locations.map((row) => distribution(row.city, row, estimate?.locations.find((item) => item.city === row.city)));
+    if (view === "departments") groups = data.departments.map((row) => distribution(row.department || "未分类", row, estimate?.departments.find((item) => item.department === row.department)));
+    if (view === "role_families") groups = data.role_families.map((row) => distribution(row.role_family, row, estimate?.role_families.find((item) => item.role_family === row.role_family)));
+  }
   const visibleGroups = showAll ? groups : groups.slice(0, TRACKED_GROUPS);
   const selected = visibleGroups.find((row) => row.name === selection) ?? visibleGroups[0];
   const city = view === "locations" ? data?.locations.find((item) => item.city === selected?.name) : undefined;
@@ -85,15 +98,15 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
             <div className="rounded-xl border p-4" style={{ background: "color-mix(in srgb, var(--accent) 6%, var(--panel))", borderColor: "color-mix(in srgb, var(--accent) 20%, var(--hairline))" }}>
               <p className="flex items-center gap-2 text-[13px] font-medium" style={{ color: "var(--accent)" }}><Building2 size={16} /> {reference ? "全球员工数参考" : "估计总人数"}</p>
               <p className="mt-2 text-[26px] font-semibold tracking-tight tabular-nums" style={{ color: "var(--ink)" }}>
-                {referenceLabel || (estimate ? headcount(estimate.overall) : estimation.isLoading ? "读取估算中…" : generating ? "正在推演…" : estimateError ? "估算暂不可用" : hasEvidence ? "待推演" : "证据不足")}
+                {referenceLabel || headcount(overall)}
               </p>
               <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: "var(--mute)" }}>
                 {reference ? (
                   <span>{reference.source} · {reference.as_of}</span>
                 ) : (
                   <>
-                    {estimate?.overall && confidenceBadge(estimate.overall.confidence)}
-                    {estimate?.generated_at ? fmtDateTime(estimate.generated_at) + " 更新" : "模型区间估算"}
+                    {overall && confidenceBadge(overall.confidence)}
+                    {estimate?.overall ? "模型估算" + (estimate.generated_at ? " · " + fmtDateTime(estimate.generated_at) + " 更新" : "") : overall && "按招聘与员工样本粗估"}
                   </>
                 )}
               </div>
@@ -110,7 +123,7 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
 
           <div className="mt-3 space-y-1 text-[12px]" style={{ color: "var(--mute)" }}>
             <p>招聘记录覆盖 {data.window.start} 至 {data.window.end}。地点来自职位地点字段或平台标题，实体办公室仍待核实。</p>
-            {hasEvidence && settings.data && !settings.data.configured && <p>配置大模型后可生成人数区间。</p>}
+            {hasEvidence && settings.data && !settings.data.configured && <p>配置大模型后可进一步推演人数。</p>}
             {generating && <p role="status">正在根据已采集的证据推演，完成后自动更新。</p>}
             {estimateError && !generating && <p role="alert" style={{ color: "var(--danger)" }}>{estimateError}</p>}
           </div>
@@ -137,7 +150,9 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
                       <span className="flex items-center gap-1.5 min-w-0 font-medium" style={{ color: selected === row ? "var(--accent)" : "var(--ink)" }}>
                         <span className="wrap-anywhere">{row.name}</span><ChevronRight size={13} className="shrink-0" />
                       </span>
-                      <span className="tabular-nums" style={{ color: row.estimate ? "var(--ink)" : "var(--mute)" }}>{estimate ? headcount(row.estimate) : "—"}</span>
+                      <span className="tabular-nums" style={{ color: "var(--ink)" }}>{headcount(row.estimate)}
+                        {row.estimate.rough && <small className="block" style={{ color: "var(--mute)" }}>粗估</small>}
+                      </span>
                       <span className="text-right tabular-nums" style={{ color: "var(--body)" }}>{fmtNum(row.observed.open_roles)}</span>
                     </button>
                   ))}
@@ -152,7 +167,7 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
                   <div className="min-w-0 rounded-xl border p-4" style={{ borderColor: "var(--hairline)", background: "var(--bg-soft)" }}>
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <h3 className="text-[16px] font-semibold wrap-anywhere" style={{ color: "var(--ink)" }}>{selected.name}</h3>
-                      {selected.estimate && confidenceBadge(selected.estimate.confidence)}
+                      {confidenceBadge(selected.estimate.confidence)}
                     </div>
                     <p className="mt-1 text-[12px]" style={{ color: "var(--mute)" }}>
                       累计 {fmtNum(selected.observed.postings_total)} 条职位记录
@@ -163,22 +178,23 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
                       <div key={city.city} className="mt-3">
                         <h4 className="text-[12px] font-medium" style={{ color: "var(--mute)" }}>地区内的部门与岗位</h4>
                         {city.department_details.map((department) => {
-                          const localEstimate = cityEstimate?.departments.find((item) => item.department === department.department);
+                          const localModel = cityEstimate?.departments.find((item) => item.department === department.department);
+                          const localEstimate = localModel ?? roughHeadcount(department, { range: selected.estimate, signals: city, label: "该地区估计人数" });
                           return (
                             <details key={department.department} className="group border-b last:border-b-0 py-2" style={{ borderColor: "var(--hairline)" }}>
                               <summary className="cursor-pointer list-none text-[13px]" style={{ color: "var(--ink)" }}>
                                 <span className="flex flex-wrap items-center justify-between gap-x-2">
                                   <span className="flex items-center gap-1 font-medium"><ChevronRight size={13} className="group-open:rotate-90" />{department.department}</span>
-                                  <span className="text-[12px]" style={{ color: "var(--mute)" }}>{department.open_roles} 条在招{localEstimate && " · 估计 " + headcount(localEstimate)}</span>
+                                  <span className="text-[12px]" style={{ color: "var(--mute)" }}>{department.open_roles} 条在招 · {localModel ? "估计" : "粗估"} {headcount(localEstimate)}</span>
                                 </span>
                                 <span className="block mt-0.5 ml-[17px] truncate text-[12px]" style={{ color: "var(--body)" }}>
                                   {department.top_roles.slice(0, 2).map((item) => item.title).join(" · ")}
                                 </span>
                               </summary>
                               <RoleTitles group={department} />
-                              {localEstimate && <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: "var(--body)" }}>
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: "var(--body)" }}>
                                 {confidenceBadge(localEstimate.confidence)}{localEstimate.rationale}
-                              </div>}
+                              </div>
                               <PostingEvidence group={department} estimate={localEstimate} />
                             </details>
                           );
@@ -206,10 +222,12 @@ export function HiringOrgRadar({ brandId }: { brandId: string }) {
       </details>
       <Modal title="人数估算依据" open={methodOpen} onClose={() => setMethodOpen(false)}>
         <div className="space-y-3 text-[13px] leading-5" style={{ color: "var(--body)" }}>
-          {reference && <p>全球员工数参考为{referenceLabel}（{reference.source}，{reference.as_of}）。各地区和部门的人数需结合各自的规模证据估算。</p>}
+          {reference && <p>全球员工数参考为{referenceLabel}（{reference.source}，{reference.as_of}）。</p>}
           {estimate?.summary && <p>{estimate.summary}</p>}
           <p>部门沿用来源标签，缺失时根据职位名称或 JD 归类。岗位族归并职级不同的相似职位。公开员工样本没有可靠地区字段，目前用于公司、部门与岗位族的参考下界。</p>
-          <p>在招职位反映当前招聘需求。人数区间按各维度独立估算，证据不足的分组留空，局部区间不可直接相加。</p>
+          <p>标有“粗估”的区间使用固定假设。在招职位每条计 1，已下线职位每条计 0.25。按总人数分配时，有部门或岗位信息的公开员工样本每人另计 1，地区分配只使用职位。</p>
+          <p>有总人数参考或模型总量时，按各组线索占比的 0.5–1.5 倍估算。地区内的部门以该地区区间为基数。缺少总量时，假设每条加权职位对应 2–10 人，上界至少取员工样本数的两倍。这些系数是情景假设，尚未经实测校准。</p>
+          <p>各组下界至少覆盖已知员工。只有历史职位时，下界取 0。招聘集中度可能偏离实际员工分布，各行区间不可直接相加。</p>
           {!!estimate?.overall?.basis.length && <MethodList label="整体估算依据" items={estimate.overall.basis} />}
           {!!estimate?.assumptions.length && <MethodList label="估算假设" items={estimate.assumptions} />}
           {!!estimate?.limitations.length && <MethodList label="数据限制" items={estimate.limitations} />}
