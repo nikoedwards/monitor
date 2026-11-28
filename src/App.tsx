@@ -28,7 +28,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<RootRedirect />} />
       <Route path="/brands" element={<Shell><Brands /></Shell>} />
-      <Route path="/compare" element={<Shell><Compare /></Shell>} />
+      <Route path="/compare" element={<Shell centered><Compare /></Shell>} />
       <Route path="/brand/:brandId/overview" element={<Shell><Overview /></Shell>} />
       <Route path="/brand/:brandId/sales" element={<Shell><Sales /></Shell>} />
       <Route path="/brand/:brandId/market-share" element={<Shell><MarketShare /></Shell>} />

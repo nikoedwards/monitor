@@ -285,12 +285,12 @@ export function Sidebar({ brandId }: { brandId: string }) {
   );
 }
 
-export function Shell({ children }: { children: React.ReactNode }) {
+export function Shell({ children, centered = false }: { children: React.ReactNode; centered?: boolean }) {
   const { brandId } = useParams();
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "var(--bg)" }}>
       <Topbar brandId={brandId} />
-      <div className="flex flex-1">
+      <div className={centered ? "flex flex-1 justify-center" : "flex flex-1"}>
         {brandId && <Sidebar brandId={brandId} />}
         <main className="flex-1 min-w-0 p-3 sm:p-6 max-w-[1400px]">{children}</main>
       </div>
