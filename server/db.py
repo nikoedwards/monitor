@@ -809,6 +809,13 @@ def init_db() -> None:
                 _ensure_column(conn, table, column, ddl)
             except sqlite3.OperationalError:
                 pass
+        # Preserve pending retries from versions that reported resource
+        # deferrals as capture failures.
+        conn.execute("""
+            UPDATE web_monitors SET last_status = 'deferred'
+            WHERE last_status = 'error' AND next_snapshot_retry_at IS NOT NULL
+              AND (last_error LIKE '截图暂缓：%' OR last_error LIKE '截图已结束以保护服务器：%')
+        """)
         # Older installations already have sales snapshots, but those rows
         # predate the fallback estimate and explicit category-rank columns.
         # Run the idempotent migration after additive columns exist so the

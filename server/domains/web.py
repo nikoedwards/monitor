@@ -154,7 +154,7 @@ def _rate_limit_circuit_active(monitor: dict) -> bool:
 
 
 def next_run_at(monitor: dict, kind: str) -> datetime:
-    if kind == "snapshot" and monitor.get("last_status") == "error":
+    if kind == "snapshot" and monitor.get("last_status") in {"error", "deferred"}:
         retry_at = _parse_datetime(monitor.get("next_snapshot_retry_at"))
         if retry_at:
             return retry_at
@@ -519,12 +519,13 @@ def _capture_monitor_pages(conn: sqlite3.Connection, monitor: dict, *, wait_for_
         conn.execute(
             """
             UPDATE web_monitors
-            SET last_check_at = ?, last_status = 'error', last_error = ?,
+            SET last_check_at = ?, last_status = ?, last_error = ?,
                 snapshot_retry_count = ?, next_snapshot_retry_at = ?,
                 last_snapshot_attempt_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (now, "; ".join(errors)[:500], failure_count, retry_at.isoformat(), now, now, monitor["id"]),
+            (now, "deferred" if resource_deferred else "error", "; ".join(errors)[:500],
+             failure_count, retry_at.isoformat(), now, now, monitor["id"]),
         )
     return snapshots
 
@@ -609,7 +610,8 @@ def check_monitor(conn: sqlite3.Connection, monitor: dict) -> dict:
         """
         UPDATE web_monitors
         SET last_check_at = ?, last_change_score = ?, last_change_summary = ?,
-            last_status = ?, last_error = ?, updated_at = ?
+            last_status = CASE WHEN last_status = 'deferred' THEN last_status ELSE ? END,
+            last_error = CASE WHEN last_status = 'deferred' THEN last_error ELSE ? END, updated_at = ?
         WHERE id = ?
         """,
         (now, max_score, summary, "ok" if checked else "error", "; ".join(errors)[:500], now, monitor["id"]),

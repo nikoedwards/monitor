@@ -178,14 +178,21 @@ export default function Web() {
                         </>
                       )}
                     </div>
-                    {monitor.last_status === "error" && monitor.last_error ? (
+                    {monitor.last_status === "deferred" ? (
+                      <div className="mt-2 text-[12px]" style={{ color: "var(--warning, #b45309)" }}>
+                        <div>{monitor.last_error}</div>
+                        {monitor.status === "active" && <div>资源暂时不足，已安排自动补拍。</div>}
+                      </div>
+                    ) : monitor.last_status === "error" && monitor.last_error ? (
                       <div className="mt-2 text-[12px]" style={{ color: "var(--danger)" }}>
                         <div className="line-clamp-2">最近一次截图失败：{monitor.last_error}</div>
-                        {monitor.next_snapshot_retry_at ? (
+                        {monitor.next_snapshot_retry_at && monitor.status === "active" ? (
                           <div className="mt-1" style={{ color: "var(--warning, #b45309)" }}>
                             {(monitor.snapshot_retry_count || 0) > 8 && /429|too many requests|rate.?limit/i.test(monitor.last_error || "")
                               ? "目标网站持续限制服务器访问 · 完整截图进入 24 小时保护，每小时轻量探测，恢复后立即补拍"
-                              : `自动重试已启用 · 连续失败 ${monitor.snapshot_retry_count || 1} 次，成功后恢复原频率`}
+                              : monitor.snapshot_retry_count
+                                ? `自动重试已启用 · 连续失败 ${monitor.snapshot_retry_count} 次，成功后恢复原频率`
+                                : "已安排自动补拍"}
                           </div>
                         ) : null}
                       </div>

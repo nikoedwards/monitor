@@ -210,7 +210,10 @@ def capture(
                 if not _has_browser_shared_memory():
                     browser_args.append("--disable-dev-shm-usage")
                 if constrained:
-                    browser_args.append("--js-flags=--max-old-space-size=128")
+                    browser_args.extend((
+                        "--enable-low-end-device-mode", "--num-raster-threads=1",
+                        "--js-flags=--max-old-space-size=128",
+                    ))
                 browser = subprocess.Popen(
                     browser_args, stdout=subprocess.DEVNULL, stderr=browser_log,
                     start_new_session=owns_browser_group,
@@ -239,7 +242,13 @@ def capture(
                         suppress_origin=True, enable_multithread=False, http_no_proxy=["127.0.0.1"],
                     )
                     page = _Page(socket)
-                    target = page.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+                    # Reuse the launch tab so an idle renderer does not take
+                    # part of the container's memory budget during capture.
+                    targets = page.call("Target.getTargets")["targetInfos"]
+                    target = next((t["targetId"] for t in targets
+                                   if t["type"] == "page" and t["url"] == "about:blank"), None)
+                    if target is None:
+                        target = page.call("Target.createTarget", {"url": "about:blank"})["targetId"]
                     page.session = page.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
                     page.call("Page.enable")
                     page.call("Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0})
@@ -283,25 +292,6 @@ def capture(
                         page, png_path, height,
                         max_height=CAPTURE_EMERGENCY_MAX_STITCH_HEIGHT if emergency else CAPTURE_MAX_STITCH_HEIGHT,
                     )
-                    mark_stage("archive")
-                    _write_fallback_archive(
-                        html_path.name, data.get("final_url") or url, data.get("title", ""),
-                        source_html[:1_000_000], data.get("text", ""),
-                        "低内存模式：真实分块整页截图；资源归档已简化", root=html_path.parent,
-                    )
-                    return {
-                        # Preserve the public method contract while exposing
-                        # which low-memory engine produced the image.
-                        "method": "playwright", "engine": "chromium_cdp",
-                        "script_execution_disabled": scriptless,
-                        "source_html_fallback": source_fallback,
-                        "page": data, "media": {
-                            "safe_mode": True, "constrained_mode": constrained,
-                            "emergency_mode": emergency, "available_memory_mb": memory,
-                            "viewport_width": width, "chunked_screenshot": tiles,
-                        },
-                        "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
-                    }
                 finally:
                     # Do not let a hung graceful Browser.close discard a PNG
                     # already written to disk. Kill the entire browser group.
@@ -334,6 +324,23 @@ def capture(
                         browser.wait(timeout=3)
                     except subprocess.TimeoutExpired:
                         pass
+        # Release Chromium's memory before escaping the HTML into the archive.
+        mark_stage("archive")
+        _write_fallback_archive(
+            html_path.name, data.get("final_url") or url, data.get("title", ""),
+            source_html[:1_000_000], data.get("text", ""),
+            "低内存模式：真实分块整页截图；资源归档已简化", root=html_path.parent,
+        )
+        return {
+            "method": "playwright", "engine": "chromium_cdp",
+            "script_execution_disabled": scriptless, "source_html_fallback": source_fallback,
+            "page": data, "media": {
+                "safe_mode": True, "constrained_mode": constrained,
+                "emergency_mode": emergency, "available_memory_mb": memory,
+                "viewport_width": width, "chunked_screenshot": tiles,
+            },
+            "archive": {"self_contained": False, "archive_size": html_path.stat().st_size},
+        }
     except SnapshotCaptureError:
         raise
     except Exception as exc:

@@ -296,11 +296,26 @@ class VisualDiffTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "stitched.png"
-            result = _capture_chunked_screenshot(FakePage(), output, 600)
+            with patch.object(Image, "new", wraps=Image.new) as allocate:
+                result = _capture_chunked_screenshot(FakePage(), output, 600)
+            self.assertTrue(all(call.args[1][1] <= 600 for call in allocate.call_args_list))
             with Image.open(output) as image:
                 self.assertEqual(image.size, (1440, 1700))
+                for y, scroll in [(0, 0), (599, 0), (600, 600), (1199, 600), (1200, 1100), (1699, 1100)]:
+                    self.assertEqual(image.getpixel((700, y)), (scroll % 255, 0, 0))
             self.assertEqual(result["chunks"], 3)
             self.assertFalse(result["scaled"])
+            _capture_chunked_screenshot(FakePage(), output, 600, max_height=1000)
+            with Image.open(output) as image:
+                self.assertEqual(image.height, 1000)
+                for y, scroll in [(352, 0), (353, 600), (705, 600), (706, 1100), (999, 1100)]:
+                    self.assertEqual(image.getpixel((400, y)), (scroll % 255, 0, 0))
+            complete = output.read_bytes()
+            page = FakePage()
+            with patch.object(page, "screenshot", side_effect=[page.screenshot(), RuntimeError("interrupted")]):
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    _capture_chunked_screenshot(page, output, 600)
+            self.assertEqual(output.read_bytes(), complete)
             self.assertEqual(list(output.parent.iterdir()), [output])
 
     def test_identical_images_have_no_visual_change(self):
@@ -836,6 +851,29 @@ class ArchiveFallbackTests(unittest.TestCase):
 
 
 class SnapshotSchedulingTests(unittest.TestCase):
+    def test_upgrade_preserves_pending_resource_retry(self):
+        from server import db as database
+
+        retry_at = "2026-11-28T02:44:00+00:00"
+        reason = "截图已结束以保护服务器：可用内存 82 MiB，低于保留量 96 MiB"
+        with tempfile.TemporaryDirectory() as tmp, patch.object(database, "DB_PATH", Path(tmp) / "test.db"):
+            database.init_db()
+            with database.db() as conn:
+                conn.executemany("""
+                    INSERT INTO web_monitors (id, name, url, created_at, updated_at, last_status,
+                                              last_error, next_snapshot_retry_at)
+                    VALUES (?, 'Test', 'https://example.com', ?, ?, 'error', ?, ?)
+                """, [(key, retry_at, retry_at, error, retry_at)
+                      for key, error in [("memory", reason), ("site", "HTTP Error 429")]])
+            database.init_db()
+            with database.db() as conn:
+                pending = dict(conn.execute("SELECT * FROM web_monitors WHERE id = 'memory'").fetchone())
+                self.assertEqual(pending["last_status"], "deferred")
+                self.assertEqual(pending["snapshot_retry_count"], 0)
+                self.assertEqual(pending["last_error"], reason)
+                self.assertEqual(next_run_at(pending, "snapshot").isoformat(), retry_at)
+                self.assertEqual(conn.execute("SELECT last_status FROM web_monitors WHERE id = 'site'").fetchone()[0], "error")
+
     def test_error_images_are_neither_reused_nor_used_as_baseline(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -1068,6 +1106,7 @@ class SnapshotSchedulingTests(unittest.TestCase):
         with patch("server.domains.web._capture_one", side_effect=SnapshotResourceDeferred("主机 I/O 压力")):
             self.assertEqual(capture_monitor(conn, dict(row) | monitor), [])
         deferred = conn.execute("SELECT * FROM web_monitors WHERE id = 'monitor-1'").fetchone()
+        self.assertEqual(deferred["last_status"], "deferred")
         self.assertEqual(deferred["snapshot_retry_count"], 1)
         self.assertEqual(deferred["last_snapshot_at"], previous_snapshot_at)
         self.assertIn("主机 I/O 压力", deferred["last_error"])
@@ -1076,6 +1115,22 @@ class SnapshotSchedulingTests(unittest.TestCase):
             - datetime.fromisoformat(deferred["last_snapshot_attempt_at"]),
             timedelta(minutes=10),
         )
+        with patch.object(web_domain, "fetch_page", return_value={"text": "page"}), patch.object(
+            web_domain, "_latest_valid_snapshot", return_value=None,
+        ):
+            web_domain.check_monitor(conn, dict(deferred) | monitor)
+        pending = dict(conn.execute("SELECT * FROM web_monitors WHERE id = 'monitor-1'").fetchone())
+        self.assertEqual(pending["last_status"], "deferred")
+        self.assertEqual(pending["last_error"], deferred["last_error"])
+        self.assertEqual(next_run_at(pending, "snapshot").isoformat(), deferred["next_snapshot_retry_at"])
+        with patch.object(web_domain, "_capture_one", return_value={"summary": "captured"}):
+            self.assertTrue(capture_monitor(conn, pending | monitor))
+        recovered = conn.execute("SELECT * FROM web_monitors WHERE id = 'monitor-1'").fetchone()
+        self.assertEqual(recovered["last_status"], "ok")
+        self.assertEqual(recovered["last_error"], "")
+        self.assertIsNone(recovered["next_snapshot_retry_at"])
+        self.assertEqual(recovered["snapshot_retry_count"], 0)
+        self.assertGreater(recovered["last_snapshot_at"], previous_snapshot_at)
         conn.close()
 
     def test_snapshot_retry_deadline_overrides_normal_schedule(self):

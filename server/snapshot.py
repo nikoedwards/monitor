@@ -16,12 +16,14 @@ import mimetypes
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
+import zlib
 from difflib import SequenceMatcher
 from html import escape as html_escape
 from itertools import chain
@@ -676,6 +678,30 @@ def _capture_chunk_height(available_memory_mb: int | None) -> int:
     return CAPTURE_CHUNK_MAX_HEIGHT
 
 
+def _write_png_strips(path: Path, width: int, height: int, strips) -> None:
+    """Encode one RGB strip at a time in a single PNG deflate stream."""
+    with path.open("wb") as output:
+        def chunk(kind, data):
+            output.write(struct.pack(">I", len(data)))
+            output.write(kind)
+            output.write(data)
+            output.write(struct.pack(">I", zlib.crc32(data, zlib.crc32(kind))))
+
+        output.write(b"\x89PNG\r\n\x1a\n")
+        chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        compressor = zlib.compressobj()
+        stride = width * 3
+        for strip in strips:
+            pixels = memoryview(strip.tobytes())
+            # Each PNG scanline starts with its filter byte (0 = unfiltered).
+            scanlines = b"".join(b"\0" + pixels[i:i + stride] for i in range(0, len(pixels), stride))
+            compressed = compressor.compress(scanlines)
+            if compressed:
+                chunk(b"IDAT", compressed)
+        chunk(b"IDAT", compressor.flush())
+        chunk(b"IEND", b"")
+
+
 def _capture_chunked_screenshot(
     page, png_path: Path, chunk_height: int, *, max_height: int | None = None,
 ) -> dict:
@@ -699,33 +725,42 @@ def _capture_chunked_screenshot(
     positions = range(0, max(1, document_height - viewport_height + 1), viewport_height)
     bottom = max(0, document_height - viewport_height)
     tail = (bottom,) if positions[-1] != bottom else ()
+    chunks = 0
 
-    with Image.new("RGB", (output_width, output_height), (255, 255, 255)) as canvas:
+    def capture_strips():
+        nonlocal chunks
         previous_end = 0
         for y in chain(positions, tail):
+            end = min(y + viewport_height, document_height)
+            rows = round(end * scale) - round(previous_end * scale)
+            source_top = previous_end - y
+            previous_end = end
+            if rows == 0:
+                continue
             page.evaluate("(scrollY) => window.scrollTo(0, scrollY)", y)
             page.wait_for_timeout(80)
             png_data = page.screenshot(full_page=False, animations="disabled", caret="hide")
-            source_top = max(0, previous_end - y)
-            visible_height = min(viewport_height - source_top, document_height - y)
+            chunks += 1
             with Image.open(io.BytesIO(png_data)) as chunk:
-                piece = chunk.convert("RGB").crop((0, source_top, width, source_top + visible_height))
-                if scale < 1.0:
+                piece = chunk.crop((0, source_top, width, end - y)).convert("RGB")
+                if piece.size != (output_width, rows):
                     piece = piece.resize(
-                        (output_width, max(1, int(round(visible_height * scale)))),
-                        Image.Resampling.LANCZOS,
+                        (output_width, rows), Image.Resampling.LANCZOS,
                     )
-                canvas.paste(piece, (0, int(round((y + source_top) * scale))))
-            previous_end = max(previous_end, y + viewport_height)
+                yield piece
+
+    with tempfile.TemporaryDirectory(dir=png_path.parent, prefix=".stitch-") as directory:
+        staged = Path(directory) / "capture.png"
+        _write_png_strips(staged, output_width, output_height, capture_strips())
         page.evaluate("window.scrollTo(0, 0)")
-        canvas.save(png_path, format="PNG", optimize=False)
+        staged.replace(png_path)
     return {
         "width": width,
         "output_width": output_width,
         "height": output_height,
         "document_height": document_height,
         "chunk_height": viewport_height,
-        "chunks": len(positions) + len(tail),
+        "chunks": chunks,
         "scaled": scale < 1.0,
         "scale": round(scale, 4),
     }
