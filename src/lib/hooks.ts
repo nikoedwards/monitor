@@ -1077,20 +1077,41 @@ export function useWebAnalysis(brandId?: string, monitorId?: string, range?: Tim
   const qc = useQueryClient();
   const rp = rangeParams(range);
   const queryKey = ["web-analysis", brandId, monitorId, rp];
-  const storageKey = persistentTaskKey("web-analysis", [brandId, monitorId, rp.start_date, rp.end_date]);
+  type State = (WebAiAnalysis | { cache_miss: true }) & {
+    generation?: { status: "running" | "completed" | "failed"; error?: string };
+  };
+  const request = (options: { cached_only?: boolean; refresh?: boolean }) =>
+    api.post<State>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, ...rp, background: true, ...options })}`);
   const query = useQuery({
     queryKey,
-    queryFn: () => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, cached_only: true, ...rp })}`),
+    queryFn: async () => {
+      const previous = qc.getQueryData<State>(queryKey);
+      const next = await request({ cached_only: true });
+      if (previous?.generation?.status === "running" && !next.generation && !("summary" in next)) {
+        return { ...next, generation: { status: "failed" as const, error: "分析任务已中断，请重新生成。" } };
+      }
+      return next;
+    },
     enabled: !!brandId && !!range,
-    staleTime: 24 * 60 * 60 * 1000,
-    retry: false,
+    refetchOnMount: "always",
+    refetchInterval: (q) => q.state.data?.generation?.status === "running" ? 2000 : false,
   });
-  const generate = usePersistentTaskMutation<WebAiAnalysis, { refresh?: boolean }>(
-    storageKey,
-    ({ refresh = false }) => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rp })}`),
-    (data) => qc.setQueryData(queryKey, data),
-  );
-  return { ...query, data: query.data ? ((query.data as any).cache_miss ? undefined : query.data) : generate.data, generate };
+  const generate = useMutation({
+    mutationKey: queryKey,
+    mutationFn: (refresh: boolean) => request({ refresh }),
+    onMutate: () => queryKey,
+    onSuccess: async (data, _, key) => {
+      await qc.cancelQueries({ queryKey: key, exact: true });
+      qc.setQueryData(key, data);
+    },
+  });
+  return {
+    isLoading: query.isLoading,
+    analysis: query.data && "summary" in query.data ? query.data : null,
+    pending: generate.isPending || query.data?.generation?.status === "running",
+    error: generate.error?.message || query.error?.message || query.data?.generation?.error || "",
+    generate: generate.mutate,
+  };
 }
 
 export function useDeleteWebSnapshot() {

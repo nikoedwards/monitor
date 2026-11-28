@@ -536,7 +536,7 @@ def analyze_web_snapshots(conn: sqlite3.Connection, events: list[dict], context:
                 "data": image.get("data") or "",
             },
         })
-    text = call_llm_content(cfg, WEB_ANALYSIS_SYSTEM, content)
+    text = call_llm_content(cfg, WEB_ANALYSIS_SYSTEM, content, timeout=180)
     parsed = _extract_json(text)
     if not isinstance(parsed, dict):
         raise LlmError("大模型未返回有效的网站分析对象")

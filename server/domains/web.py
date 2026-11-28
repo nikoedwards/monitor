@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import ai
+from ..analysis_jobs import analysis_job
 from ..config import DEFAULT_CRAWL_LIMIT, SNAPSHOT_DIR
 from ..fetchers import FetchError, fetch_page
 from ..schemas import WebMonitorIn, WebMonitorUpdate
@@ -974,27 +975,50 @@ def analyze_snapshots(
     refresh: bool = False,
     cached_only: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
+    background: bool = False,
 ):
     start, end = _resolve_window(days, start_date, end_date)
-    if not refresh:
+    snapshot_ids = [row["id"] for row in _query_snapshots(
+        conn, start, end, brand_id, monitor_id, descending=False, ids_only=True,
+    )]
+    miss = {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+    if not snapshot_ids:
+        if cached_only:
+            return miss
+        raise HTTPException(status_code=400, detail="所选时间范围内没有网页快照")
+    previous = None
+    if background or not refresh:
         cached = conn.execute(
             """
             SELECT * FROM web_snapshot_analyses
             WHERE brand_id IS ? AND monitor_id IS ? AND start_date = ? AND end_date = ?
-            ORDER BY created_at DESC LIMIT 1
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
             """,
             (brand_id, monitor_id, start, end),
         ).fetchone()
-        if cached and _is_recent(cached["created_at"]):
-            ids = _query_snapshots(conn, start, end, brand_id, monitor_id, descending=False, ids_only=True)
-            if json.loads(cached["snapshot_ids_json"] or "[]") == [row["id"] for row in ids]:
-                result = json.loads(cached["result_json"] or "{}")
-                result.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
-                return result
+        if cached and json.loads(cached["snapshot_ids_json"] or "[]") == snapshot_ids and _is_recent(cached["created_at"]):
+            previous = json.loads(cached["result_json"] or "{}")
+            previous.update({"cached": True, "created_at": cached["created_at"], "analysis_id": cached["id"]})
 
+    if background:
+        key = "web-analysis:" + json.dumps([brand_id, monitor_id, start, end])
+        job = analysis_job(
+            conn, key, lambda worker: _generate_snapshot_analysis(worker, brand_id, monitor_id, start, end),
+            start=not cached_only and (refresh or previous is None), refresh=True,
+            revision=json.dumps(snapshot_ids),
+        )
+        if job.get("generation", {}).get("status") == "completed":
+            return {**job, "cached": True}
+        return {**(previous or miss), **job}
+    if previous and not refresh:
+        return previous
     if cached_only:
-        return {"cache_miss": True, "cached": False, "range": {"start": start, "end": end}}
+        return miss
+    return _generate_snapshot_analysis(conn, brand_id, monitor_id, start, end)
 
+
+def _generate_snapshot_analysis(conn: sqlite3.Connection, brand_id: str | None, monitor_id: str | None,
+                                start: str, end: str) -> dict:
     snapshots = _query_snapshots(conn, start, end, brand_id, monitor_id, descending=False)
     if not snapshots:
         raise HTTPException(status_code=400, detail="所选时间范围内没有网页快照")
