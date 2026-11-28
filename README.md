@@ -143,7 +143,9 @@ npm run dev         # 终端 B → http://localhost:5173
 
 ### 公网访问口令
 
-打开「MCP / CLI 接入」，选择查询工具和操作系统，下载并解压接入包。按页面给出的命令完成连接，再执行第一次查询。接入助手使用 Python 3.9 或更高版本，在本机验证口令并注册客户端。每个实例的连接信息保存在当前用户的 `.monitorhub` 目录中。公网传输口令请使用 HTTPS 或受信任的隧道。
+打开「MCP / CLI 接入」，选择 Codex 或 Claude Code，复制远程 MCP 地址。客户端使用 Streamable HTTP 连接当前实例的 `/mcp`，启用访问口令的实例需要请求头 `Authorization: Bearer <口令>`。保存后调用 `monitor_overview` 验证品牌数和记录数。公网接入使用 HTTPS。本地开发可使用 `http://127.0.0.1:8790/mcp`。
+
+使用自有域名部署时，在应用容器设置 `DOMAIN` 为该主机名。Claude Desktop 的本地连接和独立 CLI 仍可使用页面上的接入包（Python 3.9+）。
 
 在 GitHub Actions 的仓库 Secrets 中设置 `MONITOR_ACCESS_CODE`，再运行 **Deploy Monitor to Aliyun**。把原来的网址和同一个口令发给朋友即可。浏览器会保存 30 天的访问凭证。更换口令并重新发布后，旧凭证随即失效。删除 Secret 后重新发布即可关闭门槛。
 

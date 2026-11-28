@@ -1,4 +1,5 @@
 fastapi>=0.110
+mcp>=1.25,<2
 uvicorn>=0.29
 pydantic>=2.6
 Pillow>=10.0

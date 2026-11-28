@@ -21,6 +21,7 @@ from .connectors.registry import sync_to_db
 from .db import db, init_db
 from .domains import brands, content, creators, hiring, insights, integrations, market_share, sales, settings, sources, web
 from . import media
+from . import remote_mcp
 from .scheduler import start_scheduler
 from .snapshot import upgrade_snapshot_archives, upgrade_snapshot_fallback_images
 
@@ -53,7 +54,8 @@ async def lifespan(app: FastAPI):
                 if path.parent == root and path.is_file():
                     conn.execute("UPDATE web_snapshots SET archive_size = ? WHERE id = ?", (path.stat().st_size, row["id"]))
     start_scheduler()
-    yield
+    async with remote_mcp.mcp.session_manager.run():
+        yield
 
 
 app = FastAPI(title="Monitor Intelligence Hub", version="1.0.0", lifespan=lifespan)
@@ -94,6 +96,8 @@ if access_code := os.environ.get("MONITOR_ACCESS_CODE", "").strip():
 
 for module in (brands, content, creators, sales, web, sources, insights, integrations, market_share, hiring, settings, media):
     app.include_router(module.router)
+
+app.add_route("/mcp", remote_mcp.http_app, methods=["GET", "POST", "DELETE"])
 
 
 @app.get("/api/health")

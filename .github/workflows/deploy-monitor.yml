@@ -164,6 +164,25 @@ jobs:
           deploy_pid=""
           MONITOR_BASE_URL=http://127.0.0.1:8790 MONITOR_ACCESS_CODE="$MONITOR_DEPLOY_ACCESS_CODE" \
             python3 "$source_dir/deploy/aliyun/autodeploy/check_mcp.py"
+          MONITOR_ACCESS_CODE="$MONITOR_DEPLOY_ACCESS_CODE" python3 \
+            "$source_dir/deploy/aliyun/autodeploy/check_remote_mcp.py" http://127.0.0.1:8790/mcp
+          tls_dir=/opt/monitor/deploy/aliyun/mcp-https
+          install -d "$tls_dir"
+          config_dir="$source_dir/deploy/aliyun/mcp-https"
+          recreate=()
+          if ! cmp -s "$config_dir/Caddyfile" "$tls_dir/Caddyfile"; then
+            recreate=(--force-recreate)
+            install -m 0644 "$config_dir/Caddyfile" "$tls_dir/Caddyfile"
+          fi
+          install -m 0644 "$config_dir/compose.yml" "$tls_dir/compose.yml"
+          docker compose -f "$tls_dir/compose.yml" up -d "${recreate[@]}"
           REMOTE
           } | ssh "${ssh_args[@]}" "root@$SSH_HOST" \
             "IFS= read -r MONITOR_DEPLOY_ACCESS_CODE; export MONITOR_DEPLOY_ACCESS_CODE; exec bash -s -- '$GITHUB_SHA' '$SSH_HOST'"
+      - name: Verify public remote MCP
+        env:
+          MONITOR_ACCESS_CODE: ${{ secrets.MONITOR_ACCESS_CODE }}
+        run: |
+          curl --fail --silent --show-error --retry 24 --retry-all-errors --retry-delay 5 \
+            --max-time 5 --retry-max-time 180 --output /dev/null https://47.79.224.196/api/health
+          python3 deploy/aliyun/autodeploy/check_remote_mcp.py https://47.79.224.196/mcp

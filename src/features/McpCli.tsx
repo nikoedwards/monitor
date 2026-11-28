@@ -75,25 +75,43 @@ export default function McpCli() {
   const endpoint = import.meta.env.DEV && local ? "http://127.0.0.1:8790" : location.origin;
   const launcher = system === "Windows" ? ".\\monitor.cmd" : "python3 ./monitor.pyz";
   const cli = client === "cli";
+  const remote = client === "codex" || client === "claude";
+  const remoteUrl = new URL("/mcp", endpoint);
+  if (!local) remoteUrl.protocol = "https:";
   const setup = `${launcher} connect ${client} "${endpoint}"`;
   const firstQuery = cli
     ? `${launcher} query "${endpoint}" --json overview`
     : "请调用刚接入的 Monitor 服务的 monitor_overview，告诉我有多少个品牌和多少条记录。";
   return (
     <div className="mx-auto max-w-[800px] space-y-4">
-      <SectionTitle title="MCP / CLI 接入" subtitle="把 Monitor 连到你常用的工具，完成下面三步就能查到第一组数据。" />
+      <SectionTitle title="MCP / CLI 接入" subtitle="连接 Monitor，查询品牌和内容记录。" />
       <div className="flex flex-wrap items-end gap-3">
         <label className="grid gap-1 text-sm">我要在哪里查数据
           <Select aria-label="查询工具" value={client} onChange={e => setClient(e.target.value as Client)}>
             {Object.entries(clients).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
           </Select>
         </label>
-        <label className="grid gap-1 text-sm">我的电脑
+        {!remote && <label className="grid gap-1 text-sm">我的电脑
           <Select aria-label="操作系统" value={system} onChange={e => setSystem(e.target.value as System)}>
             {(["Windows", "macOS", "Linux"] as const).map(os => <option key={os}>{os}</option>)}
           </Select>
-        </label>
+        </label>}
       </div>
+      {remote ? (
+        <ol className="space-y-3">
+          <Step number={1} title="添加远程 MCP 服务">
+            <p className={hint}>{client === "codex"
+              ? "在 Codex 设置中打开 MCP 服务器，添加自定义服务器。名称填 monitor，选择 Streamable HTTP，粘贴下面的地址。"
+              : "在 Claude Code 中使用 HTTP 传输添加名为 monitor 的 MCP 服务，服务器地址如下。"}</p>
+            <Snippet value={remoteUrl.href} label="MCP 地址" />
+            <p className={hint}>如果网站启用了访问口令，在请求头中添加 <code>Authorization</code>，值填 <code>Bearer 你的访问口令</code>。Bearer 后保留一个空格。</p>
+          </Step>
+          <Step number={2} title="验证连接">
+            <p className={hint}>保存连接，在新对话中发送下面的问题。</p>
+            <Snippet value={firstQuery} label="验证问题" />
+          </Step>
+        </ol>
+      ) : <>
       <ol className="space-y-3">
         <Step number={1} title="下载接入包，在解压后的文件夹打开终端">
           <a href={download} download="monitor-connect-v1.zip"
@@ -118,10 +136,10 @@ export default function McpCli() {
         <ul className={`mt-2 list-disc space-y-1 pl-5 ${hint}`}>
           <li>提示找不到 monitor.cmd 或 monitor.pyz 时，回到第 1 步，在解压后的文件夹打开终端。</li>
           <li>提示找不到 Python 时，安装 Python 3.9 或更高版本，重新打开终端再运行。</li>
-          {(client === "codex" || client === "claude") && <li>提示找不到 {client} 命令时，先安装 {clients[client]} CLI，确认终端能运行 {client} --version。</li>}
           <li>口令错误时，重新执行第 2 步。当前连接地址为 <code className="break-all">{endpoint}</code>。</li>
         </ul>
       </details>
+      </>}
     </div>
   );
 }
