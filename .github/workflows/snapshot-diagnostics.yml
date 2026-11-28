@@ -46,4 +46,8 @@ jobs:
           ssh_args=(-T -i "$tmp/key" -o BatchMode=yes -o IdentitiesOnly=yes
             -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$tmp/known_hosts"
             -o ConnectTimeout=20 -o ServerAliveInterval=10 -o ServerAliveCountMax=6)
+          if [[ "$MODE" == capture ]]; then
+            ssh "${ssh_args[@]}" "root@$SSH_HOST" 'cid=$(docker ps -q --filter label=com.docker.compose.service=monitor); docker exec -i -w /app "$cid" python -' < tools/probe_snapshot_report.py || failed=1
+          fi
           ssh "${ssh_args[@]}" "root@$SSH_HOST" 'cid=$(docker ps -q --filter label=com.docker.compose.service=monitor); test -n "$cid"; docker logs --since 24h --tail 40000 "$cid" 2>&1' | python tools/report_error_signatures.py
+          exit "${failed:-0}"
