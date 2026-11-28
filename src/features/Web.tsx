@@ -94,7 +94,6 @@ export default function Web() {
   const [editing, setEditing] = useState<WebMonitor | null>(null);
   const [selected, setSelected] = useState<string | undefined>();
   const [now, setNow] = useState(() => Date.now());
-  const [analysis, setAnalysis] = useState<WebAiAnalysis | null>(null);
   const { data: monitors = [], isLoading } = useWebMonitors(brandId);
   const { data: summary, isFetching: summaryLoading, error: summaryError } = useWebSummary(brandId, selected, range);
   const { data: snapshots = [], isFetching: snapshotsLoading, error: snapshotsError } = useWebSnapshots(brandId, selected, range);
@@ -105,11 +104,6 @@ export default function Web() {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    setAnalysis(null);
-    webAnalysis.generate.reset();
-  }, [selected, range.start_date, range.end_date]);
 
   if (isLoading) return <Spinner />;
 
@@ -221,14 +215,11 @@ export default function Web() {
 
       <SnapshotAnalysisPanel
         summary={summary}
-        analysis={webAnalysis.data || analysis}
+        analysis={webAnalysis.data ?? null}
+        reading={webAnalysis.isLoading}
         pending={webAnalysis.generate.isPending}
-        error={webAnalysis.generate.error instanceof Error ? webAnalysis.generate.error.message : ""}
-        onAnalyze={async (refresh) => {
-          if (!brandId) return;
-          const result = await webAnalysis.generate.mutateAsync({ refresh });
-          setAnalysis(result);
-        }}
+        error={webAnalysis.generate.error?.message || webAnalysis.error?.message || ""}
+        onAnalyze={(refresh) => webAnalysis.generate.mutate({ refresh })}
       />
 
       <MonitorModal open={open} onClose={() => setOpen(false)} brandId={brandId!} />
@@ -693,12 +684,14 @@ function SnapshotAnalysisPanel({
   pending,
   error,
   onAnalyze,
+  reading,
 }: {
   summary?: WebSummary;
   analysis: WebAiAnalysis | null;
   pending: boolean;
   error: string;
-  onAnalyze: (refresh: boolean) => Promise<void>;
+  reading: boolean;
+  onAnalyze: (refresh: boolean) => void;
 }) {
   const trendText = summary?.comparison.trend === "more_active"
     ? "所选周期比上一等长周期更活跃"
@@ -714,10 +707,10 @@ function SnapshotAnalysisPanel({
           <div className="flex flex-col items-end">
             <Button
               variant="primary"
-              disabled={pending || !summary?.total_snapshots || (!summary?.ai_configured && !!summary?.changed)}
+              disabled={pending || reading || !summary?.total_snapshots || (!summary?.ai_configured && !!summary?.changed)}
               onClick={() => onAnalyze(!!analysis)}
             >
-              {pending ? "分析中…" : analysis ? "重新分析" : "生成 AI 分析"}
+              {pending ? "分析中…" : reading && !analysis ? "读取分析中…" : analysis ? "重新分析" : "生成 AI 分析"}
             </Button>
             <AsyncProgress active={pending} label="正在分析网页变化" />
           </div>

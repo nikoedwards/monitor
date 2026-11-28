@@ -121,10 +121,11 @@ export function useCreateFromDraft() {
 }
 
 // ---------------------------------------------------------------- records
-export function useRecords(filters: Record<string, unknown>) {
+export function useRecords(filters: Record<string, unknown>, enabled = true) {
   return useQuery({
     queryKey: ["records", filters],
     queryFn: () => api.get<{ records: RecordItem[] }>(`/api/records${qs(filters)}`).then((d) => d.records),
+    enabled,
     refetchInterval: filters.relevance_status ? 10000 : false,
   });
 }
@@ -220,7 +221,7 @@ export function useCompare(range?: TimeRange) {
   const rp = rangeParams(range);
   return useQuery({
     queryKey: ["compare", rp],
-    queryFn: () => api.get<{ brands: any[] }>(`/api/compare${qs({ ...rp })}`).then((d) => d.brands),
+    queryFn: () => api.get<{ brands: any[]; summary_preview?: import("./api").StrategySummary }>(`/api/compare${qs({ ...rp })}`),
   });
 }
 
@@ -341,8 +342,9 @@ export function useVocMutations() {
 // ---------------------------------------------------------------- marketing
 export function useCommunitySummaries(records: RecordItem[]) {
   return useFeedbackSummaries(
-    records.filter((record) => record.channel === "community"),
+    records.filter((record) => record.channel === "community" && !record.community_summary?.summary),
     "/api/records/community-summaries",
+    3,
   );
 }
 
@@ -358,30 +360,46 @@ export function useVoiceFeedbackSummaries(evidence: { record_id: string; title: 
 function useFeedbackSummaries(targets: { id: string; title?: string; body: string }[], endpoint: string, batchSize = 12) {
   const qc = useQueryClient();
   const queryKey = ["feedback-summaries", endpoint, targets.map((record) => [record.id, record.title, record.body])];
-  return useQuery({
+  const itemKey = (r: typeof targets[number]) => ["feedback-summary", endpoint, r.id, r.title, r.body];
+  function readPrepared() {
+    const ready: Record<string, CommunityPostSummary> = {};
+    for (const record of targets) {
+      const item = qc.getQueryData<CommunityPostSummary>(itemKey(record));
+      if (item) ready[record.id] = item;
+    }
+    return ready;
+  }
+  return useQuery<Record<string, CommunityPostSummary>>({
     queryKey,
     enabled: targets.length > 0,
+    placeholderData: readPrepared,
     staleTime: 5 * 60_000,
     retry: false,
     refetchOnWindowFocus: false,
     queryFn: async ({ signal }) => {
-      const summaries: Record<string, CommunityPostSummary> = {};
+      const summaries = readPrepared();
+      const pending = targets.filter(record => !summaries[record.id]);
       // Publish each small batch as it finishes; the original content remains
       // usable while summaries are generated and persisted on the server.
-      for (let index = 0; index < targets.length && !signal.aborted; index += batchSize) {
-        const batch = targets.slice(index, index + batchSize);
+      for (let index = 0; index < pending.length && !signal.aborted; index += batchSize) {
+        const batch = pending.slice(index, index + batchSize);
         try {
           const response = await api.post<{ summaries: Record<string, CommunityPostSummary> }>(
             endpoint, { record_ids: batch.map((record) => record.id) },
           );
+          for (const record of batch) {
+            const item = response.summaries[record.id];
+            if (item?.status === "ready") qc.setQueryData(itemKey(record), item);
+          }
+          if (signal.aborted) return summaries;
           Object.assign(summaries, response.summaries);
           if (Object.values(response.summaries).some((item) => item.status === "unconfigured")) {
-            targets.slice(index + batchSize).forEach((record) => { summaries[record.id] = { status: "unconfigured", summary: null }; });
+            pending.slice(index + batchSize).forEach((record) => { summaries[record.id] = { status: "unconfigured", summary: null }; });
             qc.setQueryData(queryKey, { ...summaries });
             break;
           }
         } catch {
-          targets.slice(index).forEach((record) => { summaries[record.id] = { status: "error", summary: null }; });
+          pending.slice(index).forEach((record) => { summaries[record.id] = { status: "error", summary: null }; });
           qc.setQueryData(queryKey, { ...summaries });
           break;
         }
@@ -616,7 +634,7 @@ export function useCreatorsReport(brandId?: string, productId?: string) {
     ({ refresh = false }) => api.get<{ report: string }>(`/api/creators/report${qs({ brand_id: brandId, product_id: productId, refresh })}`),
     (data) => qc.setQueryData(queryKey, data),
   );
-  return { ...query, data: generate.data || (query.data?.cache_miss ? undefined : query.data), generate };
+  return { ...query, data: query.data ? (query.data.cache_miss ? undefined : query.data) : generate.data, generate };
 }
 
 // ---------------------------------------------------------------- sales
@@ -1050,7 +1068,7 @@ export function useWebAnalysis(brandId?: string, monitorId?: string, range?: Tim
     ({ refresh = false }) => api.post<WebAiAnalysis>(`/api/web/analyze${qs({ brand_id: brandId, monitor_id: monitorId, refresh, ...rp })}`),
     (data) => qc.setQueryData(queryKey, data),
   );
-  return { ...query, data: generate.data || ((query.data as any)?.cache_miss ? undefined : query.data), generate };
+  return { ...query, data: query.data ? ((query.data as any).cache_miss ? undefined : query.data) : generate.data, generate };
 }
 
 export function useDeleteWebSnapshot() {

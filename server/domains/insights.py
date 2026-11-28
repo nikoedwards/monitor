@@ -359,8 +359,9 @@ def overview(brand_id: str | None = None, days: int = 30, start_date: str | None
             topics.update(record.get("topics") or [])
         return {"kpis": _brand_snapshot(conn, brand_id, start, end), "trend": build_trend(records, start, end), "sentiment": [{"sentiment": k, "total": v} for k, v in sentiment.items()], "top_topics": [{"topic": k, "total": v} for k, v in topics.most_common(8)], "high_signal": []}
     payload = _overview_payload(conn, brand_id, start, end, market_brand_ids)
-    preview = _fallback_summary(payload)
-    payload["summary_preview"] = {**preview, "coverage": payload["coverage"], "caveats": []}
+    key = "overview:" + "|".join((OVERVIEW_VERSION, brand_id, start, end, market_brand_ids or ""))
+    saved = ai.get_cached_summary(conn, key)
+    payload["summary_preview"] = saved or {**_fallback_summary(payload), "coverage": payload["coverage"], "caveats": []}
     return payload
 
 
@@ -502,7 +503,9 @@ def compare(days: int = 30, start_date: str | None = None, end_date: str | None 
     for brand in brands:
         snapshot = _brand_snapshot(conn, brand["id"], start, end)
         rows.append({"brand_id": brand["id"], "name": brand["name"], "is_competitor": bool(brand["is_competitor"]), "is_primary": bool(brand["is_primary"]), **snapshot})
-    return {"brands": rows}
+    from ..compare_summary import compare_cache_prefix
+    preview = ai.get_latest_saved_summary(conn, compare_cache_prefix(start, end))
+    return {"brands": rows, "summary_preview": preview}
 
 
 @router.get("/compare/summary")

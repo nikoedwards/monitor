@@ -1,50 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, Compass, RefreshCw, Sparkles } from "lucide-react";
-import { api, qs } from "../lib/api";
+import { api, qs, type CompareFinding as Finding, type StrategySummary } from "../lib/api";
 import { type TimeRange } from "../lib/timeRange";
 import { AsyncProgress, Badge, Button, Card } from "./ui";
-
-interface Evidence {
-  id: string;
-  brand_id: string;
-  brand: string;
-  title: string;
-  detail: string;
-  at: string;
-  url: string;
-  platform?: string;
-  period: "current" | "previous" | "active_in_window";
-}
-
-interface Finding {
-  title: string;
-  observation: string;
-  implication: string;
-  next_signal: string;
-  confidence: "low" | "medium" | "high";
-  evidence: Evidence[];
-  brand_id?: string;
-}
-
-interface StrategySummary {
-  mode: "ai" | "empty";
-  cached: boolean;
-  summary: string;
-  range: { start: string; end: string; previous_start: string; previous_end: string };
-  generated_at: string;
-  evidence_count: number;
-  brands: Array<{
-    brand_id: string;
-    name: string;
-    is_primary: boolean;
-    coverage: Array<{ label: string; evidence_count: number }>;
-  }>;
-  industry_changes: Finding[];
-  brand_moves: Finding[];
-  opportunities: Finding[];
-  risks: Finding[];
-  caveats: string[];
-}
 
 type StrategyReply = (StrategySummary | { mode?: undefined; cache_miss?: true }) & {
   generation?: { status: "running" | "completed" | "failed"; error?: string };
@@ -96,7 +54,7 @@ function FindingSection({ title, items, empty, stacked = false }: { title: strin
   );
 }
 
-export function CompareSummary({ range, brandIds }: { range: TimeRange; brandIds: string[] }) {
+export function CompareSummary({ range, brandIds, preview }: { range: TimeRange; brandIds: string[]; preview?: StrategySummary }) {
   const qc = useQueryClient();
   const queryKey = ["compare-strategy-v1", range.start_date, range.end_date, [...brandIds].sort().join(",")];
   const params = { start_date: range.start_date, end_date: range.end_date };
@@ -124,7 +82,9 @@ export function CompareSummary({ range, brandIds }: { range: TimeRange; brandIds
     mutationFn: () => api.get<StrategyReply>(`${endpoint}${qs({ ...params, refresh: true, background: true })}`),
     onSuccess: (result) => qc.setQueryData<StrategyReply>(queryKey, (previous) => keepPreviousSummary(previous, result)),
   });
-  const data = cached.data?.mode ? cached.data : undefined;
+  const saved = cached.data?.mode ? cached.data : preview;
+  const matchesBrands = saved?.brands?.map(brand => brand.brand_id).sort().join(",") === [...brandIds].sort().join(",");
+  const data = matchesBrands ? saved : undefined;
   const error = generate.error?.message || cached.error?.message || cached.data?.generation?.error;
   const pending = generate.isPending || cached.data?.generation?.status === "running";
 

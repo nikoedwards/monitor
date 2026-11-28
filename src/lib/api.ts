@@ -147,6 +147,7 @@ export interface RecordItem {
   occurred_at?: string;
   voice_source?: string;
   voice_issue?: VoiceIssuePreview;
+  community_summary?: CommunityPostSummary | null;
   sentiment?: string;
   sentiment_score?: number;
   sentiment_explanation?: {
@@ -962,4 +963,46 @@ export interface BrandDraft {
   sales: { platform: string; url: string }[];
   social: { platform: string; url: string }[];
   community: { platform: string; url: string }[];
+}
+
+interface CompareEvidence {
+  id: string;
+  brand_id: string;
+  brand: string;
+  title: string;
+  detail: string;
+  at: string;
+  url: string;
+  platform?: string;
+  period: "current" | "previous" | "active_in_window";
+}
+
+export interface CompareFinding {
+  title: string;
+  observation: string;
+  implication: string;
+  next_signal: string;
+  confidence: "low" | "medium" | "high";
+  evidence: CompareEvidence[];
+  brand_id?: string;
+}
+
+export interface StrategySummary {
+  mode: "ai" | "empty";
+  cached: boolean;
+  summary: string;
+  range: { start: string; end: string; previous_start: string; previous_end: string };
+  generated_at: string;
+  evidence_count: number;
+  brands: Array<{
+    brand_id: string;
+    name: string;
+    is_primary: boolean;
+    coverage: Array<{ label: string; evidence_count: number }>;
+  }>;
+  industry_changes: CompareFinding[];
+  brand_moves: CompareFinding[];
+  opportunities: CompareFinding[];
+  risks: CompareFinding[];
+  caveats: string[];
 }

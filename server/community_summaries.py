@@ -116,7 +116,7 @@ def cached_summaries(conn: sqlite3.Connection, records: list[dict], *, voice: bo
             f"SELECT * FROM community_post_summaries WHERE record_id IN ({placeholders})", list(batch)
         ):
             rid = saved["record_id"]
-            if saved["source_hash"] != source_hash(batch[rid]) or (not voice and not _is_recent(saved["created_at"])):
+            if saved["source_hash"] != source_hash(batch[rid]):
                 continue
             ready[rid] = {"status": "ready", "summary": saved["summary"]}
             if voice and saved["headline"]:
@@ -197,14 +197,3 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str],
                         if voice and analysis["headline"]:
                             result[record["id"]]["headline"] = analysis["headline"]
     return {"summaries": result}
-
-
-def _is_recent(value: str | None) -> bool:
-    if not value:
-        return False
-    try:
-        created = __import__("datetime").datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
-        return now - created < __import__("datetime").timedelta(hours=24)
-    except (TypeError, ValueError):
-        return False

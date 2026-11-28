@@ -27,7 +27,7 @@ function highlightSource(highlight: string, representative: any[] = []) {
   return bestScore >= 2 ? best : null;
 }
 
-export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview }: { brandId?: string; range: TimeRange; marketBrandIds?: string[]; preview?: { mode: "fallback" } }) {
+export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview }: { brandId?: string; range: TimeRange; marketBrandIds?: string[]; preview?: ExecutiveSummaryResult }) {
   const { data: analyzed, pending, takingLonger, error, refresh } = useOverviewSummary(brandId, range, marketBrandIds);
   const data = analyzed || preview;
 
@@ -143,7 +143,7 @@ export function SmartSummary({ brandId, dimension, channel, range, filters, labe
       <div className="flex items-start gap-2">
         <div className="flex flex-col items-start">
           <Button size="sm" variant="primary" disabled={!brandId || summarize.isGenerating || summarize.isLoading} onClick={run}>
-            <Sparkles size={14} /> {summarize.isGenerating ? "生成中…" : label}
+            <Sparkles size={14} /> {summarize.isGenerating ? "生成中…" : summarize.isLoading ? "读取总结中…" : label}
           </Button>
           <AsyncProgress active={summarize.isGenerating} label="正在生成智能总结" />
         </div>

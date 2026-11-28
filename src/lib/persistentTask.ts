@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useMutationState, type UseMutationResult } from "@tanstack/react-query";
 
 export const PERSISTENT_TASK_EVENT = "monitor:persistent-task";
@@ -66,21 +66,20 @@ export function usePersistentTaskMutation<TData, TVariables>(
   mutationFn: (variables: TVariables) => Promise<TData>,
   onSuccess?: (data: TData) => void,
 ): UseMutationResult<TData, Error, TVariables> & { data: TData | undefined; error: Error | null; isPending: boolean; isError: boolean } {
-  const [stored, setStored] = useState<StoredTask<TData> | null>(() => read<TData>(storageKey));
-  const mutationKeyRef = useRef(storageKey);
-  const mutationMatchesKey = mutationKeyRef.current === storageKey;
-  if (!mutationMatchesKey) mutationKeyRef.current = storageKey;
+  const [snapshot, setSnapshot] = useState(() => ({ key: storageKey, task: read<TData>(storageKey) }));
+  const stored = snapshot.key === storageKey ? snapshot.task : read<TData>(storageKey);
   const mutation = useMutation<TData, Error, TVariables>({
     mutationKey: [storageKey],
     gcTime: 24 * 60 * 60 * 1000,
     mutationFn: async (variables) => {
-      write<TData>(storageKey, { status: "pending", updatedAt: Date.now() });
+      const previous = read<TData>(storageKey)?.data;
+      write<TData>(storageKey, { status: "pending", data: previous, updatedAt: Date.now() });
       try {
         const result = await mutationFn(variables);
         write(storageKey, { status: "success", data: result, updatedAt: Date.now() });
         return result;
       } catch (error) {
-        write<TData>(storageKey, { status: "error", error: error instanceof Error ? error.message : String(error), updatedAt: Date.now() });
+        write<TData>(storageKey, { status: "error", data: previous, error: error instanceof Error ? error.message : String(error), updatedAt: Date.now() });
         throw error;
       }
     },
@@ -101,27 +100,34 @@ export function usePersistentTaskMutation<TData, TVariables>(
   );
 
   useEffect(() => {
-    setStored(read<TData>(storageKey));
-    mutation.reset();
+    const sync = () => setSnapshot({ key: storageKey, task: read<TData>(storageKey) });
+    sync();
     const onChange = (event: Event) => {
-      const detail = (event as CustomEvent<{ storageKey?: string }>).detail;
-      if (detail?.storageKey === storageKey) setStored(read<TData>(storageKey));
+      if ((event as CustomEvent<{ storageKey?: string }>).detail?.storageKey === storageKey) sync();
     };
+    const onStorage = (event: StorageEvent) => { if (event.key === storageKey || event.key === null) sync(); };
     window.addEventListener(PERSISTENT_TASK_EVENT, onChange);
-    return () => window.removeEventListener(PERSISTENT_TASK_EVENT, onChange);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(PERSISTENT_TASK_EVENT, onChange);
+      window.removeEventListener("storage", onStorage);
+    };
   }, [storageKey]);
 
+  useEffect(() => {
+    if (stored?.status !== "pending") return;
+    const remaining = stored.updatedAt + PERSISTENT_TASK_PENDING_TTL_MS - Date.now();
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setSnapshot({ key: storageKey, task: read<TData>(storageKey) }), remaining + 1);
+    return () => window.clearTimeout(timer);
+  }, [storageKey, stored?.status, stored?.updatedAt]);
+
   const result = useMemo(() => {
-    const data = stored?.status === "success" ? stored.data : mutationMatchesKey ? mutation.data : cachedMutation?.data;
-    const error = (mutationMatchesKey ? mutation.error : null) || cachedMutation?.error || (stored?.status === "error" && stored.error ? new Error(stored.error) : null);
+    const data = stored?.data ?? cachedMutation?.data;
+    const error = cachedMutation?.error || (stored?.status === "error" && stored.error ? new Error(stored.error) : null);
     const storedPending = stored?.status === "pending" && Date.now() - stored.updatedAt < PERSISTENT_TASK_PENDING_TTL_MS;
-    return {
-      data,
-      error,
-      isPending: (mutationMatchesKey && mutation.isPending) || cachedMutation?.status === "pending" || storedPending,
-      isError: Boolean(error),
-    };
-  }, [cachedMutation, mutation.data, mutation.error, mutation.isPending, mutationMatchesKey, stored]);
+    return { data, error, isPending: cachedMutation?.status === "pending" || storedPending, isError: Boolean(error) };
+  }, [cachedMutation, stored]);
 
   return Object.assign(mutation, result);
 }

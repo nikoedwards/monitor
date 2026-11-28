@@ -9,7 +9,8 @@ import { fmtNum } from "../lib/format";
 
 export default function Compare() {
   const [range] = useTimeRange();
-  const { data: brands = [], isLoading } = useCompare(range);
+  const { data, isLoading } = useCompare(range);
+  const brands = data?.brands || [];
   const navigate = useNavigate();
   if (isLoading) return <Spinner />;
   if (!brands.length) return <EmptyState title="暂无品牌" hint="先在品牌管理添加自家品牌与竞品。" />;
@@ -26,7 +27,7 @@ export default function Compare() {
     <div className="space-y-6">
       <SectionTitle title="竞品对比" subtitle="跨品牌的声量、口碑、营销、销售与网页动态横向对比" action={<TimeRangePicker />} />
 
-      <CompareSummary key={`${range.start_date}:${range.end_date}:${brands.map((brand) => brand.brand_id).sort().join(",")}`} range={range} brandIds={brands.map((brand) => brand.brand_id)} />
+      <CompareSummary key={`${range.start_date}:${range.end_date}:${brands.map((brand) => brand.brand_id).sort().join(",")}`} range={range} preview={data?.summary_preview} brandIds={brands.map((brand) => brand.brand_id)} />
 
       <Card>
         <div className="overflow-x-auto">

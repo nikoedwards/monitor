@@ -528,7 +528,9 @@ export function RecordList({
   variant?: "list" | "social-cards";
   summarizeCommunity?: boolean;
 }) {
-  const summaries = useCommunitySummaries(summarizeCommunity ? records : []);
+  const [visibleCount, setVisibleCount] = useState(12);
+  const visible = summarizeCommunity ? records.slice(0, visibleCount) : records;
+  const summaries = useCommunitySummaries(summarizeCommunity ? visible : []);
   const summaryFailed = Object.values(summaries.data || {}).some((item) => item.status === "error");
   if (!records.length) {
     return <EmptyState title="暂无数据" hint={emptyHint || "在数据源页发起一次采集，或手动录入后再查看。"} />;
@@ -548,10 +550,10 @@ export function RecordList({
           <Button size="sm" onClick={() => summaries.refetch()} disabled={summaries.isFetching}>重试摘要</Button>
         </div>
       )}
-      {records.map((r) => {
+      {visible.map((r) => {
         const isReply = r.data_type === "community_reply";
         const showCommunitySummary = summarizeCommunity && r.channel === "community";
-        const summary = summaries.data?.[r.id];
+        const summary = r.community_summary || summaries.data?.[r.id];
         return (
         <div key={r.id} className="panel p-4" style={isReply ? { borderLeft: "2px solid var(--accent)" } : undefined}>
           <div className="flex items-start gap-3">
@@ -570,7 +572,7 @@ export function RecordList({
                 {r.intent && <span className="text-[12px]" style={{ color: "var(--mute)" }}>{r.intent}</span>}
                 {r.hot_risk && <Badge tone="negative">高热度负向 · 优先关注</Badge>}
               </div>
-              {r.title && (
+              {!showCommunitySummary && r.title && (
                 <div className="text-[14px] font-medium truncate" style={{ color: "var(--ink)" }}>
                   {r.url ? (
                     <a href={r.url} target="_blank" rel="noreferrer" className="hover:underline">{r.title}</a>
@@ -598,6 +600,9 @@ export function RecordList({
               )}
               <div className="mt-2">
                 <div className="text-[11px] font-medium" style={{ color: "var(--mute)" }}>原文</div>
+                {showCommunitySummary && r.title && (
+                  <div className="text-[13px] font-medium">{r.url ? <a href={r.url} target="_blank" rel="noreferrer" className="hover:underline">{r.title}</a> : r.title}</div>
+                )}
                 <p className="text-[13px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: "var(--body)" }}><HighlightedText record={r} /></p>
               </div>
               {r.metrics && (r.channel === "social" ? <SocialMeta metrics={r.metrics} /> : <MediaMeta metrics={r.metrics} />)}
@@ -622,6 +627,9 @@ export function RecordList({
         </div>
         );
       })}
+      {visible.length < records.length && <Button size="sm" onClick={() => setVisibleCount(count => count + 12)}>
+        显示更多反馈（已显示 {visible.length} / {records.length}）
+      </Button>}
     </div>
   );
 }

@@ -71,6 +71,32 @@ class OverviewAggregationTests(unittest.TestCase):
 
 
 class OverviewBackgroundSummaryTests(unittest.TestCase):
+    def test_scheduler_prepares_only_missing_default_scopes(self):
+        from server.scheduler import _prepare_dashboard_summaries
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA)
+        for bid, primary, competitor in [("a", 1, 0), ("b", 0, 1)]:
+            conn.execute("INSERT INTO brands(id,name,is_primary,is_competitor,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                         (bid, bid, primary, competitor, "", ""))
+        ready = set()
+        def overview_job(**scope):
+            key = (scope["brand_id"], scope["market_brand_ids"])
+            if scope.get("cached_only"):
+                return {"mode": "ai"} if key in ready else {}
+            self.assertTrue(scope["background"])
+            ready.add(key)
+            return {"generation": {"status": "running"}}
+        with patch("server.ai.is_configured", return_value=True), patch("server.scheduler.time.sleep"), \
+             patch("server.domains.insights.overview_summary", side_effect=overview_job) as load, \
+             patch("server.domains.content.marketing_overview_summary", return_value={"mode": "ai"}) as marketing:
+            for _ in range(2):
+                _prepare_dashboard_summaries(conn)
+        self.assertEqual({("a", "a,b"), ("b", "b")}, ready)
+        self.assertEqual(2, sum(not call.kwargs.get("cached_only") for call in load.call_args_list))
+        self.assertTrue(all(call.kwargs["cached_only"] for call in marketing.call_args_list))
+
     def test_preview_and_cached_summary_survive_slow_and_failed_model(self):
         payload = {"modules": {}, "kpis": {}, "coverage": {}, "range": {"start": "2026-10-01", "end": "2026-10-30"}}
         entered = threading.Event()
@@ -113,6 +139,7 @@ class OverviewBackgroundSummaryTests(unittest.TestCase):
                         release.set()
                     self.assertEqual("完成研判", read()["summary"])
                     model.assert_called_once()
+                    self.assertEqual("完成研判", overview(**params)["summary_preview"]["summary"])
 
                     model.side_effect = ai.LlmError("timed out")
                     refresh = overview_summary(**params, background=True, refresh=True)

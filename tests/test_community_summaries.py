@@ -47,6 +47,20 @@ class CommunitySummaryTests(unittest.TestCase):
         self.assertIn("App Intents", prompt["posts"][0]["body"])
         self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM community_post_summaries").fetchone()[0])
 
+    def test_community_feed_returns_matching_translation_in_first_response(self):
+        from server.domains.content import list_records
+        with patch("server.community_summaries.ai.call_llm", return_value=self.response(siri="通过 Siri 开始录音")) as model:
+            summarize_community_records(self.conn, ["siri"])
+            self.conn.execute("UPDATE community_post_summaries SET created_at = '2000-01-01T00:00:00Z'")
+            def feed():
+                return {r["id"]: r for r in list_records(channel="community", conn=self.conn)["records"]}
+            warm = feed()
+            self.assertEqual("通过 Siri 开始录音。", warm["siri"]["community_summary"]["summary"])
+            self.assertIsNone(warm["case"]["community_summary"])
+            self.conn.execute("UPDATE records SET body = 'The request changed' WHERE id = 'siri'")
+            self.assertIsNone(feed()["siri"]["community_summary"])
+            model.assert_called_once()
+
     def test_changed_body_invalidates_only_its_summary(self):
         with patch("server.community_summaries.ai.call_llm", return_value=self.response(siri="用户希望用 Siri 开始录音")):
             summarize_community_records(self.conn, ["siri"])
