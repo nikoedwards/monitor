@@ -143,7 +143,7 @@ npm run dev         # 终端 B → http://localhost:5173
 
 ### 公网访问口令
 
-打开「MCP / CLI 接入」，选择 Codex 或 Claude Code，复制远程 MCP 地址。客户端使用 Streamable HTTP 连接当前实例的 `/mcp`，启用访问口令的实例需要请求头 `Authorization: Bearer <口令>`。保存后调用 `monitor_overview` 验证品牌数和记录数。公网接入使用 HTTPS。本地开发可使用 `http://127.0.0.1:8790/mcp`。
+登录 HTTPS 网站后，打开「MCP / CLI 接入」，选择 Codex、Cursor 或 Claude Code，点击「生成密钥」。复制页面给出的完整配置，保存到对应客户端，在新对话中调用 `monitor_overview` 查询品牌数和记录数。密钥仅在生成时显示，可在本次页面中撤销。每把密钥仅能访问只读的 `/mcp`，轮换网站口令后旧密钥失效。公开实例可以直接复制无凭证配置。
 
 使用自有域名部署时，在应用容器设置 `DOMAIN` 为该主机名。Claude Desktop 的本地连接和独立 CLI 仍可使用页面上的接入包（Python 3.9+）。
 

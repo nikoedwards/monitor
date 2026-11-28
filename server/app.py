@@ -22,6 +22,7 @@ from .db import db, init_db
 from .domains import brands, content, creators, hiring, insights, integrations, market_share, sales, settings, sources, web
 from . import media
 from . import remote_mcp
+from . import mcp_keys
 from .scheduler import start_scheduler
 from .snapshot import upgrade_snapshot_archives, upgrade_snapshot_fallback_images
 
@@ -98,6 +99,7 @@ for module in (brands, content, creators, sales, web, sources, insights, integra
     app.include_router(module.router)
 
 app.add_route("/mcp", remote_mcp.http_app, methods=["GET", "POST", "DELETE"])
+app.include_router(mcp_keys.router)
 
 
 @app.get("/api/health")

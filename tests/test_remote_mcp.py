@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from server import app as monitor
 from server import db
+from server import mcp_keys
 from server.access_gate import AccessGate
 
 
@@ -19,6 +20,22 @@ class RemoteMcpTests(unittest.TestCase):
         ), patch.object(monitor, "SCHEDULER_ENABLED", False), patch.object(monitor, "start_scheduler"):
             app = AccessGate(monitor.app, code="test-only")
             with TestClient(app, base_url="http://localhost", headers=headers) as client:
+                self.assertEqual(client.post("/mcp", json=rpc).status_code, 401)
+                self.assertEqual(client.post(mcp_keys.KEY_PATH).status_code, 401)
+                client.post("/_access", data={"code": "test-only"}, follow_redirects=False)
+                self.assertEqual(client.post(mcp_keys.KEY_PATH, headers={"Origin": "https://other.invalid"}).status_code, 403)
+                issued = client.post(mcp_keys.KEY_PATH, headers={"Origin": "http://localhost"})
+                self.assertIn("no-store", issued.headers["cache-control"])
+                key = issued.json()
+                self.assertFalse(mcp_keys.accepts(key["key"], b"rotated-site-code"))
+                client.cookies.clear()
+                client.headers["Authorization"] = f"Bearer {key['key']}"
+                self.assertEqual(client.post("/mcp", json=rpc).status_code, 200)
+                self.assertEqual(client.get("/api/integrations/overview").status_code, 401)
+                self.assertEqual(client.post(mcp_keys.KEY_PATH).status_code, 401)
+                client.headers["Authorization"] = "Bearer test-only"
+                self.assertEqual(client.delete(f"{mcp_keys.KEY_PATH}/{key['id']}").status_code, 204)
+                client.headers["Authorization"] = f"Bearer {key['key']}"
                 self.assertEqual(client.post("/mcp", json=rpc).status_code, 401)
                 client.headers["Authorization"] = "Bearer test-only"
                 self.assertEqual(client.post("/mcp", json=rpc, headers={"Origin": "https://other.invalid"}).status_code, 403)

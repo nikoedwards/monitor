@@ -3,7 +3,10 @@ import hmac
 from urllib.parse import parse_qs
 
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+
+from . import mcp_keys
 
 
 COOKIE_NAME = "monitor_access"
@@ -11,7 +14,7 @@ ACCESS_PATH = "/_access"
 SESSION_SECONDS = 30 * 24 * 60 * 60
 
 
-def access_page(error=""):
+def access_page(error="", *, return_to_mcp=False):
     feedback = f'<p class="error" role="alert">{error}</p>' if error else ""
     return HTMLResponse(
         f"""<!doctype html>
@@ -37,7 +40,7 @@ def access_page(error=""):
 <body>
   <main>
     <h1>受邀访问</h1>
-    <form method="post" action="{ACCESS_PATH}">
+    <form method="post" action="{ACCESS_PATH + ('?next=mcp' if return_to_mcp else '')}">
       <label for="code">访问口令</label>
       <input id="code" name="code" type="password" autocomplete="current-password"
         autocapitalize="none" maxlength="128" required autofocus>
@@ -74,12 +77,16 @@ class AccessGate(BaseHTTPMiddleware):
 
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         cookie = request.cookies.get(COOKIE_NAME, "").encode()
-        if hmac.compare_digest(cookie, self.session) or (
+        site_access = hmac.compare_digest(cookie, self.session) or (
             scheme.lower() == "bearer" and (
                 hmac.compare_digest(token.encode("latin-1"), self.code)
                 or hmac.compare_digest(token.encode(), self.code)
             )
-        ):
+        )
+        if site_access and (path == mcp_keys.KEY_PATH or path.startswith(mcp_keys.KEY_PATH + "/")):
+            request.state.mcp_key_context = self.code
+        if site_access or (path == "/mcp" and scheme.lower() == "bearer" and token.startswith(mcp_keys.PREFIX)
+                           and await run_in_threadpool(mcp_keys.accepts, token, self.code)):
             response = await call_next(request)
             if "no-store" not in response.headers.get("cache-control", ""):
                 response.headers["Cache-Control"] = "private, no-cache"
@@ -88,7 +95,7 @@ class AccessGate(BaseHTTPMiddleware):
         if request.method in {"GET", "HEAD"} and (
             path == "/" or "text/html" in request.headers.get("accept", "")
         ):
-            return access_page()
+            return access_page(return_to_mcp=path.endswith("/mcp-cli"))
         return JSONResponse(
             {"detail": "Access code required"},
             status_code=401,
@@ -96,19 +103,20 @@ class AccessGate(BaseHTTPMiddleware):
         )
 
     async def unlock(self, request):
+        return_to_mcp = request.query_params.get("next") == "mcp"
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > 1024:
-                return access_page("口令过长，请重试。")
+                return access_page("口令过长，请重试。", return_to_mcp=return_to_mcp)
             body.extend(chunk)
         try:
             code, = parse_qs(body.decode(), max_num_fields=1).get("code", [""])
         except ValueError:
-            return access_page("请输入访问口令。")
+            return access_page("请输入访问口令。", return_to_mcp=return_to_mcp)
         if not hmac.compare_digest(code.strip().encode(), self.code):
-            return access_page("口令不正确，请重试。")
+            return access_page("口令不正确，请重试。", return_to_mcp=return_to_mcp)
 
-        response = RedirectResponse("/", status_code=303, headers={"Cache-Control": "no-store"})
+        response = RedirectResponse("/mcp-cli" if return_to_mcp else "/", status_code=303, headers={"Cache-Control": "no-store"})
         response.set_cookie(
             COOKIE_NAME,
             self.session.decode(),

@@ -448,6 +448,11 @@ CREATE TABLE IF NOT EXISTS voc_actions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mcp_access_keys (
+  id TEXT PRIMARY KEY,
+  verifier TEXT NOT NULL UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT,

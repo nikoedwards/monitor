@@ -5,7 +5,7 @@ import { Check, Copy, Download } from "lucide-react";
 import { Button, Card, SectionTitle, Select } from "../components/ui";
 
 const download = "https://raw.githubusercontent.com/nikoedwards/monitor/568576806e4d53e566a3d622a4627342723599b7/downloads/monitor-connect-v1.zip";
-const clients = { codex: "Codex", desktop: "Claude Desktop", claude: "Claude Code", cli: "命令行 CLI" };
+const clients = { codex: "Codex", cursor: "Cursor", claude: "Claude Code", desktop: "Claude Desktop", cli: "命令行 CLI" };
 type Client = keyof typeof clients;
 type System = "Windows" | "macOS" | "Linux";
 const hint = "text-[13px] leading-6 text-[var(--mute)]";
@@ -24,7 +24,7 @@ function Step({ number, title, children }: { number: number; title: string; chil
   );
 }
 
-function Snippet({ value, label }: { value: string; label: string }) {
+function Snippet({ value, label, config = false, ready = true }: { value: string; label: string; config?: boolean; ready?: boolean }) {
   const field = useRef<HTMLTextAreaElement>(null);
   const [result, setResult] = useState<"copied" | "manual" | null>(null);
   async function copy() {
@@ -48,12 +48,12 @@ function Snippet({ value, label }: { value: string; label: string }) {
     }
   }
   return (
-    <div className="rounded-lg border border-[var(--hairline)] bg-[var(--bg-soft)] p-3">
-      <textarea ref={field} aria-label={label} readOnly value={value} rows={2} spellCheck={false}
+    <div className={config ? "rounded-lg bg-zinc-900 p-4 text-zinc-100" : "rounded-lg border border-[var(--hairline)] bg-[var(--bg-soft)] p-3"}>
+      <textarea ref={field} aria-label={label} readOnly value={value} rows={config ? value.split("\n").length + 1 : 2} spellCheck={false}
         className="block w-full resize-y bg-transparent font-mono text-[13px] leading-5" />
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button onClick={copy} size="sm">{result === "copied" ? <Check size={14} /> : <Copy size={14} />}{`复制${label}`}</Button>
-        <span role="status" className={hint}>{result === "copied" ? "已复制" : result === "manual" ? "文字已选中。按 Ctrl+C（Mac 按 ⌘C），手机长按后选「复制」。" : ""}</span>
+        <Button onClick={copy} size="sm" disabled={!ready}>{result === "copied" ? <Check size={14} /> : <Copy size={14} />}{`复制${label}`}</Button>
+        <span role="status" className={config ? "text-sm text-zinc-300" : hint}>{result === "copied" ? "已复制" : result === "manual" ? "文字已选中。按 Ctrl+C（Mac 按 ⌘C），手机长按后选「复制」。" : ""}</span>
       </div>
     </div>
   );
@@ -67,6 +67,9 @@ const terminalInstructions: Record<System, string> = {
 
 export default function McpCli() {
   const [client, setClient] = useState<Client>("codex");
+  const [issued, setIssued] = useState<{ key: string | null; id: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const [system, setSystem] = useState<System>(() => {
     if (navigator.userAgent.includes("Windows")) return "Windows";
     return navigator.userAgent.includes("Linux") ? "Linux" : "macOS";
@@ -75,9 +78,31 @@ export default function McpCli() {
   const endpoint = import.meta.env.DEV && local ? "http://127.0.0.1:8790" : location.origin;
   const launcher = system === "Windows" ? ".\\monitor.cmd" : "python3 ./monitor.pyz";
   const cli = client === "cli";
-  const remote = client === "codex" || client === "claude";
+  const remote = client === "codex" || client === "claude" || client === "cursor";
   const remoteUrl = new URL("/mcp", endpoint);
   if (!local) remoteUrl.protocol = "https:";
+  const securePage = local || location.protocol === "https:";
+  const token = issued ? issued.key : "YOUR_MONITOR_KEY";
+  const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+  const config = client === "codex"
+    ? [`[mcp_servers.monitorhub]`, `url = "${remoteUrl.href}"`,
+       ...(headers ? [`http_headers = { Authorization = "${headers.Authorization}" }`] : [])].join("\n")
+    : JSON.stringify({ mcpServers: { monitorhub: { type: client === "claude" ? "http" : undefined, url: remoteUrl.href, headers } } }, null, 2);
+  async function changeKey(revoke = false) {
+    setError("");
+    setBusy(true);
+    try {
+      const path = "/api/integrations/mcp-keys" + (revoke ? `/${issued?.id}` : "");
+      const response = await fetch(path, { method: revoke ? "DELETE" : "POST", cache: "no-store" });
+      if (response.status === 401) throw new Error("登录已过期，请刷新页面并重新登录。");
+      if (!response.ok) throw new Error("操作失败，请重试。");
+      setIssued(revoke ? null : await response.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "连接失败，请重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
   const setup = `${launcher} connect ${client} "${endpoint}"`;
   const firstQuery = cli
     ? `${launcher} query "${endpoint}" --json overview`
@@ -99,15 +124,24 @@ export default function McpCli() {
       </div>
       {remote ? (
         <ol className="space-y-3">
-          <Step number={1} title="添加远程 MCP 服务">
-            <p className={hint}>{client === "codex"
-              ? "在 Codex 设置中打开 MCP 服务器，添加自定义服务器。名称填 monitor，选择 Streamable HTTP，粘贴下面的地址。"
-              : "在 Claude Code 中使用 HTTP 传输添加名为 monitor 的 MCP 服务，服务器地址如下。"}</p>
-            <Snippet value={remoteUrl.href} label="MCP 地址" />
-            <p className={hint}>如果网站启用了访问口令，在请求头中添加 <code>Authorization</code>，值填 <code>Bearer 你的访问口令</code>。Bearer 后保留一个空格。</p>
+          <Step number={1} title="生成 MCP 密钥">
+            {securePage ? <>
+              <p className={hint}>{issued
+                ? issued.key ? "密钥已填入下面的配置。离开本页前请复制保存。" : "此实例已开放查询，可以直接复制配置。"
+                : "生成一把只读密钥，用来查询 Monitor 数据。"}</p>
+              {!issued && <Button variant="primary" disabled={busy} onClick={() => changeKey()}>{busy ? "生成中…" : "生成密钥"}</Button>}
+              {issued?.id && <Button size="sm" disabled={busy} onClick={() => changeKey(true)}>撤销这把密钥</Button>}
+              {error && <p role="alert" className="text-sm text-[var(--danger)]">{error}</p>}
+            </> : <a className="underline" href={new URL(location.pathname, remoteUrl.origin).href}>打开 HTTPS 接入页生成密钥</a>}
           </Step>
-          <Step number={2} title="验证连接">
-            <p className={hint}>保存连接，在新对话中发送下面的问题。</p>
+          <Step number={2} title={`复制到 ${clients[client]} 配置`}>
+            <p className={hint}>{client === "codex"
+              ? "打开用户目录下的 .codex/config.toml，粘贴下面这段配置。已有 [mcp_servers.monitorhub] 时，替换原来的这一段。"
+              : `打开${client === "cursor" ? "用户目录下的 .cursor/mcp.json" : "项目目录下的 .mcp.json"}。新文件可直接粘贴；已有配置时，将 monitorhub 条目加入 mcpServers。请将含密钥的文件保存在本机。`}</p>
+            <Snippet key={config} value={config} label="MCP 配置" config ready={!!issued} />
+          </Step>
+          <Step number={3} title="向模型提问">
+            <p className={hint}>保存配置，重新打开客户端，在新对话中发送下面的问题。</p>
             <Snippet value={firstQuery} label="验证问题" />
           </Step>
         </ol>
