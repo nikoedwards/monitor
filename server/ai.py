@@ -481,22 +481,24 @@ WEB_ANALYSIS_PROMPT = """分析范围：{start} 至 {end}
 {events}
 
 后续图片按候选事件顺序提供，每张图左侧为 BEFORE、右侧为 AFTER，通常已裁剪到变化最明显的区域。
+"""
 
+WEB_ANALYSIS_FORMAT = """
 请严格返回以下 JSON：
-{{
+{
   "summary": "3-5 句话说明这段时间网站总体发生了什么，以及变化活跃度相对上一周期如何",
   "highlights": ["最重要发现1", "发现2"],
-  "change_categories": [{{"category": "价格|促销|产品|图片视频|布局导航|CTA|品牌文案|客户案例|政策条款|其他", "count": 0, "evidence": "证据"}}],
-  "major_events": [{{"date": "YYYY-MM-DD", "page": "页面路径", "change": "发生了什么", "impact": "可能影响", "persistence": "持续|短暂|无法判断"}}],
+  "change_categories": [{"category": "价格|促销|产品|图片视频|布局导航|CTA|品牌文案|客户案例|政策条款|其他", "count": 0, "evidence": "证据"}],
+  "major_events": [{"date": "YYYY-MM-DD", "page": "页面路径", "change": "发生了什么", "impact": "可能影响", "persistence": "持续|短暂|无法判断"}],
   "frequency_assessment": "变化频率、间隔、集中时段与环比判断",
   "business_signals": ["谨慎表达的商业信号"],
   "caveats": ["数据或采集局限"]
-}}
+}
 
 要求：
 - 截图与文本证据冲突时，明确写入 caveats，不要自行补全。
 - 不要声称无法从截图确认的价格、日期、功能或因果关系。
-- major_events 最多 6 条；没有充分证据的类别不要输出。
+- 摘要最多 180 字，每个列表最多 3 条，每条证据用一句短句概括，不逐字引用页面文案。
 - business_signals 使用“可能、显示出、值得关注”等审慎措辞。
 """
 
@@ -522,7 +524,7 @@ def analyze_web_snapshots(conn: sqlite3.Connection, events: list[dict], context:
         stats=json.dumps(context.get("stats") or {}, ensure_ascii=False, separators=(",", ":")),
         events=json.dumps(event_rows, ensure_ascii=False, separators=(",", ":")),
     )
-    content.append({"type": "text", "text": prompt})
+    content.append({"type": "text", "text": prompt + WEB_ANALYSIS_FORMAT})
     for index, event in enumerate(events[:6], start=1):
         image = event.get("image")
         if not image:
@@ -537,10 +539,22 @@ def analyze_web_snapshots(conn: sqlite3.Connection, events: list[dict], context:
             },
         })
     text = call_llm_content(cfg, WEB_ANALYSIS_SYSTEM, content, timeout=180)
-    parsed = _extract_json(text)
-    if not isinstance(parsed, dict):
-        raise LlmError("大模型未返回有效的网站分析对象")
-    parsed.setdefault("summary", "")
+    try:
+        parsed = _extract_json(text)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("summary"), str) or not parsed["summary"].strip():
+            raise LlmError("网站分析缺少摘要")
+    except (json.JSONDecodeError, LlmError):
+        # Use the original evidence again. A truncated report may contain incomplete claims.
+        logger.warning("Invalid snapshot report format; requesting a prose summary")
+        summary = call_llm_content(
+            cfg,
+            "你是竞品网站视觉变化分析师。仅根据给定的截图、文本证据和统计，"
+            "用三句话概括主要变化、与上期的差异和证据局限。只输出中文正文，不输出 JSON、代码块或标题。",
+            [{"type": "text", "text": prompt}, *content[1:]], timeout=180,
+        ).strip()
+        if not summary or summary.startswith(("{", "[", "```")):
+            raise LlmError("模型未返回可读的网站分析摘要")
+        parsed = {"summary": summary, "caveats": ["模型返回的详细报告格式不完整，本次展示根据原始证据重新生成的摘要。"]}
     parsed.setdefault("frequency_assessment", "")
     for key in ("highlights", "change_categories", "major_events", "business_signals", "caveats"):
         if not isinstance(parsed.get(key), list):
