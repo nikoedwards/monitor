@@ -113,12 +113,12 @@ def posting_to_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     item["business_tags"] = json.loads(item.pop("business_tags_json", None) or "[]")
     item["department"] = infer_department(item.get("department"), item.get("title"), item.get("jd_text"))
     latest = conn.execute(
-        "SELECT * FROM job_snapshots WHERE posting_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
+        "SELECT * FROM visible_job_snapshots WHERE posting_id = ? ORDER BY snapshot_date DESC, created_at DESC LIMIT 1",
         (item["id"],),
     ).fetchone()
     item["latest"] = snapshot_to_dict(latest) if latest else None
     item["data_points"] = conn.execute(
-        "SELECT COUNT(*) AS c FROM job_snapshots WHERE posting_id = ?", (item["id"],)
+        "SELECT COUNT(*) AS c FROM visible_job_snapshots WHERE posting_id = ?", (item["id"],)
     ).fetchone()["c"]
     item["has_change"] = bool(item.get("last_change_at"))
     return item
@@ -233,12 +233,12 @@ def list_postings(
         clauses.append("(" + " OR ".join(f"{field} LIKE ? ESCAPE '\\'" for field in fields) + ")")
         params.extend([search_pattern(q)] * len(fields))
     where = " AND ".join(clauses)
-    total = conn.execute(f"SELECT COUNT(*) FROM job_postings WHERE {where}", params).fetchone()[0]
+    total = conn.execute(f"SELECT COUNT(*) FROM visible_job_postings WHERE {where}", params).fetchone()[0]
     total_pages = max(1, (total + page_size - 1) // page_size)
     # Deletion or collection can shrink the result while the user is paging.
     page = min(page, total_pages)
     rows = conn.execute(
-        f"SELECT * FROM job_postings WHERE {where} ORDER BY last_change_at DESC, last_seen DESC, id ASC LIMIT ? OFFSET ?",
+        f"SELECT * FROM visible_job_postings WHERE {where} ORDER BY last_change_at DESC, last_seen DESC, id ASC LIMIT ? OFFSET ?",
         [*params, page_size, (page - 1) * page_size],
     ).fetchall()
     return {
@@ -252,11 +252,11 @@ def list_postings(
 
 @router.get("/postings/{posting_id}/history")
 def posting_history(posting_id: str, conn: sqlite3.Connection = Depends(get_conn)):
-    posting = conn.execute("SELECT * FROM job_postings WHERE id = ?", (posting_id,)).fetchone()
+    posting = conn.execute("SELECT * FROM visible_job_postings WHERE id = ?", (posting_id,)).fetchone()
     if not posting:
         raise HTTPException(status_code=404, detail="Posting not found")
     rows = conn.execute(
-        "SELECT * FROM job_snapshots WHERE posting_id = ? ORDER BY snapshot_date",
+        "SELECT * FROM visible_job_snapshots WHERE posting_id = ? ORDER BY snapshot_date",
         (posting_id,),
     ).fetchall()
     snapshots = [snapshot_to_dict(r) for r in rows]
@@ -603,7 +603,7 @@ def hiring_summary(
         params.append(platform)
     where = " AND ".join(clauses)
     postings = [dict(r) for r in conn.execute(
-        f"SELECT * FROM job_postings WHERE {where}", params
+        f"SELECT * FROM visible_job_postings WHERE {where}", params
     ).fetchall()]
 
     # Zero-filled day buckets across the window.
@@ -645,7 +645,7 @@ def hiring_summary(
     snap_rows = conn.execute(
         f"""
         SELECT snapshot_date, SUM(CASE WHEN is_open = 1 THEN 1 ELSE 0 END) AS active
-        FROM job_snapshots
+        FROM visible_job_snapshots
         WHERE brand_id = ? AND snapshot_date >= ? AND snapshot_date <= ?
         GROUP BY snapshot_date
         """,
@@ -729,7 +729,7 @@ def _organization_postings(conn: sqlite3.Connection, rows: list[sqlite3.Row]) ->
             title, city = parse_linkedin_job_title(posting["title"])
             if not title:
                 for snapshot in conn.execute(
-                    "SELECT title, city, is_open FROM job_snapshots WHERE posting_id = ? "
+                    "SELECT title, city, is_open FROM visible_job_snapshots WHERE posting_id = ? "
                     "ORDER BY snapshot_date DESC, created_at DESC",
                     (posting["id"],),
                 ):
@@ -789,7 +789,7 @@ def hiring_org_radar(
         params.append(platform)
     where = " AND ".join(clauses)
     postings = _organization_postings(
-        conn, conn.execute(f"SELECT * FROM job_postings WHERE {where}", params).fetchall(),
+        conn, conn.execute(f"SELECT * FROM visible_job_postings WHERE {where}", params).fetchall(),
     )
     brand = conn.execute("SELECT headcount_reference_json FROM brands WHERE id = ?", (brand_id,)).fetchone()
     reference = json.loads(brand["headcount_reference_json"]) if brand and brand["headcount_reference_json"] else None
@@ -902,7 +902,7 @@ def hiring_org_radar(
         if closed_day in trend_index:
             trend_index[closed_day]["closed"] += 1
     for row in conn.execute(
-        "SELECT snapshot_date, SUM(CASE WHEN is_open = 1 THEN 1 ELSE 0 END) AS active FROM job_snapshots WHERE brand_id = ? AND snapshot_date >= ? AND snapshot_date <= ? GROUP BY snapshot_date",
+        "SELECT snapshot_date, SUM(CASE WHEN is_open = 1 THEN 1 ELSE 0 END) AS active FROM visible_job_snapshots WHERE brand_id = ? AND snapshot_date >= ? AND snapshot_date <= ? GROUP BY snapshot_date",
         (brand_id, start, end),
     ).fetchall():
         if row["snapshot_date"] in trend_index:
@@ -1145,7 +1145,7 @@ def analyze_hiring(
         clauses.append("status = ?")
         params.append(status)
     rows = conn.execute(
-        f"SELECT title, department, city, platform, status, first_seen, jd_text FROM job_postings WHERE {' AND '.join(clauses)} ORDER BY first_seen DESC, id LIMIT 80",
+        f"SELECT title, department, city, platform, status, first_seen, jd_text FROM visible_job_postings WHERE {' AND '.join(clauses)} ORDER BY first_seen DESC, id LIMIT 80",
         params,
     ).fetchall()
     postings = [dict(r) for r in rows]

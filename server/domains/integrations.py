@@ -24,7 +24,7 @@ TABLES = {
     "links": "SELECT id, brand_id, product_id, dimension, channel, platform, url, label, status, last_collect_at, last_status FROM links ORDER BY updated_at DESC",
     "sources": "SELECT id, name, category, tier, vendor, status, needs_credentials, cadence, last_collect_at, last_status, item_count, notes FROM sources ORDER BY tier, name",
     "sales_metrics": "SELECT id, brand_id, product_id, link_id, snapshot_date, channel, platform, price, currency, review_count, rating, rank, units_est, revenue_est, estimate_confidence, in_stock, asin, title, change_score, source FROM sales_metrics ORDER BY snapshot_date DESC, created_at DESC",
-    "job_postings": "SELECT id, brand_id, link_id, platform, external_id, url, title, department, city, jd_text, status, posted_at, refreshed_at, first_seen, last_seen, closed_at, last_change_at FROM job_postings ORDER BY COALESCE(last_seen, first_seen) DESC",
+    "job_postings": "SELECT id, brand_id, link_id, platform, external_id, url, title, department, city, jd_text, status, posted_at, refreshed_at, first_seen, last_seen, closed_at, last_change_at FROM visible_job_postings ORDER BY COALESCE(last_seen, first_seen) DESC",
     "web_monitors": "SELECT id, brand_id, product_id, name, url, scope, status, cadence, check_interval_minutes, snapshot_interval_minutes, last_check_at, last_snapshot_at, last_change_score, last_change_summary, last_status FROM web_monitors ORDER BY updated_at DESC",
     "web_snapshots": "SELECT id, monitor_id, brand_id, snapshot_date, url, final_url, title, change_score, visual_change_score, visual_change_ratio, summary, created_at FROM web_snapshots ORDER BY snapshot_date DESC, created_at DESC",
     # Supporting tables make the read-only bridge useful for deeper analysis
@@ -44,7 +44,7 @@ TABLES = {
     "voc_actions": "SELECT * FROM voc_actions ORDER BY updated_at DESC",
     "publications": "SELECT * FROM publications ORDER BY updated_at DESC",
     "capture_jobs": "SELECT * FROM capture_jobs ORDER BY created_at DESC",
-    "job_snapshots": "SELECT * FROM job_snapshots ORDER BY snapshot_date DESC",
+    "job_snapshots": "SELECT * FROM visible_job_snapshots ORDER BY snapshot_date DESC",
     "linkedin_profiles": "SELECT * FROM linkedin_profiles ORDER BY updated_at DESC",
     "linkedin_profile_snapshots": "SELECT * FROM linkedin_profile_snapshots ORDER BY snapshot_date DESC",
     "community_post_summaries": "SELECT * FROM community_post_summaries ORDER BY created_at DESC",
@@ -125,7 +125,8 @@ def overview(conn: sqlite3.Connection = Depends(get_conn)):
     counts: dict[str, int] = {}
     for table in ("brands", "products", "records", "sales_metrics", "job_postings", "web_monitors", "web_snapshots"):
         try:
-            counts[table] = int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
+            source = "visible_job_postings" if table == "job_postings" else table
+            counts[table] = int(conn.execute(f"SELECT COUNT(*) AS count FROM {source}").fetchone()["count"])
         except sqlite3.OperationalError:
             counts[table] = 0
     latest = conn.execute("SELECT MAX(occurred_at) AS value FROM records").fetchone()["value"]

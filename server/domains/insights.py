@@ -175,7 +175,7 @@ def _marketing_module(conn: sqlite3.Connection, brand_id: str, start: str, end: 
 
 def _hiring_module(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
     postings = [dict(row) for row in conn.execute(
-        "SELECT first_seen, closed_at, status, department, updated_at FROM job_postings WHERE brand_id = ?", (brand_id,)
+        "SELECT first_seen, closed_at, status, department, updated_at FROM visible_job_postings WHERE brand_id = ?", (brand_id,)
     )]
     in_window = [row for row in postings if start <= (row.get("first_seen") or "")[:10] <= end or start <= (row.get("closed_at") or "")[:10] <= end or ((row.get("first_seen") or "")[:10] <= end and not row.get("closed_at"))]
     open_rows = [row for row in in_window if row.get("status") != "closed"]
@@ -272,7 +272,7 @@ def _yesterday(conn: sqlite3.Connection, brand_id: str, end: str) -> dict:
     focus = _safe_date(end) - timedelta(days=1)
     day = focus.isoformat()
     snapshot = _brand_snapshot(conn, brand_id, day, day)
-    jobs = conn.execute("SELECT COUNT(*) AS c FROM job_postings WHERE brand_id = ? AND substr(first_seen,1,10) = ?", (brand_id, day)).fetchone()["c"]
+    jobs = conn.execute("SELECT COUNT(*) AS c FROM visible_job_postings WHERE brand_id = ? AND substr(first_seen,1,10) = ?", (brand_id, day)).fetchone()["c"]
     return {"date": day, "has_data": bool(snapshot["records_total"] or snapshot["sales_revenue"] or jobs or snapshot["web_changes"]), "records_total": snapshot["records_total"], "voc_negative": snapshot["voc_negative"], "marketing_total": snapshot["marketing_total"], "sales_revenue": snapshot["sales_revenue"], "sales_units": snapshot["sales_units"], "hiring_released": jobs, "web_changes": snapshot["web_changes"]}
 
 

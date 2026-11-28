@@ -541,6 +541,12 @@ CREATE TABLE IF NOT EXISTS job_snapshots (
   created_at TEXT NOT NULL
 );
 
+CREATE VIEW IF NOT EXISTS visible_job_postings AS
+SELECT * FROM job_postings WHERE status != 'unverified';
+
+CREATE VIEW IF NOT EXISTS visible_job_snapshots AS
+SELECT * FROM job_snapshots WHERE status IS NOT 'blocked';
+
 -- LinkedIn employee roster for a target company (brand).
 CREATE TABLE IF NOT EXISTS linkedin_profiles (
   id TEXT PRIMARY KEY,
@@ -835,6 +841,79 @@ def init_db() -> None:
         _backfill_brand_ids(conn)
         _repair_legacy_sentiment_false_positives(conn)
         _cleanup_fake_boss_login_postings(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        _repair_linkedin_login_postings(conn)
+
+
+def _repair_linkedin_login_postings(conn: sqlite3.Connection) -> None:
+    """Keep login captures for diagnostics, out of job history and reporting."""
+    key = "migration.linkedin_login_postings.v1"
+    if conn.execute("SELECT 1 FROM settings WHERE key = ?", (key,)).fetchone():
+        return
+    from .connectors.hiring.linkedin import parse_linkedin_job_title
+
+    for posting in conn.execute("SELECT id, title, jd_text FROM job_postings WHERE platform = 'linkedin'"):
+        broken = bool(posting["title"] and not parse_linkedin_job_title(posting["title"])[0])
+        history = conn.execute(
+            "SELECT id, title, city, status, is_open, changes_json, created_at FROM job_snapshots "
+            "WHERE posting_id = ? ORDER BY snapshot_date DESC, created_at DESC",
+            (posting["id"],),
+        ).fetchall()
+        title = city = status = closed_at = last_change = None
+        prior_title = prior_city = prior_status = None
+        touched = False
+        for snap in history:
+            name, location = parse_linkedin_job_title(snap["title"])
+            try:
+                changes = json.loads(snap["changes_json"] or "[]")
+            except (TypeError, ValueError):
+                changes = []
+            if not isinstance(changes, list):
+                changes = []
+            fields = {c["field"]: c for c in changes if isinstance(c, dict) and isinstance(c.get("field"), str)}
+            previous = fields.get("title", {}).get("from")
+            previous_title, previous_city = parse_linkedin_job_title(previous if isinstance(previous, str) else "")
+            if snap["title"] and not name:
+                conn.execute("UPDATE job_snapshots SET status = 'blocked' WHERE id = ?", (snap["id"],))
+                touched = True
+                # A same-day recapture may have replaced the only good snapshot.
+                # Its previous title can still survive in the recorded difference.
+                if previous_title and not prior_title:
+                    prior_title, prior_city = previous_title, previous_city
+                    prior_open = fields.get("is_open", {}).get("from", snap["is_open"])
+                    if prior_open in (0, 1):
+                        prior_status = "open" if prior_open else "closed"
+                continue
+            if not title and name:
+                title, city = name, snap["city"] or location
+                status = snap["status"] or ("closed" if snap["is_open"] == 0 else "open")
+                closed_at = snap["created_at"] if status == "closed" else None
+            if isinstance(previous, str) and previous.strip() and not previous_title:
+                # This comparison used the login page as its baseline.
+                conn.execute("UPDATE job_snapshots SET changes_json = '[]', change_score = 0 WHERE id = ?", (snap["id"],))
+                touched = True
+            elif fields and not last_change:
+                last_change = snap["created_at"]
+        if broken:
+            if not title:
+                title, city, status = prior_title, prior_city, prior_status
+            jd = posting["jd_text"] or ""
+            if (not parse_linkedin_job_title(jd)[0] or any(marker in jd.casefold() for marker in
+                    ("by clicking continue to join or sign in", "password (6+ characters)", "log in or sign up"))):
+                jd = ""
+            conn.execute(
+                """UPDATE job_postings SET title = ?, city = COALESCE(NULLIF(?, ''), city),
+                   status = ?, closed_at = CASE WHEN ? = 'closed' THEN COALESCE(closed_at, ?) END,
+                   jd_text = ?, jd_hash = CASE WHEN ? = '' THEN NULL ELSE jd_hash END,
+                   config_json = json_remove(CASE WHEN json_valid(config_json) THEN config_json ELSE '{}' END, '$.fingerprint'),
+                   last_change_at = ?, last_status = 'blocked', last_error = 'LinkedIn 返回登录页。', updated_at = ?
+                   WHERE id = ?""",
+                (title or "", city, status or "unverified", status, closed_at, jd, jd, last_change, utc_now(), posting["id"]),
+            )
+        elif touched:
+            conn.execute("UPDATE job_postings SET last_change_at = ?, updated_at = ? WHERE id = ?",
+                         (last_change, utc_now(), posting["id"]))
+    conn.execute("INSERT INTO settings (key, value, updated_at) VALUES (?, 'done', ?)", (key, utc_now()))
 
 
 def _cleanup_fake_boss_login_postings(conn: sqlite3.Connection) -> None:

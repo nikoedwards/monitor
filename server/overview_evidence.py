@@ -159,7 +159,7 @@ def build_overview_evidence(conn, brand_id, payload, *, record_sources=None):
     queries = {
         "sales": ("SELECT * FROM sales_metrics WHERE brand_id = ? AND snapshot_date BETWEEN ? AND ? ORDER BY snapshot_date DESC, created_at DESC", "snapshot_date"),
         "web": ("SELECT * FROM web_snapshots WHERE brand_id = ? AND substr(snapshot_date,1,10) BETWEEN ? AND ? ORDER BY snapshot_date DESC", "snapshot_date"),
-        "hiring": ("SELECT * FROM job_postings WHERE brand_id = ? AND substr(first_seen,1,10) <= ? AND (closed_at IS NULL OR closed_at = '' OR substr(closed_at,1,10) >= ?) ORDER BY first_seen DESC", "first_seen"),
+        "hiring": ("SELECT * FROM visible_job_postings WHERE brand_id = ? AND substr(first_seen,1,10) <= ? AND (closed_at IS NULL OR closed_at = '' OR substr(closed_at,1,10) >= ?) ORDER BY first_seen DESC", "first_seen"),
         "ads": ("SELECT * FROM ad_entities WHERE brand_id = ? AND substr(first_seen_at,1,10) <= ? AND substr(COALESCE(stopped_at,last_seen_at),1,10) >= ? ORDER BY first_seen_at DESC", "first_seen_at"),
     }
     for source, (sql, time_field) in queries.items():

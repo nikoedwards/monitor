@@ -19,6 +19,7 @@ from . import pick_people_provider, pick_provider
 from .base import JobRef, JobSnapshot, ProfileRef, ProfileSnapshot
 from .boss import _LOGIN_MARKERS as _BOSS_LOGIN_MARKERS
 from .boss import _LOGIN_PATH_MARKERS as _BOSS_LOGIN_PATH_MARKERS
+from .linkedin import linkedin_login_page, parse_linkedin_job_title
 
 
 _BROWSER_CAPTURE_LABEL = {
@@ -78,8 +79,8 @@ def _upsert_posting(conn: sqlite3.Connection, link: dict, ref: JobRef) -> str:
                 title = COALESCE(NULLIF(?, ''), title),
                 department = COALESCE(NULLIF(?, ''), department),
                 city = COALESCE(NULLIF(?, ''), city),
-                status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,
-                closed_at = CASE WHEN status = 'closed' THEN NULL ELSE closed_at END,
+                status = CASE WHEN status = 'closed' AND platform != 'linkedin' THEN 'open' ELSE status END,
+                closed_at = CASE WHEN status = 'closed' AND platform != 'linkedin' THEN NULL ELSE closed_at END,
                 last_seen = ?, updated_at = ?
             WHERE id = ?
             """,
@@ -94,12 +95,14 @@ def _upsert_posting(conn: sqlite3.Connection, link: dict, ref: JobRef) -> str:
         INSERT INTO job_postings (id, brand_id, link_id, platform, external_id, url, canonical_url,
             title, department, city, jd_text, jd_hash, status, posted_at, first_seen, last_seen,
             config_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, '{}', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
         """,
         (
             posting_id, link["brand_id"], link["id"], _link_platform(link), ext, ref.url, canon,
             clean_text(ref.title), clean_text(ref.department), clean_text(ref.city),
-            ref.jd_text or "", _jd_hash(ref.jd_text or ""), ref.posted_at or None, now, now, now, now,
+            ref.jd_text or "", _jd_hash(ref.jd_text or ""),
+            "unverified" if _link_platform(link) == "linkedin" and not ref.title else "open",
+            ref.posted_at or None, now, now, now, now,
         ),
     )
     return posting_id
@@ -161,7 +164,7 @@ def _record_snapshot(conn: sqlite3.Connection, posting: dict, snap: JobSnapshot)
 
     config["fingerprint"] = new_fp
     last_change_at = now if changes else posting.get("last_change_at")
-    closed_at = now if snap.is_open is False else posting.get("closed_at")
+    closed_at = (posting.get("closed_at") or now) if snap.is_open is False else None
     conn.execute(
         """
         UPDATE job_postings
@@ -339,6 +342,8 @@ def ingest_browser_hiring_capture(
 
     if not valid_host(source_url):
         raise ValueError("当前页面域名与所选招聘平台不匹配。")
+    if platform == "linkedin" and linkedin_login_page(source_url, source_title):
+        page_status, page_error, jobs = "blocked", "LinkedIn 返回登录页，本次未采集职位。", []
     if platform == "boss" and (
         any(marker in urlparse(source_url).path.lower() for marker in _BOSS_LOGIN_PATH_MARKERS)
         or any(marker.lower() in source_title.lower() for marker in _BOSS_LOGIN_MARKERS)
@@ -378,6 +383,20 @@ def ingest_browser_hiring_capture(
         if not external_id:
             summary["errors"] += 1
             continue
+        if platform == "linkedin":
+            raw_title = clean_text(item.get("title"))
+            title, city = parse_linkedin_job_title(raw_title)
+            if not raw_title and item.get("is_open") is False:
+                known = conn.execute(
+                    "SELECT title FROM visible_job_postings WHERE link_id = ? AND (external_id = ? OR canonical_url = ?)",
+                    (link["id"], external_id, canonical_url(url)),
+                ).fetchone()
+                if known:
+                    title, city = parse_linkedin_job_title(known["title"])
+            if not title:
+                summary["errors"] += 1
+                continue
+            item = {**item, "title": title, "city": item.get("city") or city}
         if platform == "boss":
             text = f"{item.get('title') or ''}\n{item.get('jd_text') or ''}".lower()
             invalid_content = any(marker.lower() in text for marker in (
@@ -455,6 +474,7 @@ def ingest_browser_hiring_capture(
 def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | None = None) -> dict:
     """Expand configured hiring links into postings and capture monitored postings."""
     summary = {"links": 0, "postings": 0, "captured": 0, "changed": 0, "closed": 0, "errors": 0}
+    discovered: list[str] = []
 
     link_clause = "AND id = ?" if link_id else ""
     link_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
@@ -492,6 +512,7 @@ def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | 
             pid = _upsert_posting(conn, link, ref)
             seen_ids.append(pid)
             summary["postings"] += 1
+        discovered.extend(seen_ids)
 
         # Disappearance = "招到人/岗位下线": close open postings not seen this run.
         if real_expansion and seen_ids:
@@ -507,18 +528,23 @@ def run_hiring_collection(conn: sqlite3.Connection, brand: dict, link_id: str | 
                 _close_posting(conn, dict(post_row))
                 summary["closed"] += 1
 
+        reason = getattr(provider, "last_error", "")
+        link_status = "ok" if refs else ("blocked" if reason else "partial")
         conn.execute(
-            "UPDATE links SET last_status = ?, last_error = '', last_collect_at = ?, updated_at = ? WHERE id = ?",
-            ("ok", utc_now(), utc_now(), link["id"]),
+            "UPDATE links SET last_status = ?, last_error = ?, last_collect_at = ?, updated_at = ? WHERE id = ?",
+            (link_status, "" if refs else reason or "未发现可读取的职位。", utc_now(), utc_now(), link["id"]),
         )
 
     # Capture monitored open postings (fetch full JD + status).
     listing_clause = "AND link_id = ?" if link_id else ""
-    listing_params: tuple = (brand["id"], link_id) if link_id else (brand["id"],)
+    listing_params = [brand["id"], json.dumps(discovered)]
+    if link_id:
+        listing_params.append(link_id)
     postings = conn.execute(
         f"""
         SELECT * FROM job_postings
-        WHERE brand_id = ? AND status = 'open' {listing_clause}
+        WHERE brand_id = ? AND (status = 'open' OR (status = 'closed' AND id IN (SELECT value FROM json_each(?))) OR
+              (status = 'unverified' AND platform = 'linkedin' AND url LIKE '%/jobs/view/%')) {listing_clause}
         ORDER BY last_seen DESC LIMIT 200
         """,
         listing_params,

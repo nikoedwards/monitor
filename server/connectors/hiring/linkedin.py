@@ -27,7 +27,7 @@ from .base import (
 )
 
 _JOB_VIEW_RE = re.compile(r"/jobs/view/[0-9]+", re.I)
-_JOB_ID_RE = re.compile(r"/jobs/view/([0-9]+)", re.I)
+_JOB_ID_RE = re.compile(r"/jobs/view/(?:[^/?#]+-)?([0-9]+)/?$", re.I)
 _PROFILE_RE = re.compile(r"/in/[^\"'<>\s?/]+", re.I)
 _PROFILE_URL_RE = re.compile(
     r"(?:https?:\\?/\\?/(?:www\\?\.)?linkedin\\?\.com)?\\?/in\\?/([A-Za-z0-9][A-Za-z0-9%_-]{1,120})",
@@ -38,26 +38,36 @@ _AUTHWALL_MARKERS = (
     "by clicking continue to join or sign in",
     "password (6+ characters)",
 )
-_AUTHWALL_PATHS = ("/uas/login", "/login", "/signup", "/checkpoint/")
+_AUTHWALL_PATHS = ("/uas/login", "/login", "/signup", "/checkpoint/", "/authwall")
 
 
-_JOB_TITLE_SUFFIX_RE = re.compile(r"\s+\|\s+LinkedIn(?:\s+Jobs|求人)?\s*$", re.I)
+_JOB_TITLE_SUFFIX_RE = re.compile(r"\s*\|\s*LinkedIn(?:\s+Jobs|求人)?\s*$", re.I)
 _JOB_LOCATION_SEPARATOR_RE = re.compile(r"\s+[—–]\s+")
-_LOGIN_TITLE_RE = re.compile(r"LinkedIn(?::\s*(?:log in|sign in)(?: or sign up)?)?", re.I)
+_LOGIN_TITLE_RE = re.compile(
+    r"(?:LinkedIn\s*[:：]\s*)?(?:(?:log in|sign in)(?: to LinkedIn| or sign up)?|"
+    r"sign up|join LinkedIn|LinkedIn Login,? Sign in|登录领英|登录或注册|security verification)", re.I,
+)
 
 
 def parse_linkedin_job_title(value: str | None) -> tuple[str, str]:
     """Read the posting location only from LinkedIn's title suffix."""
     title = clean_text(unescape(value or ""))
-    if not title or _LOGIN_TITLE_RE.fullmatch(title):
-        return "", ""
+    parts = [title]
     suffix = _JOB_TITLE_SUFFIX_RE.search(title)
-    if suffix is None:
-        return title, ""
-    parts = _JOB_LOCATION_SEPARATOR_RE.split(title[:suffix.start()])
-    if len(parts) == 1:
-        return parts[0], ""
-    return " — ".join(parts[:-1]), parts[-1]
+    if suffix:
+        parts = _JOB_LOCATION_SEPARATOR_RE.split(title[:suffix.start()])
+    name = " — ".join(parts[:-1]) if len(parts) > 1 else parts[0]
+    if not name or name.casefold() == "linkedin" or _LOGIN_TITLE_RE.fullmatch(name):
+        return "", ""
+    return name, parts[-1] if len(parts) > 1 else ""
+
+
+def linkedin_login_page(url: str, title: str) -> bool:
+    path = urlparse(url or "").path.lower().rstrip("/") + "/"
+    if any(path.startswith(marker.rstrip("/") + "/") for marker in _AUTHWALL_PATHS):
+        return True
+    page_title = clean_text(title)
+    return bool(page_title and page_title.casefold() != "linkedin" and not parse_linkedin_job_title(page_title)[0])
 
 
 class _ProfileAnchorParser(HTMLParser):
@@ -125,16 +135,21 @@ class LinkedInJobsProvider(HiringProvider):
     def __init__(self, cookie: str = "", max_jobs: int = 40) -> None:
         self.cookie = cookie or ""
         self.max_jobs = max(1, max_jobs)
+        self.last_error = ""
 
     def expand(self, conn: sqlite3.Connection, link: dict) -> list[JobRef]:
         url = link.get("url") or ""
+        self.last_error = ""
         try:
             start = normalize_url(url)
         except ValueError:
             return []
         page = render(start, self.cookie)
+        if linkedin_login_page(page.final_url, page.title):
+            self.last_error = "LinkedIn 返回登录页，未取得有效职位信息。"
+            return []
         if page.status != "ok" or not (page.html or page.anchors):
-            return [JobRef(url=start, external_id=_job_id(start))]
+            return []
 
         seen: set[str] = set()
         found: list[JobRef] = []
@@ -150,7 +165,7 @@ class LinkedInJobsProvider(HiringProvider):
             found.append(JobRef(url=absolute, external_id=_job_id(absolute)))
             if len(found) >= self.max_jobs:
                 break
-        if not found:
+        if not found and _job_id(start):
             return [JobRef(url=start, external_id=_job_id(start))]
         return found
 
@@ -158,8 +173,10 @@ class LinkedInJobsProvider(HiringProvider):
         url = posting.get("url") or ""
         snap = JobSnapshot()
         page = render(url, self.cookie)
+        if linkedin_login_page(getattr(page, "final_url", ""), page.title):
+            return JobSnapshot(status="blocked", error="LinkedIn 返回登录页，未取得有效职位信息。")
         if page.status != "ok":
-            snap.status = "blocked" if not page.html else "partial"
+            snap.status = "blocked"
             snap.error = page.error or "无法读取 LinkedIn 职位页（需登录 Cookie 或被反爬拦截）。"
             return snap
         text = page.text or ""
@@ -168,17 +185,14 @@ class LinkedInJobsProvider(HiringProvider):
             if title:
                 snap.title = snap.title or title
                 snap.city = snap.city or city
-        if not snap.title and any((page.meta.get("og:title"), page.title)):
+        if not snap.title:
             snap.status = "blocked"
-            snap.error = "LinkedIn 返回登录页，未取得有效职位信息。"
+            snap.error = "LinkedIn 页面缺少有效职位名称。"
             return snap
         snap.jd_text = _extract_jd(text)
         lowered = text.lower()
         snap.is_open = not any(m in lowered for m in _CLOSED_MARKERS)
-        if not snap.jd_text and not snap.title:
-            snap.status = "blocked"
-            snap.error = "页面无有效内容，可能被反爬拦截。"
-        elif not snap.jd_text:
+        if not snap.jd_text:
             snap.status = "partial"
         snap.raw = {"final_url": page.final_url, "method": page.method, "provider": self.name}
         return snap
@@ -286,7 +300,7 @@ class LinkedInPeopleProvider(PeopleProvider):
 
 
 def _job_id(url: str) -> str:
-    match = _JOB_ID_RE.search(url or "")
+    match = _JOB_ID_RE.search(urlparse(url or "").path)
     return match.group(1) if match else ""
 
 

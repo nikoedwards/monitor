@@ -27,7 +27,7 @@ def _data_revision(conn: sqlite3.Connection, brand_id: str) -> str:
     """Return a cheap revision token so same-day imports invalidate the cache."""
     sources = (
         ("records", "occurred_at", "created_at"),
-        ("job_postings", "first_seen", "updated_at"),
+        ("visible_job_postings", "first_seen", "updated_at"),
         ("sales_metrics", "snapshot_date", "created_at"),
         ("web_snapshots", "snapshot_date", "created_at"),
         ("ad_entities", "first_seen_at", "updated_at"),
@@ -76,7 +76,7 @@ def history_window(conn: sqlite3.Connection, brand_id: str) -> tuple[str, str]:
     """Return the bounded earliest/latest observed dates across Monitor sources."""
     ranges = [
         _table_history(conn, "records", "occurred_at", brand_id),
-        _table_history(conn, "job_postings", "first_seen", brand_id),
+        _table_history(conn, "visible_job_postings", "first_seen", brand_id),
         _table_history(conn, "sales_metrics", "snapshot_date", brand_id),
         _table_history(conn, "web_snapshots", "snapshot_date", brand_id),
         _table_history(conn, "ad_entities", "first_seen_at", brand_id),
@@ -161,7 +161,7 @@ def _quick_strategic_response(conn: sqlite3.Connection, brand_id: str, start: st
     brand = conn.execute("SELECT name FROM brands WHERE id = ?", (brand_id,)).fetchone()
     counts: dict[str, int] = {}
     queries = {
-        "hiring": ("job_postings", "first_seen"),
+        "hiring": ("visible_job_postings", "first_seen"),
         "voice": ("records", "occurred_at"),
         "sales": ("sales_metrics", "snapshot_date"),
         "web": ("web_snapshots", "snapshot_date"),
