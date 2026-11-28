@@ -1,38 +1,10 @@
-import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw, Sparkles } from "lucide-react";
-import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary, type SummaryFilters } from "../lib/hooks";
+import { useMarketingOverviewSummary, useOverviewSummary, useInsightsSummary, type ExecutiveSummaryResult, type SummaryFilters } from "../lib/hooks";
 import { rangeLabel, type TimeRange } from "../lib/timeRange";
 import { fmtNum } from "../lib/format";
-import { dailyPersistentTaskKey, persistTaskValue, PERSISTENT_TASK_EVENT, readPersistentTask } from "../lib/persistentTask";
 import { AsyncProgress, Badge, Button } from "./ui";
 import { OverviewResearch } from "./OverviewResearch";
 import { VoiceSummaryOpening } from "./VoiceSummaryOpening";
-
-function usePersistentSummary<T>(key: string, fetched: T | undefined): T | null {
-  const [cached, setCached] = useState<T | null>(() => {
-    const task = readPersistentTask<T>(key);
-    return task?.status === "success" ? task.data || null : null;
-  });
-
-  useEffect(() => {
-    const sync = () => {
-      const task = readPersistentTask<T>(key);
-      setCached(task?.status === "success" ? task.data || null : null);
-    };
-    sync();
-    window.addEventListener(PERSISTENT_TASK_EVENT, sync);
-    return () => window.removeEventListener(PERSISTENT_TASK_EVENT, sync);
-  }, [key]);
-
-  useEffect(() => {
-    if (fetched !== undefined) {
-      persistTaskValue(key, fetched);
-      setCached(fetched);
-    }
-  }, [fetched, key]);
-
-  return cached;
-}
 
 function highlightSource(highlight: string, representative: any[] = []) {
   const text = String(highlight || "").toLocaleLowerCase();
@@ -83,13 +55,10 @@ export function ExecutiveSmartSummary({ brandId, range, marketBrandIds, preview 
   );
 }
 
-export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string; range: TimeRange }) {
-  const [refreshKey, setRefreshKey] = useState(0);
-  const summary = useMarketingOverviewSummary(brandId, range, refreshKey);
-  const cacheKey = dailyPersistentTaskKey("marketing-summary", [brandId, range.start_date, range.end_date]);
-  const cached = usePersistentSummary<any>(cacheKey, summary.data);
-  const data = cached || summary.data;
-  const pending = summary.isFetching || readPersistentTask<any>(cacheKey)?.status === "pending";
+export function ExecutiveMarketingSummary({ brandId, range, preview }: { brandId?: string; range: TimeRange; preview?: ExecutiveSummaryResult }) {
+  const summary = useMarketingOverviewSummary(brandId, range);
+  const data = summary.data || preview;
+  const pending = summary.pending || summary.takingLonger;
 
   return (
     <div className="space-y-4">
@@ -99,7 +68,7 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
           <span className="text-[12px]" style={{ color: "var(--mute)" }}>覆盖 {rangeLabel(range)} · 自动更新</span>
         </div>
         <div className="flex flex-col items-end">
-          <Button size="sm" onClick={() => setRefreshKey((value) => value + 1)} disabled={pending}>
+          <Button size="sm" onClick={summary.refresh} disabled={pending}>
             <RefreshCw size={13} className={pending ? "animate-spin" : ""} />
             {pending ? "更新中…" : "刷新总结"}
           </Button>
@@ -107,8 +76,8 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
         </div>
       </div>
 
-      {summary.isLoading && <p className="text-[13px]" style={{ color: "var(--mute)" }}>正在整理营销数据…</p>}
-      {summary.isError && <p className="text-[13px]" style={{ color: "var(--danger)" }}>营销总结暂时不可用，下面的指标仍可正常查看。</p>}
+      {summary.error && <p role="alert" className="text-[13px]" style={{ color: "var(--danger)" }}>{summary.error}</p>}
+      {summary.data?.summary_notice && <p role="status" className="text-[13px]" style={{ color: "var(--mute)" }}>{summary.data.summary_notice}</p>}
       {data && (
         <>
           <div className="grid grid-cols-1 lg:grid-cols-[1.35fr_1fr] gap-4">
@@ -126,7 +95,7 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
               <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>需要关注</div>
               {Array.isArray(data.focus) && data.focus.length ? (
                 <div className="space-y-2">
-                  {data.focus.map((item: any, index: number) => (
+                  {data.focus.map((item, index) => (
                     <div key={index} className="flex gap-2 text-[13px]" style={{ color: "var(--body)" }}>
                       <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{ color: "var(--warning)" }} />
                       <span><b style={{ color: "var(--ink)" }}>{item.action}</b>{item.reason ? `：${item.reason}` : ""}</span>
@@ -140,7 +109,7 @@ export function ExecutiveMarketingSummary({ brandId, range }: { brandId?: string
             <div>
               <div className="text-[13px] font-medium mb-2" style={{ color: "var(--ink)" }}>关键发现</div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {data.highlights.map((item: any, index: number) => (
+                {data.highlights.map((item, index) => (
                   <div key={index} className="p-2.5 rounded-md" style={{ background: "var(--bg-soft-2)" }}>
                     <div className="flex items-center gap-2">
                       <Badge tone={item.severity === "high" ? "negative" : item.severity === "medium" ? "warning" : "neutral"}>{item.domain || "营销"}</Badge>

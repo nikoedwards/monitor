@@ -107,7 +107,7 @@ def _strategic_insights(items, feedback, context):
             "implication": implication,
             "cross_domain": any(context[i].get("independence_group") != "derived" for i in other_ids),
             "evidence": [
-                {"id": i, "title": catalog[i]["title"], "url": catalog[i]["url"],
+                {"id": catalog[i]["id"], "title": catalog[i]["title"], "url": catalog[i]["url"],
                  "domain": context[i]["domain"] if i in context else "voice"}
                 for i in voice_ids[:2] + other_ids
             ],
@@ -122,7 +122,8 @@ def summarize_voice(conn, records: list[dict], start: str, end: str, packet: dic
         and not _is_marketing_content(record)
     ]
     sample = _diverse(candidates, SAMPLE_LIMIT, lambda r: (r.get("sentiment"), r.get("voice_source")))
-    feedback = {item["id"]: item for item in map(_record_evidence, sample)}
+    feedback = {f"F{i}": _record_evidence(record) for i, record in enumerate(sample, 1)}
+    feedback_ids = {item["id"] for item in feedback.values()}
     counts = Counter(r.get("sentiment") for r in candidates)
     counts = {"positive": counts["positive"], "negative": counts["negative"],
               "neutral": len(candidates) - counts["positive"] - counts["negative"]}
@@ -138,10 +139,11 @@ def summarize_voice(conn, records: list[dict], start: str, end: str, packet: dic
     ][:8]
     available = [
         item for item in [*campaigns, *packet.get("evidence", [])]
-        if item["id"] not in feedback and item["domain"] != "voice"
+        if item["id"] not in feedback_ids and item["domain"] != "voice"
         and start <= str(item.get("at") or "")[:10] <= end
     ]
-    context = {item["id"]: item for item in _diverse(available, 48, lambda item: item["domain"])}
+    selected = {item["id"]: item for item in _diverse(available, 48, lambda item: item["domain"])}
+    context = {f"C{i}": item for i, item in enumerate(selected.values(), 1)}
     parsed = {}
     if feedback:
         inputs = {
@@ -149,10 +151,10 @@ def summarize_voice(conn, records: list[dict], start: str, end: str, packet: dic
             "range": {"start": start, "end": end},
             "sentiment_counts": counts,
             "feedback_in_scope": len(candidates),
-            "feedback": [{k: v for k, v in item.items() if k != "url"} for item in feedback.values()],
-            "context": [_compact({k: v for k, v in item.items() if k != "url"}, 6) for item in context.values()],
+            "feedback": [{**{k: v for k, v in item.items() if k != "url"}, "id": ref} for ref, item in feedback.items()],
+            "context": [{**_compact({k: v for k, v in item.items() if k != "url"}, 6), "id": ref} for ref, item in context.items()],
         }
-        prompt = INSTRUCTIONS + "\n分析资料：\n" + json.dumps(inputs, ensure_ascii=False)
+        prompt = INSTRUCTIONS + "\n分析资料：\n" + json.dumps(inputs, ensure_ascii=False, separators=(",", ":"))
         try:
             parsed = ai._extract_json(ai.call_llm(ai.get_config(conn), SYSTEM, prompt, timeout=VOICE_MODEL_TIMEOUT_SECONDS))
         except json.JSONDecodeError as exc:

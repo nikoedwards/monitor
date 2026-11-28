@@ -1,6 +1,8 @@
 import json
 import sqlite3
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -54,6 +56,29 @@ class CommunitySummaryTests(unittest.TestCase):
         self.assertEqual(1, llm.call_count)
         self.assertIn("仍无法停止", result["summaries"]["siri"]["summary"])
 
+    def test_independent_batches_overlap_and_shared_records_reuse_generation(self):
+        entered = {rid: threading.Event() for rid in ("siri", "case")}
+        release = threading.Event()
+
+        def model(cfg, system, prompt):
+            rid = json.loads(prompt)["posts"][0]["id"]
+            entered[rid].set()
+            self.assertTrue(release.wait(3))
+            return self.response(**{rid: "用户希望调整录音设置"})
+
+        with patch("server.community_summaries.ai.call_llm", side_effect=model) as upstream, ThreadPoolExecutor(3) as pool:
+            first = pool.submit(summarize_community_records, self.conn, ["siri"])
+            try:
+                self.assertTrue(entered["siri"].wait(2))
+                duplicate = pool.submit(summarize_community_records, self.conn, ["siri"])
+                other = pool.submit(summarize_community_records, self.conn, ["case"])
+                self.assertTrue(entered["case"].wait(2))
+            finally:
+                release.set()
+            self.assertEqual(first.result(2), duplicate.result(2))
+            self.assertEqual("ready", other.result(2)["summaries"]["case"]["status"])
+            self.assertEqual(2, upstream.call_count)
+
     def test_voice_feedback_caches_headline_and_summary_for_non_community_records(self):
         insert_record(self.conn, {"id": "review", "dimension": "voc", "channel": "app",
                                   "body": "Après un retour depuis une note, tous mes filtres disparaissent."})
@@ -73,10 +98,12 @@ class CommunitySummaryTests(unittest.TestCase):
         malformed = self.response(siri="用户希望开始录音")
         with patch(
             "server.community_summaries.ai.call_llm",
-            side_effect=[malformed, self.response(siri="用户希望通过 Siri 控制录音"), self.response(case="用户反馈磁吸保护壳在折叠手机时会卡住")],
+            side_effect=[malformed, self.response(case="用户反馈磁吸保护壳在折叠手机时会卡住")],
         ) as llm:
             result = summarize_community_records(self.conn, ["siri", "case"])
-        self.assertEqual(3, llm.call_count)
+        self.assertEqual(2, llm.call_count)
+        self.assertEqual(["case"], [p["id"] for p in json.loads(llm.call_args.args[2])["posts"]])
+        self.assertEqual("用户希望开始录音。", result["summaries"]["siri"]["summary"])
         self.assertEqual("ready", result["summaries"]["siri"]["status"])
         self.assertEqual("ready", result["summaries"]["case"]["status"])
         self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM community_post_summaries").fetchone()[0])

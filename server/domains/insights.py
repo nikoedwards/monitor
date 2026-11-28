@@ -174,7 +174,9 @@ def _marketing_module(conn: sqlite3.Connection, brand_id: str, start: str, end: 
 
 
 def _hiring_module(conn: sqlite3.Connection, brand_id: str, start: str, end: str) -> dict:
-    postings = [dict(row) for row in conn.execute("SELECT * FROM job_postings WHERE brand_id = ?", (brand_id,)).fetchall()]
+    postings = [dict(row) for row in conn.execute(
+        "SELECT first_seen, closed_at, status, department, updated_at FROM job_postings WHERE brand_id = ?", (brand_id,)
+    )]
     in_window = [row for row in postings if start <= (row.get("first_seen") or "")[:10] <= end or start <= (row.get("closed_at") or "")[:10] <= end or ((row.get("first_seen") or "")[:10] <= end and not row.get("closed_at"))]
     open_rows = [row for row in in_window if row.get("status") != "closed"]
     released = sum(1 for row in postings if start <= (row.get("first_seen") or "")[:10] <= end)
@@ -187,11 +189,24 @@ def _hiring_module(conn: sqlite3.Connection, brand_id: str, start: str, end: str
             except ValueError:
                 pass
     departments = Counter((row.get("department") or "未分类").strip() or "未分类" for row in open_rows)
+    releases, closures, active_changes = Counter(), Counter(), Counter()
+    for row in postings:
+        first = (row["first_seen"] or "")[:10]
+        last = (row["closed_at"] or "")[:10]
+        releases[first] += 1
+        closures[last] += 1
+        begins = max(start, first)
+        if not last or last > begins:
+            active_changes[begins] += 1
+            if last:
+                active_changes[last] -= 1
     trend = []
+    active = 0
     cursor, end_day = _safe_date(start), _safe_date(end)
     while cursor <= end_day:
         day = cursor.isoformat()
-        trend.append({"date": day, "released": sum(1 for row in postings if (row.get("first_seen") or "")[:10] == day), "closed": sum(1 for row in postings if (row.get("closed_at") or "")[:10] == day), "active": sum(1 for row in postings if (row.get("first_seen") or "")[:10] <= day and (not row.get("closed_at") or (row.get("closed_at") or "")[:10] > day))})
+        active += active_changes[day]
+        trend.append({"date": day, "released": releases[day], "closed": closures[day], "active": active})
         cursor += timedelta(days=1)
     links = conn.execute("SELECT COUNT(*) AS c FROM links WHERE brand_id = ? AND dimension = 'hiring'", (brand_id,)).fetchone()["c"]
     return {"status": _status(bool(postings), bool(links)), "total_open": len(open_rows), "total_postings": len(in_window), "released_in_window": released, "closed_in_window": closed, "avg_open_days": round(sum(durations) / len(durations), 1) if durations else None, "by_department": [{"department": key, "count": value} for key, value in departments.most_common(8)], "trend": trend, "last_data_at": max([(row.get("updated_at") or row.get("first_seen") or "") for row in postings], default=None)}

@@ -129,7 +129,7 @@ class OverviewEvidenceTests(unittest.TestCase):
     def test_llm_receives_packet_and_returns_validated_results(self, llm, _config):
         packet = self.packet()
         packet["evidence"][0]["detail"] += "岗位详情" * 300 + "END_OF_LONG_EXCERPT"
-        llm.return_value = json.dumps({"summary": "可能准备推广", "insights": [self.insight("job", "ad")]})
+        llm.return_value = json.dumps({"summary": "可能准备推广", "insights": [self.insight("E1", "E2", "E999")]})
         result = ai.summarize_overview(self.conn, packet)
         self.assertEqual(1, len(result["insights"]))
         self.assertIn("两个独立来源组", llm.call_args.args[2])

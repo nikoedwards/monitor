@@ -36,20 +36,23 @@ class VoiceInsightsTests(unittest.TestCase):
                 self.assertGreater(timeout, 90)
                 data = json.loads(prompt.split("\n分析资料：\n", 1)[1])
                 self.assertEqual({"positive": 1, "negative": 2, "neutral": 0}, data["sentiment_counts"])
-                self.assertEqual({"record:a", "record:b", "record:c"}, {r["id"] for r in data["feedback"]})
-                self.assertIn("web:w", {r["id"] for r in data["context"]})
+                feedback_refs = {r["detail"]: r["id"] for r in data["feedback"]}
+                self.assertEqual(3, len(feedback_refs))
+                a = feedback_refs["The speaker labels disappeared."]
+                b = feedback_refs["I can no longer see who spoke."]
+                web = next(r["id"] for r in data["context"] if r["title"] == "Nova 产品页")
                 return json.dumps({
                     "summary": "用户情绪偏负向。",
                     "positive": "用户肯定转录准确度。",
                     "negative": "用户不满说话人标签消失。",
                     "frequent_issues": [
-                        {"title": "说话人标签消失", "detail": "复查录音时无法区分发言人。", "evidence_ids": ["record:a", "record:b", "invented"]},
-                        {"title": "只有一条反馈", "evidence_ids": ["record:a", "record:a", "web:w"]},
+                        {"title": "说话人标签消失", "detail": "复查录音时无法区分发言人。", "evidence_ids": [a, b, "invented"]},
+                        {"title": "只有一条反馈", "evidence_ids": [a, a, web]},
                     ],
                     "strategic_insights": [
                         {"title": "核对功能承诺", "observation": "官网仍在宣传说话人标签。", "implication": "验证新版体验与宣传是否一致。",
-                         "evidence_ids": ["record:a", "web:w", "invented"]},
-                        {"title": "缺少反馈", "observation": "官网提到了标签。", "implication": "需要调查。", "evidence_ids": ["web:w"]},
+                         "evidence_ids": [a, web, "invented"]},
+                        {"title": "缺少反馈", "observation": "官网提到了标签。", "implication": "需要调查。", "evidence_ids": [web]},
                     ],
                 })
 

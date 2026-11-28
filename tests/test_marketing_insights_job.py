@@ -9,6 +9,7 @@ from unittest.mock import patch
 from server import ai
 from server.db import SCHEMA
 from server.domains.insights import insights_summary
+from server.domains.content import marketing_overview_summary
 
 
 class MarketingInsightsJobTests(unittest.TestCase):
@@ -85,6 +86,38 @@ class MarketingInsightsJobTests(unittest.TestCase):
         self.assertEqual("failed", failed["generation"]["status"])
         self.assertEqual("Previous model summary", failed["summary"])
         self.assertTrue(failed["cached"])
+
+    def test_marketing_overview_refresh_survives_reload_and_reuses_one_job(self):
+        options = dict(brand_id="plaud", start_date="2026-10-24", end_date="2026-11-22", conn=self.conn, background=True)
+        data = {"range": {}, "coverage": {}, "yesterday": {}, "signals": [], "modules": {}}
+        release = threading.Event()
+
+        def model(worker, evidence):
+            self.assertTrue(release.wait(3))
+            return {"summary": "updated"}
+
+        ai.put_cached_summary(self.conn, "marketing-overview:plaud|2026-10-24|2026-11-22", {"mode": "ai", "summary": "previous"})
+        with patch("server.domains.content._marketing_overview_payload", return_value=data) as prepare, \
+             patch.object(ai, "summarize_marketing_overview", side_effect=model) as upstream:
+            try:
+                self.assertEqual("previous", marketing_overview_summary(**options)["summary"])
+                prepare.assert_not_called()
+                marketing_overview_summary(**options, refresh=True)
+                for flags in ({}, {"refresh": True}, {"cached_only": True}):
+                    running = marketing_overview_summary(**options, **flags)
+                    self.assertEqual("running", running["generation"]["status"])
+                    self.assertEqual("previous", running["summary"])
+            finally:
+                release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                state = marketing_overview_summary(**options, cached_only=True)
+                if state["generation"]["status"] != "running":
+                    break
+                time.sleep(0.01)
+            self.assertEqual("updated", state["summary"])
+            prepare.assert_called_once()
+            upstream.assert_called_once()
 
 
 if __name__ == "__main__":

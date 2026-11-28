@@ -411,7 +411,7 @@ function MarketingOverview({
 
       <Card>
         <SectionTitle title="智能总结" subtitle="自动整理所选周期的营销结论，并单独提示昨日发生的变化" />
-        <ExecutiveMarketingSummary brandId={brandId} range={range} />
+        <ExecutiveMarketingSummary brandId={brandId} range={range} preview={data?.summary_preview} />
       </Card>
 
       {overview.isLoading && <Spinner />}

@@ -93,9 +93,10 @@ class CompareSummaryTests(unittest.TestCase):
     @patch("server.compare_summary.ai.is_configured", return_value=True)
     @patch("server.compare_summary.ai.call_llm")
     def test_generation_cache_refresh_and_data_changes(self, llm, configured):
-        llm.return_value = json.dumps(self.result())
+        llm.return_value = json.dumps({"summary": "本期变化", "industry_changes": [self.finding("E1", "E2")]})
         first = compare_summary(self.conn, "2026-10-01", "2026-10-30")
         self.assertEqual("ai", first["mode"])
+        self.assertEqual({"a:record:a-now", "b:record:b-now"}, set(first["industry_changes"][0]["evidence_ids"]))
         self.assertEqual(3, len(first["brands"]))
         self.assertTrue(compare_summary(self.conn, "2026-10-01", "2026-10-30")["cached"])
         self.assertEqual(1, llm.call_count)
@@ -196,8 +197,9 @@ class CompareSummaryTests(unittest.TestCase):
         prompt, selected = build_compare_prompt(packet)
         self.assertLess(len(json.dumps({"prompt": prompt}, ensure_ascii=False).encode()), 30_000)
         self.assertEqual({"a", "b"}, {ref["brand_id"] for ref in selected})
-        self.assertIn("a:record:a-now", prompt)
-        self.assertIn("b:record:b-now", prompt)
+        self.assertTrue({"a:record:a-now", "b:record:b-now"} <= {ref["id"] for ref in selected})
+        model_evidence = json.loads(prompt.split("输入数据：\n")[1])["evidence"]
+        self.assertEqual([f"E{i}" for i in range(1, len(selected) + 1)], [ref["id"] for ref in model_evidence])
         self.assertNotIn("raw_description", prompt)
         self.assertEqual("长" * 1200, next(ref["detail"] for ref in selected if ref["id"] == "b:long-0"))
 
@@ -208,7 +210,7 @@ class CompareSummaryTests(unittest.TestCase):
             self.record(f"extra-{index}", "a", "2026-10-24", "本期用户反馈" * 30)
         upstream_timeout = ai.LlmError("model timeout")
         upstream_timeout.__cause__ = TimeoutError()
-        llm.side_effect = [upstream_timeout, json.dumps(self.result())]
+        llm.side_effect = [upstream_timeout, json.dumps({"summary": "本期变化", "industry_changes": [self.finding("E1", "E2")]})]
         with patch("server.compare_summary.RETRY_EVIDENCE_BUDGET", 1400):
             result = compare_summary(self.conn, "2026-10-01", "2026-10-30")
         first, second = llm.call_args_list

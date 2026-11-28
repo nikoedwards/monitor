@@ -6,11 +6,14 @@ import json
 import re
 import sqlite3
 import threading
+from collections import Counter
+from contextlib import contextmanager
 
 from . import ai
 from .util import utc_now
 
-_GENERATION_LOCK = threading.Lock()
+_generation_condition = threading.Condition()
+_active_batches: list[set[str]] = []
 _VERSION = "feedback-zh-v2"
 SYSTEM = (
     "你负责将用户反馈、评论、社群帖子或回复概括为一句简体中文。"
@@ -30,28 +33,35 @@ def source_hash(record: dict) -> str:
     return hashlib.sha256(json.dumps(evidence, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+class _InvalidSummary(ai.LlmError):
+    pass
+
+
 def _generate(cfg: dict, records: list[dict]) -> dict[str, dict]:
     items = [{"id": r["id"], "title": (r.get("title") or "")[:500],
               "body": (r.get("body") or "")[:6000]} for r in records]
-    text = ai.call_llm(cfg, SYSTEM, json.dumps({"posts": items}, ensure_ascii=False))
+    text = ai.call_llm(cfg, SYSTEM, json.dumps({"posts": items}, ensure_ascii=False, separators=(",", ":")))
     try:
         parsed = ai._extract_json(text)
         values = parsed.get("summaries") if isinstance(parsed, dict) else None
         if not isinstance(values, list):
             raise ValueError("Missing summaries")
         expected = {record["id"] for record in records}
+        if any(not isinstance(item, dict) or not isinstance(item.get("id"), str) or item["id"] not in expected for item in values):
+            raise ValueError("Unexpected summary identity")
+        counts = Counter(item["id"] for item in values)
         summaries = {}
         for item in values:
-            if not isinstance(item, dict) or item.get("id") not in expected or item["id"] in summaries:
-                raise ValueError("Invalid summary identity")
+            if counts[item["id"]] != 1:
+                continue
             summary = item.get("summary")
             if not isinstance(summary, str):
-                raise ValueError("Missing summary text")
+                continue
             summary = summary.strip()
             if (not summary or len(summary) > 120 or "\n" in summary or "\r" in summary
                     or not re.search(r"[\u4e00-\u9fff]", summary)
                     or re.search(r"[。！？!?].+", summary.rstrip("。！？!?"))):
-                raise ValueError("Expected one Chinese sentence")
+                continue
             headline = item.get("headline")
             if isinstance(headline, str):
                 headline = headline.strip()
@@ -63,37 +73,34 @@ def _generate(cfg: dict, records: list[dict]) -> dict[str, dict]:
                 "summary": summary if summary.endswith(("。", "！", "？")) else summary + "。",
                 "headline": headline,
             }
-        if summaries.keys() != expected:
-            raise ValueError("Incomplete summaries")
         return summaries
-    except ai.LlmError as exc:
-        # A malformed JSON response is a response-format failure, rather than
-        # a transport/configuration failure.  Keep a stable error message so a
-        # multi-record request can be recovered one record at a time below.
-        raise ai.LlmError("中文摘要格式不正确，请重试。") from exc
-    except (ValueError, TypeError, KeyError) as exc:
-        raise ai.LlmError("中文摘要格式不正确，请重试。") from exc
+    except (ai.LlmError, ValueError, TypeError, KeyError) as exc:
+        raise _InvalidSummary("中文摘要格式不正确，请重试。") from exc
 
 
 def _generate_with_recovery(cfg: dict, records: list[dict]) -> dict[str, dict]:
     """Generate a batch, recovering valid records when the batch is malformed.
 
     LLMs occasionally omit one item or add an extra sentence in a JSON batch.
-    Retrying each item keeps one bad response from hiding otherwise valid
-    summaries. Network and provider errors are still returned immediately.
+    Keep each unambiguous validated item and retry only its missing peers.
     """
     try:
-        return _generate(cfg, records)
-    except ai.LlmError as exc:
-        if len(records) <= 1 or str(exc) != "中文摘要格式不正确，请重试。":
+        recovered = _generate(cfg, records)
+    except _InvalidSummary:
+        if len(records) <= 1:
             raise
-
-    recovered: dict[str, dict] = {}
-    for record in records:
-        try:
-            recovered.update(_generate(cfg, [record]))
-        except ai.LlmError:
-            continue
+        recovered = {}
+    if len(records) > 1:
+        for record in records:
+            if record["id"] not in recovered:
+                try:
+                    recovered.update(_generate(cfg, [record]))
+                except _InvalidSummary:
+                    continue
+                except ai.LlmError:
+                    if not recovered:
+                        raise
+                    break
     if not recovered:
         raise ai.LlmError("中文摘要格式不正确，请重试。")
     return recovered
@@ -117,6 +124,21 @@ def cached_summaries(conn: sqlite3.Connection, records: list[dict], *, voice: bo
     return ready
 
 
+@contextmanager
+def _reserve_batch(ids: set[str]):
+    with _generation_condition:
+        _generation_condition.wait_for(
+            lambda: len(_active_batches) < 2 and all(ids.isdisjoint(batch) for batch in _active_batches)
+        )
+        _active_batches.append(ids)
+    try:
+        yield
+    finally:
+        with _generation_condition:
+            _active_batches.remove(ids)
+            _generation_condition.notify_all()
+
+
 def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str], *, voice: bool = False) -> dict:
     ids = list(dict.fromkeys(record_ids))
     if not ids:
@@ -132,10 +154,14 @@ def summarize_community_records(conn: sqlite3.Connection, record_ids: list[str],
         f"SELECT id, title, body FROM records WHERE {scope} AND id IN ({placeholders})", ids
     ).fetchall()}
     result = {rid: {"status": "unavailable", "summary": None} for rid in ids}
-    # Serialize generation and re-read the persistent cache so simultaneous
-    # viewers reuse the first response instead of paying for duplicate calls.
-    with _GENERATION_LOCK:
-        result.update(cached_summaries(conn, list(records.values()), voice=voice))
+    ready = cached_summaries(conn, list(records.values()), voice=voice)
+    result.update(ready)
+    missing = records.keys() - ready.keys()
+    if not missing:
+        return {"summaries": result}
+    # Another viewer may have completed an overlapping record while we waited.
+    with _reserve_batch(missing):
+        result.update(cached_summaries(conn, [records[rid] for rid in missing], voice=voice))
         pending = []
         for rid in ids:
             record = records.get(rid)

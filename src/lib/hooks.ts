@@ -26,7 +26,7 @@ import {
   type MarketingAdsSummary,
 } from "./api";
 import { rangeParams, type TimeRange } from "./timeRange";
-import { dailyPersistentTaskKey, persistTaskError, persistTaskPending, persistTaskValue, persistentTaskKey, PERSISTENT_TASK_PENDING_TTL_MS, readPersistentTask, usePersistentTaskMutation } from "./persistentTask";
+import { persistentTaskKey, usePersistentTaskMutation } from "./persistentTask";
 
 // ---------------------------------------------------------------- brands
 export function useBrands() {
@@ -139,22 +139,35 @@ export function useOverview(brandId?: string, range?: TimeRange, marketBrandIds?
   });
 }
 
-type OverviewSummaryResponse = {
+export type ExecutiveSummaryResult = {
   mode?: "ai" | "fallback";
   summary?: string;
   summary_notice?: string;
+  yesterday?: { date?: string };
+  range?: { end?: string };
+  yesterday_summary?: string;
+  highlights?: { domain?: string; severity?: string; title?: string; detail?: string }[];
+  focus?: { action?: string; reason?: string }[];
+  caveats?: string[];
+};
+
+type OverviewSummaryResponse = ExecutiveSummaryResult & {
   generation?: { status: "running" | "completed" | "failed"; error?: string };
 };
 
 type OverviewSummaryState = OverviewSummaryResponse & { pollingSince?: number; takingLonger?: boolean };
 
 export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBrandIds?: string[]) {
+  return useExecutiveSummary("overview", brandId, range, marketBrandIds);
+}
+
+function useExecutiveSummary(scope: "overview" | "marketing/overview", brandId?: string, range?: TimeRange, marketBrandIds?: string[]) {
   const rp = rangeParams(range);
   const client = useQueryClient();
-  const queryKey = ["overview-summary-research-v3", brandId, rp, marketBrandIds];
+  const queryKey = [scope, "executive-summary", brandId, rp, marketBrandIds];
   const params = { brand_id: brandId, market_brand_ids: marketBrandIds?.join(","), ...rp, background: true };
   const read = (options: { refresh?: boolean; cached_only?: boolean } = {}) =>
-    api.get<OverviewSummaryResponse>(`/api/overview/summary${qs({ ...params, ...options })}`);
+    api.get<OverviewSummaryResponse>(`/api/${scope}/summary${qs({ ...params, ...options })}`);
   const query = useQuery<OverviewSummaryState>({
     queryKey,
     queryFn: async (): Promise<OverviewSummaryState> => {
@@ -162,7 +175,7 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
       const polling = previous?.generation?.status === "running";
       const next = await read({ cached_only: polling });
       if (polling && !next.generation) {
-        return { ...previous, ...next, generation: { status: "failed", error: "研判任务已中断，请点击「重新研判」重试。" } };
+        return { ...previous, ...next, generation: { status: "failed", error: "后台生成已中断，请重试。" } };
       }
       const pollingSince = next.generation?.status === "running" ? previous?.pollingSince ?? Date.now() : undefined;
       return { ...next, pollingSince, takingLonger: pollingSince != null && Date.now() - pollingSince >= 120_000 };
@@ -180,6 +193,8 @@ export function useOverviewSummary(brandId?: string, range?: TimeRange, marketBr
     gcTime: 24 * 60 * 60_000,
   });
   const refresh = useMutation({
+    mutationKey: queryKey,
+    onMutate: () => client.cancelQueries({ queryKey, exact: true }),
     mutationFn: () => read({ refresh: true }),
     onSuccess: (next) => client.setQueryData<OverviewSummaryState>(queryKey, (previous) => ({
       ...(next.mode ? next : { ...previous, ...next }),
@@ -396,28 +411,8 @@ export function useMarketingOverview(brandId?: string, range?: TimeRange) {
   });
 }
 
-export function useMarketingOverviewSummary(brandId?: string, range?: TimeRange, refreshKey = 0) {
-  const rp = rangeParams(range);
-  const storageKey = dailyPersistentTaskKey("marketing-summary", [brandId, rp.start_date, rp.end_date]);
-  const stored = readPersistentTask<any>(storageKey);
-  const activeTask = stored?.status === "pending" && Date.now() - stored.updatedAt < PERSISTENT_TASK_PENDING_TTL_MS;
-  return useQuery({
-    queryKey: ["marketing-overview-summary", brandId, rp, refreshKey],
-    queryFn: async () => {
-      persistTaskPending(storageKey);
-      try {
-        const data = await api.get<any>(`/api/marketing/overview/summary${qs({ brand_id: brandId, refresh: refreshKey > 0, ...rp })}`);
-        persistTaskValue(storageKey, data);
-        return data;
-      } catch (error) {
-        persistTaskError(storageKey, error);
-        throw error;
-      }
-    },
-    enabled: !!brandId && (!activeTask || refreshKey > 0),
-    staleTime: 10 * 60_000,
-    gcTime: 24 * 60 * 60_000,
-  });
+export function useMarketingOverviewSummary(brandId?: string, range?: TimeRange) {
+  return useExecutiveSummary("marketing/overview", brandId, range);
 }
 
 // Ad-library monitoring has a denormalized summary and a card-friendly list.

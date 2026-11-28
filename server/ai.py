@@ -12,13 +12,17 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
+from concurrent.futures import Future
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger("uvicorn.error.monitor.ai")
+_inflight_lock = threading.Lock()
+_inflight: dict[tuple, Future[str]] = {}
 
 DEFAULTS = {
     "llm_base_url": "https://agent-api.shuiditech.com/api/v1/messages",
@@ -140,6 +144,34 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeo
             "Content-Type": "application/json",
         },
     )
+    # Only overlapping, byte-identical requests share work. Explicit refreshes
+    # after completion still reach the provider, including after an error.
+    key = (request.full_url, tuple(request.header_items()), timeout, hashlib.sha256(request_body).digest())
+    with _inflight_lock:
+        future = _inflight.get(key)
+        if future is None:
+            future = Future()
+            _inflight[key] = future
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        logger.info("AI model request joined model=%s", payload["model"])
+        return future.result()
+    try:
+        result = _request_llm(request, payload["model"], timeout)
+    except BaseException as exc:
+        with _inflight_lock:
+            del _inflight[key]
+            future.set_exception(exc)
+        raise
+    with _inflight_lock:
+        del _inflight[key]
+        future.set_result(result)
+    return result
+
+
+def _request_llm(request: Request, model: str, timeout: float) -> str:
     started = time.monotonic()
     headers_ms = None
     outcome = "error"
@@ -157,7 +189,7 @@ def call_llm_content(cfg: dict, system: str, content: str | list[dict], *, timeo
         raise LlmError(f"调用大模型失败: {exc}") from exc
     finally:
         logger.info("AI model request model=%s outcome=%s request_bytes=%d headers_ms=%s elapsed_ms=%.1f",
-                    payload["model"], outcome, len(request_body), headers_ms, (time.monotonic() - started) * 1000)
+                    model, outcome, len(request.data), headers_ms, (time.monotonic() - started) * 1000)
 
     try:
         data = json.loads(raw.decode("utf-8", errors="replace"))
@@ -252,11 +284,11 @@ SUMMARY_PROMPT_TEMPLATE = """以下是某品牌在 {start} 至 {end} 期间、�
   "highlights": ["关键发现1", "关键发现2"],
   "themes": [{{"theme": "高频主题", "mentions": 0}}],
   "sentiment": {{"positive": 0, "neutral": 0, "negative": 0, "overall": "positive|neutral|negative"}},
-  "representative": [{{"title": "代表性内容标题", "url": "链接", "why": "为何有代表性"}}]
+  "representative": [{{"id": "输入记录编号", "title": "代表性内容标题", "why": "为何有代表性"}}]
 }}
 
 要求：
-- 完全基于给定记录，不要编造；representative 中的 url 必须来自上面的输入记录。
+- 完全基于给定记录，不要编造；representative 引用输入编号，链接由系统补全。
 - highlights 3-6 条，themes 取最高频的若干主题，representative 2-5 条。
 - 若数据稀少也要如实总结，不要夸大。"""
 
@@ -265,8 +297,9 @@ def summarize_records(conn: sqlite3.Connection, records: list[dict], context: di
     """Generate an LLM insight summary over a set of records (brand + range + channel)."""
     cfg = get_config(conn)
     items = []
-    for r in records[:120]:
+    for i, r in enumerate(records[:120], 1):
         items.append({
+            "id": f"R{i}",
             "title": (r.get("title") or "")[:160],
             "body": (r.get("body") or "")[:280],
             "type": r.get("data_type"),
@@ -281,7 +314,7 @@ def summarize_records(conn: sqlite3.Connection, records: list[dict], context: di
         channel=context.get("channel") or "全部",
         filters=json.dumps(context.get("filters") or {}, ensure_ascii=False, sort_keys=True),
         count=len(items),
-        records=json.dumps(items, ensure_ascii=False),
+        records=json.dumps(items, ensure_ascii=False, separators=(",", ":")),
     )
     text = call_llm(cfg, SUMMARY_SYSTEM, prompt)
     parsed = _extract_json(text)
@@ -293,6 +326,12 @@ def summarize_records(conn: sqlite3.Connection, records: list[dict], context: di
             parsed[key] = []
     if not isinstance(parsed.get("sentiment"), dict):
         parsed["sentiment"] = {}
+    urls = {item["id"]: item["url"] for item in items}
+    parsed["representative"] = [
+        {"title": item.get("title"), "why": item.get("why"), "url": urls[item["id"]]}
+        for item in parsed["representative"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"] in urls
+    ]
     return parsed
 
 
@@ -331,16 +370,28 @@ OVERVIEW_SUMMARY_PROMPT = """研究周期：{start} 至 {end}。请回答：这�
 }}"""
 
 
+def resolve_evidence_ids(parsed: dict, fields: tuple[str, ...], evidence: list[dict]) -> None:
+    """Restore the short prompt-local references before applying the usual evidence checks."""
+    ids = {f"E{i}": item["id"] for i, item in enumerate(evidence, 1)}
+    for field in fields:
+        cards = parsed.get(field)
+        if isinstance(cards, list):
+            for card in cards:
+                if isinstance(card, dict) and isinstance(card.get("evidence_ids"), list):
+                    card["evidence_ids"] = [ids[ref] for ref in card["evidence_ids"] if isinstance(ref, str) and ref in ids]
+
+
 def summarize_overview(conn: sqlite3.Connection, overview: dict, *, timeout: float = 240) -> dict:
     """Generate a cross-dimension executive summary from normalized evidence."""
     context = overview.get("range") or {}
     # Citations are resolved against the full evidence packet after generation.
     model_evidence = []
-    for item in overview["evidence"]:
+    for i, item in enumerate(overview["evidence"], 1):
         excerpt = {key: value for key, value in item.items()
                    if key != "url" and value not in (None, "", [], {})}
         if "detail" in excerpt:
             excerpt["detail"] = excerpt["detail"][:480]
+        excerpt["id"] = f"E{i}"
         model_evidence.append(excerpt)
     model_overview = {**overview, "evidence": model_evidence}
     prompt = OVERVIEW_SUMMARY_PROMPT.format(
@@ -363,6 +414,7 @@ def summarize_overview(conn: sqlite3.Connection, overview: dict, *, timeout: flo
     if not isinstance(parsed.get("caveats"), list):
         parsed["caveats"] = []
     from .overview_evidence import validate_overview_insights
+    resolve_evidence_ids(parsed, ("deep_insights", "priority_alerts"), overview["evidence"])
     return validate_overview_insights(parsed, overview)
 
 
@@ -397,7 +449,7 @@ def summarize_marketing_overview(conn: sqlite3.Connection, overview: dict) -> di
         start=context.get("start") or "",
         end=context.get("end") or "",
         focus_day=focus_day,
-        overview=json.dumps(overview, ensure_ascii=False),
+        overview=json.dumps(overview, ensure_ascii=False, separators=(",", ":")),
     )
     text = call_llm(get_config(conn), MARKETING_OVERVIEW_SUMMARY_SYSTEM, prompt)
     parsed = _extract_json(text)
@@ -466,8 +518,8 @@ def analyze_web_snapshots(conn: sqlite3.Connection, events: list[dict], context:
         start=context.get("start") or "",
         end=context.get("end") or "",
         monitor=context.get("monitor") or "全部网页监控",
-        stats=json.dumps(context.get("stats") or {}, ensure_ascii=False),
-        events=json.dumps(event_rows, ensure_ascii=False),
+        stats=json.dumps(context.get("stats") or {}, ensure_ascii=False, separators=(",", ":")),
+        events=json.dumps(event_rows, ensure_ascii=False, separators=(",", ":")),
     )
     content.append({"type": "text", "text": prompt})
     for index, event in enumerate(events[:6], start=1):
@@ -544,12 +596,12 @@ def automap_listings(
     products_text = json.dumps(
         [{"product_id": p["id"], "name": p.get("name"), "sku": p.get("sku") or "", "category": p.get("category") or ""} for p in products],
         ensure_ascii=False,
-        indent=2,
+        separators=(",", ":"),
     )
     listings_text = json.dumps(
         [{"listing_id": l["id"], "title": l.get("title") or "", "asin": l.get("asin") or "", "sku": l.get("sku") or "", "channel": l.get("channel") or ""} for l in listings],
         ensure_ascii=False,
-        indent=2,
+        separators=(",", ":"),
     )
     text = call_llm(cfg, MAP_SYSTEM, MAP_PROMPT_TEMPLATE.format(products=products_text, listings=listings_text))
     parsed = _extract_json(text)
@@ -633,7 +685,7 @@ def analyze_jd(conn: sqlite3.Connection, postings: list[dict], context: dict) ->
         end=context.get("end") or "",
         filters=json.dumps(context.get("filters") or {}, ensure_ascii=False, sort_keys=True),
         count=len(items),
-        postings=json.dumps(items, ensure_ascii=False),
+        postings=json.dumps(items, ensure_ascii=False, separators=(",", ":")),
     )
     text = call_llm(cfg, JD_SYSTEM, prompt, timeout=JD_ANALYSIS_TIMEOUT_SECONDS)
     try:
@@ -728,7 +780,7 @@ def estimate_hiring_org(conn: sqlite3.Connection, context: dict, inputs: dict, c
         brand=inputs["brand"],
         public_context=json.dumps(inputs["public_context"], ensure_ascii=False),
         start=context["start"], end=context["end"],
-        radar=json.dumps(radar, ensure_ascii=False),
+        radar=json.dumps(radar, ensure_ascii=False, separators=(",", ":")),
     )
     parsed = _extract_json(call_llm(cfg, ORG_ESTIMATE_SYSTEM, prompt))
     if not isinstance(parsed, dict):

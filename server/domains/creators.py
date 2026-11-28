@@ -516,6 +516,20 @@ def creators_report(
 ):
     brand = fetch_brand(conn, brand_id)
     product = _scope_product(conn, brand_id, product_id)
+    cache_key = (brand_id, product_id or "")
+    now = __import__("time").monotonic()
+    persistent_key = "creators-report:" + "|".join(cache_key)
+    if not refresh:
+        persistent = ai.get_cached_summary(conn, persistent_key)
+        if persistent and isinstance(persistent.get("report"), str):
+            _CREATOR_REPORT_CACHE[cache_key] = (now, persistent["report"])
+            return {"report": persistent["report"], "cached": True}
+    cached = _CREATOR_REPORT_CACHE.get(cache_key)
+    if not refresh and cached and now - cached[0] < _CREATOR_REPORT_TTL_SECONDS:
+        return {"report": cached[1], "cached": True}
+    if cached_only:
+        return {"cache_miss": True, "cached": False}
+
     rebuild_roster(conn, brand_id)
     rebuild_product_matches(conn, brand_id)
 
@@ -536,24 +550,10 @@ def creators_report(
     if not context["roster"] and not any(c["roster"] for c in context["competitors"]):
         raise HTTPException(status_code=400, detail="暂无红人数据，请先在数据源/红人页发起采集。")
 
-    cache_key = (brand_id, product_id or "")
-    now = __import__("time").monotonic()
-    persistent_key = "creators-report:" + "|".join(cache_key)
-    if not refresh:
-        persistent = ai.get_cached_summary(conn, persistent_key)
-        if persistent and isinstance(persistent.get("report"), str):
-            _CREATOR_REPORT_CACHE[cache_key] = (now, persistent["report"])
-            return {"report": persistent["report"], "cached": True}
-    cached = _CREATOR_REPORT_CACHE.get(cache_key)
-    if not refresh and cached and now - cached[0] < _CREATOR_REPORT_TTL_SECONDS:
-        return {"report": cached[1], "cached": True}
-    if cached_only:
-        return {"cache_miss": True, "cached": False}
-
     cfg = ai.get_config(conn)
     if not cfg.get("llm_api_key"):
         raise HTTPException(status_code=400, detail="尚未配置大模型 Token，请先在设置中填写。")
-    prompt = "结构化数据如下(JSON)：\n" + json.dumps(context, ensure_ascii=False, indent=2)
+    prompt = "结构化数据如下(JSON)：\n" + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     try:
         report = ai.call_llm(cfg, _REPORT_SYSTEM, prompt)
     except ai.LlmError as exc:

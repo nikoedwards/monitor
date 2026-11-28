@@ -144,6 +144,7 @@ def build_compare_prompt(packet, *, evidence_budget=MODEL_EVIDENCE_BUDGET):
         if size > remaining:
             continue
         remaining -= size
+        compact["id"] = f"E{len(selected) + 1}"
         model_evidence.append(compact)
         selected.append(item)
     model_packet = {"range": packet["range"], "brands": brands, "evidence": model_evidence}
@@ -244,6 +245,7 @@ def compare_summary(conn, start, end, *, refresh=False, cached_only=False):
             prompt, selected = build_compare_prompt(packet, evidence_budget=RETRY_EVIDENCE_BUDGET)
             brief = "本次只返回证据最强的两条判断和一句行业主线，其他列表使用空数组。\n"
             parsed = _request_compare_result(cfg, brief + prompt, timeout=120)
+        ai.resolve_evidence_ids(parsed, ("industry_changes", "brand_moves", "opportunities", "risks"), selected)
         result = {**validate_compare_result(parsed, {**packet, "evidence": selected}), **metadata, "mode": "ai",
                   "evidence_count": len(selected), "generated_at": datetime.now(timezone.utc).isoformat()}
     except (ai.LlmError, ValueError, TypeError) as exc:

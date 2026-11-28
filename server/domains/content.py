@@ -12,6 +12,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import ai
+from ..analysis_jobs import analysis_job
 from ..community_summaries import cached_summaries, summarize_community_records
 from ..connectors.publications import enrich_publication, publication_domain_hint, publication_needs_network
 from ..nlp import VOC_ACTION_STATUSES, team_for_records
@@ -1162,9 +1163,11 @@ def _marketing_ads_snapshot(conn: sqlite3.Connection, brand_id: str, start: str,
         trend = [dict(row) for row in daily_rows]
     except sqlite3.OperationalError:
         trend = []
+    starts = Counter((row.get("first_seen_at") or "")[:10] for row in ads)
+    stops = Counter((row.get("stopped_at") or "")[:10] for row in ads)
     for point in trend:
-        point["new"] = sum(1 for row in ads if (row.get("first_seen_at") or "")[:10] == point.get("date"))
-        point["stopped"] = sum(1 for row in ads if (row.get("stopped_at") or "")[:10] == point.get("date"))
+        point["new"] = starts[point["date"]]
+        point["stopped"] = stops[point["date"]]
     return {
         "status": _marketing_status(conn, brand_id, bool(ads)),
         "total_ads": len(ads), "active_ads": len(active), "new_ads": new_ads,
@@ -1236,15 +1239,32 @@ def _marketing_fallback_summary(payload: dict) -> dict:
 @router.get("/marketing/overview")
 def marketing_overview(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, conn: sqlite3.Connection = Depends(get_conn)):
     start, end = resolve_window(days, start_date, end_date)
-    return _marketing_overview_payload(conn, brand_id, start, end)
+    payload = _marketing_overview_payload(conn, brand_id, start, end)
+    payload["summary_preview"] = {**_marketing_fallback_summary(payload), "caveats": []}
+    return payload
 
 
 @router.get("/marketing/overview/summary")
-def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None, refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn)):
+def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | None = None, end_date: str | None = None,
+                              refresh: bool = False, conn: sqlite3.Connection = Depends(get_conn),
+                              background: bool = False, cached_only: bool = False):
     start, end = resolve_window(days, start_date, end_date)
     cache_key = (brand_id, start, end)
     now = time.monotonic()
     persistent_key = "marketing-overview:" + "|".join(cache_key)
+    if background:
+        previous = ai.get_cached_summary(conn, persistent_key)
+
+        def generate(worker):
+            result = _generate_marketing_summary(worker, brand_id, start, end, cache_key, persistent_key)
+            if result.get("summary_notice") and previous and previous.get("mode") == "ai":
+                return {**previous, "cached": True, "summary_notice": "本次更新未完成，当前显示上次成功的营销总结。"}
+            return result
+
+        job = analysis_job(conn, persistent_key, generate, start=not cached_only and (refresh or previous is None),
+                           refresh=refresh or previous is None)
+        snapshot = {**previous, "cached": True} if previous is not None else {}
+        return {**snapshot, **job}
     if not refresh:
         persistent = ai.get_cached_summary(conn, persistent_key)
         if persistent is not None:
@@ -1253,6 +1273,12 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
     cached = _MARKETING_OVERVIEW_CACHE.get(cache_key)
     if not refresh and cached and now - cached[0] < _MARKETING_SUMMARY_TTL_SECONDS:
         return {**cached[1], "cached": True}
+    if cached_only:
+        return {}
+    return _generate_marketing_summary(conn, brand_id, start, end, cache_key, persistent_key)
+
+
+def _generate_marketing_summary(conn, brand_id, start, end, cache_key, persistent_key):
     with ai.measure_preparation("marketing-overview"):
         payload = _marketing_overview_payload(conn, brand_id, start, end)
     transient_failure = False
@@ -1266,8 +1292,9 @@ def marketing_overview_summary(brand_id: str, days: int = 30, start_date: str | 
             transient_failure = True
             result = _marketing_fallback_summary(payload)
             result["caveats"] = ["大模型暂时不可用，当前展示确定性系统速览。"]
+            result["summary_notice"] = "大模型暂时不可用，可点击「刷新总结」重试。"
     result.update({"range": payload["range"], "cached": False})
     if not transient_failure:
-        _MARKETING_OVERVIEW_CACHE[cache_key] = (now, result)
+        _MARKETING_OVERVIEW_CACHE[cache_key] = (time.monotonic(), result)
         ai.put_cached_summary(conn, persistent_key, result)
     return result
